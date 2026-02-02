@@ -1353,7 +1353,10 @@ class AST(ABC):
                 if self.peek().id in ("double_constant", "float_constant"):
                     self.raiseError("Expected an integer constant")
 
-                cnst = self.createChild(ULongConstant)
+                try:
+                    cnst = self.createChild(ULongConstant)
+                except:
+                    self.raiseError("Expected a null pointer")
                 if int(cnst.constValue) != 0:
                     self.raiseError("Cannot initialize pointer with a non-pointer value")
             return [cnst]
@@ -2663,6 +2666,7 @@ class StaticEvalType(enum.Enum):
     INTEGER = enum.auto()
     FLOAT = enum.auto()
     POINTER = enum.auto()
+    VARIABLE = enum.auto()
 
 @dataclass
 class StaticEvalValue:
@@ -2671,23 +2675,18 @@ class StaticEvalValue:
     pointerOffset: int = 0
 
     def getIntegerValue(self) -> int:
-        if self.valType == StaticEvalType.POINTER:
-            raise ValueError()
+        if self.valType in (StaticEvalType.POINTER, StaticEvalType.VARIABLE):
+            raise ValueError(f"Cannot get integer value from {self}")
         try:
             return int(self.value)
         except:
             return int(float(self.value))
 
     def getFloatValue(self) -> float:
-        if self.valType == StaticEvalType.POINTER:
-            raise ValueError()
+        if self.valType in (StaticEvalType.POINTER, StaticEvalType.VARIABLE):
+            raise ValueError(f"Cannot get float value from {self}")
         return float(self.value)
     
-    def getPointerValue(self) -> str:
-        if self.valType != StaticEvalType.POINTER:
-            raise ValueError()
-        return self.value
-
 class Exp(AST):
     def __init__(self, tokens: list[Token], 
                  context: Context | None = None, parentAST: AST | None = None, *args) -> None:
@@ -3234,8 +3233,12 @@ class Variable(Exp):
         self.identifier: str = ctxVar.mangledName
 
     def staticEval(self) -> StaticEvalValue:
-        # TODO: For the moment, only constant implicit values and expressions are supported.
-        raise ValueError()
+        # ISO C99 6.7.8, identifiers with static storage duration must be initialized with a 
+        # constant expression. Section 6.6 specifies that no memory content must be read during 
+        # evaluations.
+        # For the moment, we'll return a "variable" type value which should be converted to a 
+        # "pointer" by an AddressOf expression.
+        return StaticEvalValue(StaticEvalType.VARIABLE, self.identifier)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3363,11 +3366,17 @@ class Cast(Exp):
                     if intValue & (1 << (castBitCount - 1)):
                         intValue -= (1 << castBitCount)
 
-                return StaticEvalValue(StaticEvalType.FLOAT, str(intValue))
-            else:
-                raise ValueError()
-        else:
-            raise ValueError("Cast pointers not implemented")
+                return StaticEvalValue(StaticEvalType.INTEGER, str(intValue))
+            
+        if isinstance(self.typeId, PointerDeclaratorType):
+            if self.inner.typeId.isInteger():
+                # Integer to pointer.
+                return StaticEvalValue(StaticEvalType.POINTER, "", innerValue.getIntegerValue())
+            if innerValue.valType == StaticEvalType.POINTER:
+                # Pointer from one type to another.
+                return innerValue
+
+        raise ValueError("Cast not implemented")
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3855,7 +3864,47 @@ class Binary(Exp):
         exp1Eval = self.exp1.staticEval()
         exp2Eval = self.exp2.staticEval()
 
-        if self.typeId.isDecimal():
+        # POINTER EVALUATIONS.
+        isExp1Pointer = exp1Eval.valType == StaticEvalType.POINTER
+        isExp2Pointer = exp2Eval.valType == StaticEvalType.POINTER
+
+        if self.binaryOperator == BinaryOperator.SUM:
+            if isExp1Pointer and not isExp2Pointer:
+                # Pointer sum: exp2 is long.
+                return StaticEvalValue(StaticEvalType.POINTER, 
+                                        exp1Eval.value, 
+                                        exp1Eval.pointerOffset + exp2Eval.getIntegerValue())
+
+            if isExp2Pointer and not isExp1Pointer:
+                # Pointer sum: exp1 is long.
+                return StaticEvalValue(StaticEvalType.POINTER, 
+                                        exp2Eval.value, 
+                                        exp2Eval.pointerOffset + exp1Eval.getIntegerValue())
+
+        if self.binaryOperator == BinaryOperator.SUBTRACT:
+            if isExp1Pointer and not isExp2Pointer:
+                # Pointer subtraction: exp2 is a long.
+                return StaticEvalValue(StaticEvalType.POINTER, 
+                                        exp1Eval.value, 
+                                        exp1Eval.pointerOffset - exp2Eval.getIntegerValue())
+
+            if isExp2Pointer and isExp1Pointer:
+                # Pointer subtraction: the result is a long. In this case, the base address of both
+                # must be the same.
+                if exp1Eval.value != exp2Eval.value:
+                    self.raiseError("Cannot subtract pointers, base addresses must be the same")
+                return StaticEvalValue(StaticEvalType.INTEGER, 
+                                        str(exp1Eval.pointerOffset - exp2Eval.pointerOffset)) 
+
+        if isExp1Pointer and isExp2Pointer and self.binaryOperator.isComparison():
+            if exp1Eval.value != exp2Eval.value:
+                self.raiseError("Cannot compare pointers with different base addresses")
+            # Compare with the indices.
+            exp1 = exp1Eval.pointerOffset
+            exp2 = exp2Eval.pointerOffset
+
+        # ARITHMETIC EVALUATIONS.
+        elif self.typeId.isDecimal():
             exp1 = exp1Eval.getFloatValue()
             exp2 = exp2Eval.getFloatValue()
         else:
@@ -4100,7 +4149,10 @@ class AddressOf(Exp):
         self.typeId = PointerDeclaratorType(self.inner.typeId, const=False)
     
     def staticEval(self) -> StaticEvalValue:
-        self.raiseError("Cannot evaluate an address during compilation")        
+        innerEval = self.inner.staticEval()
+        if innerEval.valType != StaticEvalType.VARIABLE:
+            self.raiseError("Expected a variable for the static evaluation")
+        return StaticEvalValue(StaticEvalType.POINTER, innerEval.value, innerEval.pointerOffset)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -4141,8 +4193,21 @@ class Subscript(Exp):
         self.typeId = self.pointer.typeId.declarator
 
     def staticEval(self) -> StaticEvalValue:
-        # TODO: To complete.
-        raise ValueError()
+        innerEval = self.pointer.staticEval()
+        indexEval = self.index.staticEval()
+
+        if innerEval.valType != StaticEvalType.VARIABLE:
+            self.raiseError("Expected a variable for the static evaluation")
+
+        try:
+            indexEvalInteger = indexEval.getIntegerValue()
+        except:
+            self.raiseError("Cannot evaluate the index")
+
+        # This is still a variable.
+        return StaticEvalValue(StaticEvalType.VARIABLE, 
+                               innerEval.value, 
+                               innerEval.pointerOffset + indexEvalInteger)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
