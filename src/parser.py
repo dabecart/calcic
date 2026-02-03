@@ -1347,18 +1347,27 @@ class AST(ABC):
                     initialization=strAST.toConstantsList()
                 )
                 
-                cnst = self.createChild(PointerInitializer, constantType, constantName)
+                cnst = self.createChild(PointerInitializer, constantType, constantName, 0)
             else:
-                # TODO: A pointer can only be initialized with 0 (null pointer).
-                if self.peek().id in ("double_constant", "float_constant"):
-                    self.raiseError("Expected an integer constant")
+                # Static evaluation, parse the initializer.
+                initializer = self.createChild(Initializer, constantType)
+                constValues: list[StaticEvalValue] = initializer.staticEval()
+                if len(constValues) > 1:
+                    self.raiseError("Expected a single initializer")
 
-                try:
-                    cnst = self.createChild(ULongConstant)
-                except:
-                    self.raiseError("Expected a null pointer")
-                if int(cnst.constValue) != 0:
-                    self.raiseError("Cannot initialize pointer with a non-pointer value")
+                constVal = constValues[0]
+                if constVal.valType != StaticEvalType.POINTER:
+                    raise ValueError()
+
+                if constVal.value == "":
+                    # Integer has been converted into pointer.
+                    cnst = self.createChild(ULongConstant, constVal.pointerOffset)
+                else:
+                    # Another variable has been used to create this pointer.
+                    cnst = self.createChild(PointerInitializer, 
+                                            constantType, 
+                                            constVal.value, 
+                                            constVal.pointerOffset)
             return [cnst]
         
         elif isinstance(constantType, ArrayDeclaratorType):
@@ -2672,6 +2681,7 @@ class StaticEvalType(enum.Enum):
 class StaticEvalValue:
     valType: StaticEvalType
     value: str
+    # Byte offset from the base of the pointer.
     pointerOffset: int = 0
 
     def getIntegerValue(self) -> int:
@@ -3204,16 +3214,20 @@ class ZeroPaddingInitializer(Constant):
     
 # Used to initialize a pointer with the address of another static object.
 class PointerInitializer(Constant):
-    def parse(self, typeId: DeclaratorType, pointerName: str):
+    def parse(self, typeId: DeclaratorType, pointerName: str, byteOffset: int):
         self.typeId = typeId
         self.constValue = pointerName
+        self.offset = byteOffset
 
     def staticEval(self) -> StaticEvalValue:
         raise ValueError()
 
     def print(self, padding: int) -> str:
         pad = " " * padding
-        return f'{pad}PointerInit({self.constValue})\n'
+        if self.offset == 0:
+            return f'{pad}PointerInit({self.constValue})\n'
+        else:
+            return f'{pad}PointerInit({self.constValue} + {self.offset})\n'
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # END of constants are used to initialize static variables.
@@ -3373,7 +3387,7 @@ class Cast(Exp):
                 # Integer to pointer.
                 return StaticEvalValue(StaticEvalType.POINTER, "", innerValue.getIntegerValue())
             if innerValue.valType == StaticEvalType.POINTER:
-                # Pointer from one type to another.
+                # Pointer from one type to another. 
                 return innerValue
 
         raise ValueError("Cast not implemented")
@@ -3500,7 +3514,12 @@ class Unary(Exp):
                     return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
                 
             case UnaryOperator.NOT:
-                retVal = 0 if innerValue.getIntegerValue() else 1
+                if innerValue.valType == StaticEvalType.POINTER:
+                    # A pointer to a static variable is never null.
+                    retVal = 0
+                else:
+                    retVal = 0 if innerValue.getIntegerValue() else 1
+                
                 return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
 
             case _:
@@ -3870,31 +3889,49 @@ class Binary(Exp):
 
         if self.binaryOperator == BinaryOperator.SUM:
             if isExp1Pointer and not isExp2Pointer:
+                if not isinstance(self.exp1.typeId, PointerDeclaratorType):
+                    raise ValueError()
+                
                 # Pointer sum: exp2 is long.
+                index = exp2Eval.getIntegerValue()
                 return StaticEvalValue(StaticEvalType.POINTER, 
                                         exp1Eval.value, 
-                                        exp1Eval.pointerOffset + exp2Eval.getIntegerValue())
+                                        exp1Eval.pointerOffset + index * self.exp1.typeId.declarator.getByteSize())
 
             if isExp2Pointer and not isExp1Pointer:
+                if not isinstance(self.exp2.typeId, PointerDeclaratorType):
+                    raise ValueError()
+
                 # Pointer sum: exp1 is long.
+                index = exp1Eval.getIntegerValue()
                 return StaticEvalValue(StaticEvalType.POINTER, 
-                                        exp2Eval.value, 
-                                        exp2Eval.pointerOffset + exp1Eval.getIntegerValue())
+                                        exp2Eval.value,
+                                        exp2Eval.pointerOffset + index * self.exp2.typeId.declarator.getByteSize())
 
         if self.binaryOperator == BinaryOperator.SUBTRACT:
             if isExp1Pointer and not isExp2Pointer:
+                if not isinstance(self.exp1.typeId, PointerDeclaratorType):
+                    raise ValueError()
+                
                 # Pointer subtraction: exp2 is a long.
+                index = exp2Eval.getIntegerValue()
                 return StaticEvalValue(StaticEvalType.POINTER, 
                                         exp1Eval.value, 
-                                        exp1Eval.pointerOffset - exp2Eval.getIntegerValue())
+                                        exp1Eval.pointerOffset - index * self.exp1.typeId.declarator.getByteSize())
 
             if isExp2Pointer and isExp1Pointer:
+                if not isinstance(self.exp1.typeId, PointerDeclaratorType):
+                    raise ValueError()
+                
                 # Pointer subtraction: the result is a long. In this case, the base address of both
                 # must be the same.
+                # It's important to use the addresses and not the indices to calculate the resulting
+                # index. Subtracting indices does not generate the right index.
                 if exp1Eval.value != exp2Eval.value:
                     self.raiseError("Cannot subtract pointers, base addresses must be the same")
-                return StaticEvalValue(StaticEvalType.INTEGER, 
-                                        str(exp1Eval.pointerOffset - exp2Eval.pointerOffset)) 
+                
+                index = (exp1Eval.pointerOffset - exp2Eval.pointerOffset) // self.exp1.typeId.declarator.getByteSize()
+                return StaticEvalValue(StaticEvalType.INTEGER, str(index))
 
         if isExp1Pointer and isExp2Pointer and self.binaryOperator.isComparison():
             if exp1Eval.value != exp2Eval.value:
@@ -3905,11 +3942,17 @@ class Binary(Exp):
 
         # ARITHMETIC EVALUATIONS.
         elif self.typeId.isDecimal():
-            exp1 = exp1Eval.getFloatValue()
-            exp2 = exp2Eval.getFloatValue()
+            try:
+                exp1 = exp1Eval.getFloatValue()
+                exp2 = exp2Eval.getFloatValue()
+            except:
+                self.raiseError("Expressions must have constant value")
         else:
-            exp1 = exp1Eval.getIntegerValue()
-            exp2 = exp2Eval.getIntegerValue()
+            try:
+                exp1 = exp1Eval.getIntegerValue()
+                exp2 = exp2Eval.getIntegerValue()
+            except:
+                self.raiseError("Expressions must have constant value")
 
         if self.compoundBinary:
             self.raiseError("Cannot evaluate during compilation.")
@@ -4193,11 +4236,14 @@ class Subscript(Exp):
         self.typeId = self.pointer.typeId.declarator
 
     def staticEval(self) -> StaticEvalValue:
-        innerEval = self.pointer.staticEval()
-        indexEval = self.index.staticEval()
+        if not isinstance(self.pointer.typeId, PointerDeclaratorType):
+            raise ValueError()
 
-        if innerEval.valType != StaticEvalType.VARIABLE:
-            self.raiseError("Expected a variable for the static evaluation")
+        innerEval = self.pointer.staticEval()
+        if innerEval.valType != StaticEvalType.POINTER:
+            self.raiseError("Expression must have a constant value")
+
+        indexEval = self.index.staticEval()
 
         try:
             indexEvalInteger = indexEval.getIntegerValue()
@@ -4207,7 +4253,7 @@ class Subscript(Exp):
         # This is still a variable.
         return StaticEvalValue(StaticEvalType.VARIABLE, 
                                innerEval.value, 
-                               innerEval.pointerOffset + indexEvalInteger)
+                               innerEval.pointerOffset + indexEvalInteger * self.pointer.typeId.declarator.getByteSize())
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -4231,11 +4277,11 @@ class Dot(Exp):
         self.expect(".")
         self.member: str = self.expect("identifier").value
 
-        member: ParameterInformation|None = self.leftExp.typeId.baseType.getMember(self.member)
-        if member is None:
+        self.memberInfo: ParameterInformation|None = self.leftExp.typeId.baseType.getMember(self.member)
+        if self.memberInfo is None:
             self.raiseError(f"Member {self.member} is not part of {self.leftExp.typeId}")
 
-        self.typeId = member.type.copy()
+        self.typeId = self.memberInfo.type.copy()
         # It inherits the qualifiers of the left expression (const and volatile).
         if isLeftConst:
             self.typeId.setConst(True)
@@ -4253,8 +4299,13 @@ class Dot(Exp):
         return getDotLeftExp(self.leftExp)
 
     def staticEval(self) -> StaticEvalValue:
-        # TODO: To complete.
-        raise ValueError()
+        leftEval = self.leftExp.staticEval()
+        # Calculate the byte offset of the member and add it to the offset of leftEval.
+        if self.memberInfo is None:
+            raise ValueError()
+        return StaticEvalValue(StaticEvalType.VARIABLE, 
+                               leftEval.value, 
+                               leftEval.pointerOffset + self.memberInfo.offset)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -4287,19 +4338,24 @@ class Arrow(Exp):
             self.context.unionMap.get(leftExpMangledName) is None:
                 self.raiseError(f"{self.leftExp.typeId} is not a valid type")
 
-        leftExpMember: ParameterInformation|None = self.leftExp.typeId.declarator.baseType.getMember(self.member)
-        if leftExpMember is None:
+        self.memberInfo: ParameterInformation|None = self.leftExp.typeId.declarator.baseType.getMember(self.member)
+        if self.memberInfo is None:
             self.raiseError(f"Member {self.member} is not part of {self.leftExp.typeId}")
 
-        self.typeId = leftExpMember.type.copy()
+        self.typeId = self.memberInfo.type.copy()
         # It inherits the qualifiers of the left expression (const and volatile).
         if isLeftConst:
             self.typeId.setConst(True)
 
     def staticEval(self) -> StaticEvalValue:
-        # TODO: To complete.
-        raise ValueError()
-
+        leftEval = self.leftExp.staticEval()
+        # Calculate the byte offset of the member and add it to the offset of leftEval.
+        if self.memberInfo is None:
+            raise ValueError()
+        return StaticEvalValue(StaticEvalType.VARIABLE, 
+                               leftEval.value, 
+                               leftEval.pointerOffset + self.memberInfo.offset)
+    
     def print(self, padding: int) -> str:
         pad = " " * padding
         leftExpString = self.leftExp.print(0).replace("\n", "")

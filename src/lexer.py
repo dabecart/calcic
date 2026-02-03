@@ -38,6 +38,19 @@ tokenPatterns = [
     ("unsigned_long_constant",  re.compile(r"((0[xX][0-9A-Fa-f]+|0[bB][01]+|0[0-7]+|[0-9]+)(?:[uU][lL]|[lL][uU]))(?=[^\w.])")),
     ("double_constant",         re.compile(r"(([0-9]*\.[0-9]+|[0-9]+\.?)[Ee][+-]?[0-9]+|[0-9]*\.[0-9]+|[0-9]+\.)(?=[^\w.])")),
     ("float_constant",          re.compile(r"((([0-9]*\.[0-9]+|[0-9]+\.?)[Ee][+-]?[0-9]+|[0-9]*\.[0-9]+|[0-9]+\.)[fF])(?=[^\w.])")),
+    ("double_constant", re.compile(r"("
+            # Hexadecimal Double: 0x, hex digits/point, mandatory p/P exponent
+            r"0[xX]([0-9a-fA-F]*\.[0-9a-fA-F]+|[0-9a-fA-F]+\.?)[pP][+-]?[0-9]+|"
+            # Decimal Double: digits/point, optional e/E exponent OR mandatory point
+            r"([0-9]*\.[0-9]+|[0-9]+\.?)[Ee][+-]?[0-9]+|[0-9]*\.[0-9]+|[0-9]+\."
+    r")(?=[^\w.])")),
+
+    ("float_constant", re.compile(r"("
+            # Hexadecimal Float: 0x, hex digits/point, mandatory p/P exponent, [fF] suffix
+            r"0[xX]([0-9a-fA-F]*\.[0-9a-fA-F]+|[0-9a-fA-F]+\.?)[pP][+-]?[0-9]+[fF]|"
+            # Decimal Float: digits/point, optional e/E exponent, [fF] suffix
+            r"(([0-9]*\.[0-9]+|[0-9]+\.?)[Ee][+-]?[0-9]+|[0-9]*\.[0-9]+|[0-9]+\.)[fF]"
+    r")(?=[^\w.])")),
     ("character",               re.compile(r"'([^\\\n']|\\.)*'")),
     ("string",                  re.compile(r'"([^\\\n"]|\\.)*"')),
     ("(",                       re.compile(r"\(")),
@@ -155,7 +168,11 @@ class Token:
                     raise ValueError(f"Constant {self.value} cannot be interpreted as a base-10 integer")
 
     def parseDecimalToken(self) -> float:
-        core = self.value.lower().replace("f", "")
+        core = self.value.lower().rstrip("f")
+        if core.startswith("0x"):
+            # Hex decimal.
+            return float.fromhex(core)
+        # Standard decimal.
         return float(core)
 
 def _decodeCString(raw: str) -> str:
