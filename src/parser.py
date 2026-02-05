@@ -470,16 +470,9 @@ class FunctionContext:
     isGlobal: bool
     alreadyDefined: bool = False
 
+# Used to manage structs, unions and enums.
 @dataclass(order=True)
-class StructContext:
-    creationOrder: int
-    originalName: str
-    mangledName: str
-    idType: TypeSpecifier
-    alreadyDeclared: bool = True
-
-@dataclass(order=True)
-class UnionContext:
+class TagContext:
     creationOrder: int
     originalName: str
     mangledName: str
@@ -526,10 +519,8 @@ class Context:
     identifierMap: dict[str, IdentifierContext]              = field(default_factory= lambda:{})
     # Stores the attributes of functions.
     functionMap: dict[str, FunctionContext]                  = field(default_factory= lambda:{})
-    # Stores the attributes of structs. Key is the mangled name.
-    structMap: dict[str, StructContext]                      = field(default_factory= lambda:{})
-    # Stores the attributes of unions. Key is the mangled name.
-    unionMap: dict[str, UnionContext]                        = field(default_factory= lambda:{})
+    # Stores the attributes of structs, unions and enums. Key is the mangled name.
+    tagsMap: dict[str, TagContext]                           = field(default_factory= lambda:{})
     # Stores the attributes of variables which are stored on the .data section.
     staticVariablesMap: dict[str, StaticVariableContext]     = field(default_factory= lambda:{})
     # Stores the attributes of variables which are stored on the .rodata section.
@@ -555,29 +546,20 @@ class Context:
         for id in self.identifierMap.values():
             id.alreadyDeclared = False
         
-        # Do the same with the struct map.
-        previousStructMap = self.structMap
-        self.structMap = copy.deepcopy(self.structMap)
-        for struct in self.structMap.values():
+        # Do the same with the tags map.
+        previousTagsMap = self.tagsMap
+        self.tagsMap = copy.deepcopy(self.tagsMap)
+        for struct in self.tagsMap.values():
             struct.alreadyDeclared = False
-
-        # Do the same with the union map.
-        previousUnionMap = self.unionMap
-        self.unionMap = copy.deepcopy(self.unionMap)
-        for union in self.unionMap.values():
-            union.alreadyDeclared = False
 
         yield
 
         # Restore the variable map.
         self.identifierMap.clear()
         self.identifierMap.update(previousIDMap)
-        # Restore the struct map.
-        self.structMap.clear()
-        self.structMap.update(previousStructMap)
-        # Restore the union map.
-        self.unionMap.clear()
-        self.unionMap.update(previousUnionMap)
+        # Restore the tags map.
+        self.tagsMap.clear()
+        self.tagsMap.update(previousTagsMap)
 
     VARIABLE_COUNTER: ClassVar[int] = 0
     def mangleIdentifier(self, originalName: str) -> str:
@@ -675,11 +657,12 @@ class Context:
                 else:
                     raise ValueError(f"{label.gotoToken.getPosition()} Missing declaration of label {label.originalName}")
 
-    # Use it to return the most recent struct.
+    # Use it to return the most recent struct, union or enum.
     STRUCT_ORDER: int = 0
+    UNION_ORDER: int = 0
     def addStruct(self, structure: StructDeclaration):
         # Add the struct.
-        structContext = StructContext(
+        structContext = TagContext(
             creationOrder=Context.STRUCT_ORDER,
             originalName=structure.originalIdentifier,
             mangledName=structure.identifier,
@@ -688,13 +671,12 @@ class Context:
         Context.STRUCT_ORDER += 1
 
         # Add struct to context using the original identifier.
-        self.structMap[structure.identifier] = structContext
+        self.tagsMap[structure.identifier] = structContext
 
     # Use it to return the most recent union.
-    UNION_ORDER: int = 0
     def addUnion(self, union: UnionDeclaration):
         # Add the union.
-        unionContext = UnionContext(
+        unionContext = TagContext(
             creationOrder=Context.UNION_ORDER,
             originalName=union.originalIdentifier,
             mangledName=union.identifier,
@@ -703,11 +685,11 @@ class Context:
         Context.UNION_ORDER += 1
 
         # Add union to context using the original identifier.
-        self.unionMap[union.identifier] = unionContext
+        self.tagsMap[union.identifier] = unionContext
 
     def completeStruct(self, structure: StructDeclaration):
         # Modify the parameters inside the context.
-        ctx = self.getStructFromOriginalName(structure.originalIdentifier)
+        ctx = self._getTagObjectFromOriginalName("STRUCT", structure.originalIdentifier)
         if ctx is None:
             raise ValueError(f"Could not find the struct {structure.originalIdentifier} in the current context")
 
@@ -717,7 +699,7 @@ class Context:
 
     def completeUnion(self, union: UnionDeclaration):
         # Modify the parameters inside the context.
-        ctx = self.getUnionFromOriginalName(union.originalIdentifier)
+        ctx = self._getTagObjectFromOriginalName("UNION", union.originalIdentifier)
         if ctx is None:
             raise ValueError(f"Could not find the union {union.originalIdentifier} in the current context")
 
@@ -725,10 +707,11 @@ class Context:
         ctx.idType.alignment = union.alignment
         ctx.idType.members = union.membersToParamInfo()
 
-    def getStructFromOriginalName(self, originalName: str) -> StructContext|None:
-        ret: list[StructContext] = []
-        for cntx in self.structMap.values():
-            if cntx.originalName == originalName:
+    # Object type must be "STRUCT", "UNION" or "ENUM".
+    def _getTagObjectFromOriginalName(self, objectType: str, originalName: str) -> TagContext|None:
+        ret: list[TagContext] = []
+        for cntx in self.tagsMap.values():
+            if cntx.idType.name == objectType and cntx.originalName == originalName:
                 ret.append(cntx)
 
         if len(ret) > 0:
@@ -736,18 +719,12 @@ class Context:
             return sorted(ret)[-1]
         
         return None
+    
+    def getStructFromOriginalName(self, originalName: str) -> TagContext|None:
+        return self._getTagObjectFromOriginalName("STRUCT", originalName)
 
-    def getUnionFromOriginalName(self, originalName: str) -> UnionContext|None:
-        ret: list[UnionContext] = []
-        for cntx in self.unionMap.values():
-            if cntx.originalName == originalName:
-                ret.append(cntx)
-
-        if len(ret) > 0:
-            # Order the list and get the most recent union using the "creationOrder" index.
-            return sorted(ret)[-1]
-        
-        return None
+    def getUnionFromOriginalName(self, originalName: str) -> TagContext|None:
+        return self._getTagObjectFromOriginalName("UNION", originalName)
 
 # AST components.
 class AST(ABC):
@@ -4321,12 +4298,9 @@ class Arrow(Exp):
 
         # Check the type.
         leftExpMangledName: str = self.leftExp.typeId.declarator.baseType.identifier
-        if self.leftExp.typeId.declarator.baseType.name == "STRUCT" and \
-            self.context.structMap.get(leftExpMangledName) is None:
+        if self.leftExp.typeId.declarator.baseType.name in ("STRUCT", "UNION") and \
+           self.context.tagsMap.get(leftExpMangledName) is None:
             self.raiseError(f"{self.leftExp.typeId} is not a valid type")
-        elif self.leftExp.typeId.declarator.baseType.name == "UNION" and \
-            self.context.unionMap.get(leftExpMangledName) is None:
-                self.raiseError(f"{self.leftExp.typeId} is not a valid type")
 
         self.memberInfo: ParameterInformation|None = self.leftExp.typeId.declarator.baseType.getMember(self.member)
         if self.memberInfo is None:
