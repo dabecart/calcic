@@ -522,6 +522,7 @@ class AssemblerStaticVariable(AssemblyAST):
         ret = ""
         if self.isGlobal:
             ret =  f"\t.globl {self.identifier}\n"
+
         if len(self.initialization) == 0:
             ret +=  "\t.bss\n"
             ret += f"\t.align {self.assemblyType.alignment}\n"
@@ -535,6 +536,14 @@ class AssemblerStaticVariable(AssemblyAST):
             for const in self.initialization:
                 if isinstance(const, ZeroPaddingInitializer):
                     ret += f"\t.zero {const.byteCount}\n"
+                elif isinstance(const, PointerInitializer):
+                    asmbType = AssemblyType.fromTAC(const.typeId)
+                    if const.offset > 0:
+                        ret += f"\t.{asmbType.getDataSectionName()} {const.constValue}+{const.offset}\n"
+                    elif const.offset == 0:
+                        ret += f"\t.{asmbType.getDataSectionName()} {const.constValue}\n"
+                    else:
+                        ret += f"\t.{asmbType.getDataSectionName()} {const.constValue}{const.offset}\n"
                 else:
                     asmbType = AssemblyType.fromTAC(const.typeId)
                     ret += f"\t.{asmbType.getDataSectionName()} {const.constValue}\n"
@@ -931,9 +940,15 @@ class AssemblerFunction(AssemblyAST):
                             if inst.result.valueType.isDecimal():
                                 # To negate a double number, XOR with -0.0. XOR is a vector operation
                                 # when working with double numbers.
-                                negZero = AssemblerStaticConstant.newSimpleConstant(
-                                    TypeSpecifier.DOUBLE.toBaseType(), "-0.0", 16)
-                                negZeroData = Data(AssemblyType.DOUBLE, negZero.identifier, 0, self)
+                                if inst.result.valueType == TypeSpecifier.DOUBLE.toBaseType():
+                                    negZero = AssemblerStaticConstant.newSimpleConstant(
+                                        TypeSpecifier.DOUBLE.toBaseType(), "-0.0", 16)
+                                    negZeroData = Data(AssemblyType.DOUBLE, negZero.identifier, 0, self)
+                                else:
+                                    negZero = AssemblerStaticConstant.newSimpleConstant(
+                                        TypeSpecifier.FLOAT.toBaseType(), "-0.0", 16)
+                                    negZeroData = Data(AssemblyType.FLOAT, negZero.identifier, 0, self)
+
                                 self.createInst(MOV, exp.assemblyType, exp, dest)
                                 self.createInst(BINARY, 
                                                 dest.assemblyType, BinaryOperator.BITWISE_XOR, 

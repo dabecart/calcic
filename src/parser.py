@@ -18,6 +18,36 @@ TDeclaration = TypeVar("TDeclaration", bound="Declaration")
 TInitializer = TypeVar("TInitializer", bound="Initializer")
 PADDING_INCREMENT: int = 2
 
+class StorageClass(enum.Enum):
+    STATIC = "static"
+    EXTERN = "extern"
+
+@dataclass
+class TypeQualifier:
+    const: bool = False
+    # TODO: volatile, restrict
+
+    def toSet(self) -> set[str]:
+        ret = set()
+        if self.const: ret.add("const")
+        return ret
+
+    @staticmethod
+    def fromSet(inputSet: set[str]) -> TypeQualifier:
+        return TypeQualifier("const" in inputSet)
+
+    def contains(self, other: TypeQualifier) -> bool:
+        return other.toSet() <= self.toSet()
+    
+    def union(self, other: TypeQualifier) -> TypeQualifier:
+        un = self.toSet() | other.toSet()
+        return TypeQualifier.fromSet(un)
+
+    def __str__(self) -> str:
+        ret = ""
+        if self.const: ret += "const "
+        return ret
+
 class TypeSpecifier:
     VOID: TypeSpecifier
     CHAR: TypeSpecifier
@@ -68,8 +98,8 @@ class TypeSpecifier:
     def __str__(self) -> str:
         return self.value
     
-    def toBaseType(self, isConst = False) -> BaseDeclaratorType:
-        return BaseDeclaratorType(self, isConst)
+    def toBaseType(self, qualifiers = TypeQualifier()) -> BaseDeclaratorType:
+        return BaseDeclaratorType(self, qualifiers)
 
     def getByteSize(self) -> int:
         return self.byteSize
@@ -159,23 +189,6 @@ TypeSpecifier.ULONG         = TypeSpecifier("ULONG",        "unsigned long", 8, 
 TypeSpecifier.DOUBLE        = TypeSpecifier("DOUBLE",       "double",        8,  8)
 TypeSpecifier.FLOAT         = TypeSpecifier("FLOAT",        "float",         4,  4)
 
-class StorageClass(enum.Enum):
-    STATIC = "static"
-    EXTERN = "extern"
-
-@dataclass
-class QualifierClass:
-    const: bool = False
-    # TODO: volatile
-
-    def toSet(self) -> set[str]:
-        ret = set()
-        if self.const: ret.add("const")
-        return ret
-
-    def hasTheQualifiers(self, other: QualifierClass) -> bool:
-        return other.toSet() <= self.toSet()
-
 # When parsing the "type" of variable being declared, a DeclaratorType will be used. 
 # There are three types of declarators:
 # - Base types, which are normal types (int, long, float...).
@@ -207,19 +220,15 @@ class DeclaratorType(ABC):
         pass
 
     @abstractmethod
-    def getQualifiers(self) -> QualifierClass:
+    def getTypeQualifiers(self) -> TypeQualifier:
         pass
 
     @abstractmethod
-    def setConst(self, isConst: bool):
+    def setTypeQualifiers(self, newQualifiers: TypeQualifier):
         pass
 
     @abstractmethod
-    def isConst(self) -> bool:
-        pass
-
-    @abstractmethod
-    def copy(self) -> DeclaratorType:
+    def copy(self) -> PointerDeclaratorType:
         pass
 
     def __repr__(self) -> str:
@@ -296,80 +305,68 @@ class DeclaratorType(ABC):
         return False
     
 class BaseDeclaratorType(DeclaratorType):
-    def __init__(self, baseType: TypeSpecifier, const: bool) -> None:
+    def __init__(self, baseType: TypeSpecifier, qualifiers: TypeQualifier = TypeQualifier()) -> None:
         self.baseType = baseType
-        self.const = const
+        self.qualifiers = qualifiers
         super().__init__()
 
     def decay(self) -> DeclaratorType:
         # Base types do not decay.
-        return BaseDeclaratorType(self.baseType, self.const)
+        return BaseDeclaratorType(self.baseType, self.qualifiers)
 
     def __str__(self) -> str:
-        if self.const:
-            return f"const {self.baseType}"
-        else:
-            return f"{self.baseType}"
+            return f"{self.qualifiers}{self.baseType}"
     
     def __eq__(self, other):
         if not isinstance(other, BaseDeclaratorType):
             return False
-        return self.baseType == other.baseType and self.const == other.const
+        return self.baseType == other.baseType and self.qualifiers == other.qualifiers
     
     def copy(self) -> BaseDeclaratorType:
-        return BaseDeclaratorType(self.baseType, self.const)
+        return BaseDeclaratorType(self.baseType, self.qualifiers)
     
     def unqualify(self) -> BaseDeclaratorType:
         ret = self.copy()
-        ret.const = False
+        ret.qualifiers = TypeQualifier()
         return ret
 
-    def getQualifiers(self) -> QualifierClass:
-        return QualifierClass(const=self.const)
+    def getTypeQualifiers(self) -> TypeQualifier:
+        return self.qualifiers
 
-    def setConst(self, isConst: bool):
-        self.const = isConst
+    def setTypeQualifiers(self, newQualifiers: TypeQualifier):
+        self.qualifiers = newQualifiers
 
-    def isConst(self) -> bool:
-        return self.const
-    
 class PointerDeclaratorType(DeclaratorType):
-    def __init__(self, declarator: DeclaratorType, const: bool) -> None:
+    def __init__(self, declarator: DeclaratorType, qualifiers: TypeQualifier = TypeQualifier()) -> None:
         self.declarator = declarator
-        self.const = const
+        self.qualifiers = qualifiers
         super().__init__()
 
     def decay(self) -> DeclaratorType:
         # Pointers do not decay.
-        return PointerDeclaratorType(self.declarator, self.const)
+        return PointerDeclaratorType(self.declarator, self.qualifiers)
     
     def copy(self) -> PointerDeclaratorType:
-        return PointerDeclaratorType(self.declarator, self.const)
+        return PointerDeclaratorType(self.declarator, self.qualifiers)
         
     def __str__(self) -> str:
-        if self.const:
-            return f"const pointer to {self.declarator}"
-        else:
-            return f"pointer to {self.declarator}"
+            return f"{self.qualifiers}pointer to {self.declarator}"
     
     def __eq__(self, other):
         if not isinstance(other, PointerDeclaratorType):
             return False
-        return self.declarator == other.declarator and self.const == other.const
+        return self.declarator == other.declarator and self.qualifiers == other.qualifiers
     
     def unqualify(self) -> PointerDeclaratorType:
         ret = self.copy()
-        ret.const = False
+        ret.qualifiers = TypeQualifier()
         return ret
     
-    def getQualifiers(self) -> QualifierClass:
-        return QualifierClass(const=self.const)
+    def getTypeQualifiers(self) -> TypeQualifier:
+        return self.qualifiers
     
-    def setConst(self, isConst: bool):
-        self.const = isConst
-
-    def isConst(self) -> bool:
-        return self.const
+    def setTypeQualifiers(self, newQualifiers: TypeQualifier):
+        self.qualifiers = newQualifiers
 
 class ArrayDeclaratorType(DeclaratorType):
     def __init__(self, declarator: DeclaratorType, size: int) -> None:
@@ -381,7 +378,7 @@ class ArrayDeclaratorType(DeclaratorType):
         # An array in C decays to pointer to their first element.
         # For example, int[3][4] decays to int (*)[4].
         # Another example, *int[4] decays to int**.
-        return PointerDeclaratorType(self.declarator, const=self.isConst())
+        return PointerDeclaratorType(self.declarator, self.getTypeQualifiers())
     
     def copy(self) -> ArrayDeclaratorType:
         return ArrayDeclaratorType(self.declarator, self.size)
@@ -397,14 +394,11 @@ class ArrayDeclaratorType(DeclaratorType):
     def unqualify(self) -> ArrayDeclaratorType:
         return ArrayDeclaratorType(self.declarator.unqualify(), self.size)
     
-    def getQualifiers(self) -> QualifierClass:
-        return self.declarator.getQualifiers()
+    def getTypeQualifiers(self) -> TypeQualifier:
+        return self.declarator.getTypeQualifiers()
     
-    def setConst(self, isConst: bool):
-        self.declarator.setConst(isConst)
-
-    def isConst(self) -> bool:
-        return self.declarator.isConst()
+    def setTypeQualifiers(self, newQualifiers: TypeQualifier):
+        self.qualifiers = newQualifiers
 
 @dataclass
 class ParameterInformation:
@@ -446,13 +440,10 @@ class FunctionDeclaratorType(DeclaratorType):
     def unqualify(self) -> FunctionDeclaratorType:
         raise ValueError()
     
-    def getQualifiers(self) -> QualifierClass:
+    def getTypeQualifiers(self) -> TypeQualifier:
         raise ValueError()
 
-    def setConst(self, isConst: bool):
-        raise ValueError()
-    
-    def isConst(self) -> bool:
+    def setTypeQualifiers(self, newQualifiers: TypeQualifier):
         raise ValueError()
 
 @dataclass
@@ -1097,7 +1088,7 @@ class AST(ABC):
         else:
             storageClass, qualifierClass, baseType = self.getTypeAndStorageClass()
             declarator = self.createChild(TopDeclarator)
-            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass.const))
+            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
 
             if isinstance(info.type, FunctionDeclaratorType):
                 return self.createChild(FunctionDeclaration, storageClass, info)
@@ -1117,9 +1108,9 @@ class AST(ABC):
         else:
             return self.createChild(SingleInitializer, *args)
 
-    def getTypeAndStorageClass(self, expectsStorageClass = True) -> tuple[StorageClass|None, QualifierClass, TypeSpecifier]:
+    def getTypeAndStorageClass(self, expectsStorageClass = True) -> tuple[StorageClass|None, TypeQualifier, TypeSpecifier]:
         storageClass: StorageClass|None = None
-        qualifierClass: QualifierClass = QualifierClass()
+        qualifierClass: TypeQualifier = TypeQualifier()
         idType: TypeSpecifier
 
         idTypeAlreadyDefined: bool = False
@@ -1347,15 +1338,27 @@ class AST(ABC):
                     initialization=strAST.toConstantsList()
                 )
                 
-                cnst = self.createChild(PointerInitializer, constantType, constantName)
+                cnst = self.createChild(PointerInitializer, constantType, constantName, 0)
             else:
-                # TODO: A pointer can only be initialized with 0 (null pointer).
-                if self.peek().id in ("double_constant", "float_constant"):
-                    self.raiseError("Expected an integer constant")
+                # Static evaluation, parse the initializer.
+                initializer = self.createChild(Initializer, constantType)
+                constValues: list[StaticEvalValue] = initializer.staticEval()
+                if len(constValues) > 1:
+                    self.raiseError("Expected a single initializer")
 
-                cnst = self.createChild(ULongConstant)
-                if int(cnst.constValue) != 0:
-                    self.raiseError("Cannot initialize pointer with a non-pointer value")
+                constVal = constValues[0]
+                if constVal.valType != StaticEvalType.POINTER:
+                    raise ValueError()
+
+                if constVal.value == "":
+                    # Integer has been converted into pointer.
+                    cnst = self.createChild(ULongConstant, constVal.pointerOffset)
+                else:
+                    # Another variable has been used to create this pointer.
+                    cnst = self.createChild(PointerInitializer, 
+                                            constantType, 
+                                            constVal.value, 
+                                            constVal.pointerOffset)
             return [cnst]
         
         elif isinstance(constantType, ArrayDeclaratorType):
@@ -1510,7 +1513,7 @@ class DirectDeclarator(DeclaratorAST):
             if isinstance(simpleDecl.type, (BaseDeclaratorType, PointerDeclaratorType)):
                 funcParams: list[ParameterInformation] = []
                 for param in self.paramDeclarators:
-                    paramInfo: DeclaratorInformation = param.process(param.type.toBaseType(param.qualifierClass.const))
+                    paramInfo: DeclaratorInformation = param.process(param.type.toBaseType(param.qualifierClass))
                     if isinstance(paramInfo.type, FunctionDeclaratorType):
                         self.raiseError("Function pointers aren't supported as parameters")
                     funcParams.append(ParameterInformation(paramInfo.type, paramInfo.name))
@@ -1563,7 +1566,7 @@ class TopDeclarator(DeclaratorAST):
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
         if self.isPointer:
-            baseType = PointerDeclaratorType(baseType, self.isConstantPointer)
+            baseType = PointerDeclaratorType(baseType, TypeQualifier(self.isConstantPointer))
         ret = self.decl.process(baseType)
         return ret 
 
@@ -1602,7 +1605,7 @@ class TopAbstractDeclarator(AbstractDeclaratorAST):
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
         if self.isPointer:
-            baseType = PointerDeclaratorType(baseType, self.isConstantPointer)
+            baseType = PointerDeclaratorType(baseType, TypeQualifier(self.isConstantPointer))
             if self.decl is None:
                 return DeclaratorInformation("", baseType, [])
         
@@ -2085,7 +2088,7 @@ class FunctionDeclaration(Declaration):
         else:
             self.storageClass, qualifierClass, baseType = self.getTypeAndStorageClass()
             declarator = self.createChild(TopDeclarator)
-            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass.const))
+            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
 
         if not isinstance(info.type, FunctionDeclaratorType):
             self.raiseError("Expected a function declaration")
@@ -2235,7 +2238,7 @@ class VariableDeclaration(Declaration):
         else:
             self.storageClass, qualifierClass, baseType = self.getTypeAndStorageClass()
             declarator = self.createChild(TopDeclarator)
-            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass.const))
+            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
 
         if isinstance(info.type, FunctionDeclaratorType):
             self.raiseError("Expected a variable declaration")
@@ -2413,7 +2416,7 @@ class StructMemberDeclaration(AST):
     def parse(self, *args):
         _, qualifierClass, baseType = self.getTypeAndStorageClass(expectsStorageClass=False)
         declarator = self.createChild(TopDeclarator)
-        info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass.const))
+        info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
 
         self.typeId = info.type
         self.name = info.name
@@ -2528,7 +2531,7 @@ class UnionMemberDeclaration(AST):
     def parse(self, *args):
         _, qualifierClass, baseType = self.getTypeAndStorageClass(expectsStorageClass=False)
         declarator = self.createChild(TopDeclarator)
-        info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass.const))
+        info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
 
         self.typeId = info.type
         self.name = info.name
@@ -2663,31 +2666,28 @@ class StaticEvalType(enum.Enum):
     INTEGER = enum.auto()
     FLOAT = enum.auto()
     POINTER = enum.auto()
+    VARIABLE = enum.auto()
 
 @dataclass
 class StaticEvalValue:
     valType: StaticEvalType
     value: str
+    # Byte offset from the base of the pointer.
     pointerOffset: int = 0
 
     def getIntegerValue(self) -> int:
-        if self.valType == StaticEvalType.POINTER:
-            raise ValueError()
+        if self.valType in (StaticEvalType.POINTER, StaticEvalType.VARIABLE):
+            raise ValueError(f"Cannot get integer value from {self}")
         try:
             return int(self.value)
         except:
             return int(float(self.value))
 
     def getFloatValue(self) -> float:
-        if self.valType == StaticEvalType.POINTER:
-            raise ValueError()
+        if self.valType in (StaticEvalType.POINTER, StaticEvalType.VARIABLE):
+            raise ValueError(f"Cannot get float value from {self}")
         return float(self.value)
     
-    def getPointerValue(self) -> str:
-        if self.valType != StaticEvalType.POINTER:
-            raise ValueError()
-        return self.value
-
 class Exp(AST):
     def __init__(self, tokens: list[Token], 
                  context: Context | None = None, parentAST: AST | None = None, *args) -> None:
@@ -2716,7 +2716,7 @@ class Exp(AST):
         # To be assignable, it must be a lvalue and not a constant.
         return self.isLvalue() and \
             not isinstance(self.typeId, (ArrayDeclaratorType, FunctionDeclaratorType)) and \
-            not self.typeId.isConst()
+            not self.typeId.getTypeQualifiers().const
     
     def isNullPointer(self) -> bool:
         if isinstance(self, (CharConstant, UCharConstant, 
@@ -2747,7 +2747,7 @@ class Exp(AST):
         # stripped. This does not happen for pointers!
         if not isinstance(ret.typeId, PointerDeclaratorType):
             newDecl = ret.typeId.copy()
-            newDecl.setConst(False)
+            newDecl.qualifiers = TypeQualifier()
             ret.typeId = newDecl
 
         return ret
@@ -2772,11 +2772,11 @@ class Exp(AST):
                 exp1.typeId.declarator == TypeSpecifier.VOID.toBaseType() and \
                 isinstance(exp2.typeId, PointerDeclaratorType):
                 # The operations on pointers always return non const pointers.
-                return PointerDeclaratorType(TypeSpecifier.VOID.toBaseType(), const=False)
+                return PointerDeclaratorType(TypeSpecifier.VOID.toBaseType())
             elif isinstance(exp2.typeId, (PointerDeclaratorType, ArrayDeclaratorType)) and \
                 exp2.typeId.declarator == TypeSpecifier.VOID.toBaseType() and \
                 isinstance(exp1.typeId, PointerDeclaratorType):
-                return PointerDeclaratorType(TypeSpecifier.VOID.toBaseType(), const=False)
+                return PointerDeclaratorType(TypeSpecifier.VOID.toBaseType())
             
             # Arrays can be converted to pointers.
             if isinstance(exp1.typeId, ArrayDeclaratorType) and isinstance(exp2.typeId, PointerDeclaratorType) and \
@@ -3205,16 +3205,20 @@ class ZeroPaddingInitializer(Constant):
     
 # Used to initialize a pointer with the address of another static object.
 class PointerInitializer(Constant):
-    def parse(self, typeId: DeclaratorType, pointerName: str):
+    def parse(self, typeId: DeclaratorType, pointerName: str, byteOffset: int):
         self.typeId = typeId
         self.constValue = pointerName
+        self.offset = byteOffset
 
     def staticEval(self) -> StaticEvalValue:
         raise ValueError()
 
     def print(self, padding: int) -> str:
         pad = " " * padding
-        return f'{pad}PointerInit({self.constValue})\n'
+        if self.offset == 0:
+            return f'{pad}PointerInit({self.constValue})\n'
+        else:
+            return f'{pad}PointerInit({self.constValue} + {self.offset})\n'
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # END of constants are used to initialize static variables.
@@ -3234,8 +3238,12 @@ class Variable(Exp):
         self.identifier: str = ctxVar.mangledName
 
     def staticEval(self) -> StaticEvalValue:
-        # TODO: For the moment, only constant implicit values and expressions are supported.
-        raise ValueError()
+        # ISO C99 6.7.8, identifiers with static storage duration must be initialized with a 
+        # constant expression. Section 6.6 specifies that no memory content must be read during 
+        # evaluations.
+        # For the moment, we'll return a "variable" type value which should be converted to a 
+        # "pointer" by an AddressOf expression.
+        return StaticEvalValue(StaticEvalType.VARIABLE, self.identifier)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3256,7 +3264,7 @@ class Cast(Exp):
 
         isSourceVoidPointer = isSourcePointer and srcType.declarator.unqualify() == TypeSpecifier.VOID.toBaseType()
         isCastVoidPointer = isCastPointer and castType.declarator.unqualify() == TypeSpecifier.VOID.toBaseType()
-        hasAllQualifiers = isSourcePointer and isCastPointer and (castType.declarator.getQualifiers().hasTheQualifiers(srcType.declarator.getQualifiers()))
+        hasAllQualifiers = isSourcePointer and isCastPointer and (castType.declarator.getTypeQualifiers().contains(srcType.declarator.getTypeQualifiers()))
 
         toVoidPointerType = isSourcePointer and not isSourceVoidPointer and isCastVoidPointer and hasAllQualifiers
         fromVoidPointerType = isSourceVoidPointer and isCastPointer and not isCastVoidPointer and hasAllQualifiers
@@ -3321,7 +3329,7 @@ class Cast(Exp):
             _, qualifierClass, baseType = self.getTypeAndStorageClass(expectsStorageClass=False)
             if self.peek().id != ")":
                 declarator = self.createChild(TopAbstractDeclarator)
-                info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass.const))
+                info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
                 self.typeId = info.type
             else:
                 self.typeId = baseType.toBaseType()
@@ -3363,11 +3371,17 @@ class Cast(Exp):
                     if intValue & (1 << (castBitCount - 1)):
                         intValue -= (1 << castBitCount)
 
-                return StaticEvalValue(StaticEvalType.FLOAT, str(intValue))
-            else:
-                raise ValueError()
-        else:
-            raise ValueError("Cast pointers not implemented")
+                return StaticEvalValue(StaticEvalType.INTEGER, str(intValue))
+            
+        if isinstance(self.typeId, PointerDeclaratorType):
+            if self.inner.typeId.isInteger():
+                # Integer to pointer.
+                return StaticEvalValue(StaticEvalType.POINTER, "", innerValue.getIntegerValue())
+            if innerValue.valType == StaticEvalType.POINTER:
+                # Pointer from one type to another. 
+                return innerValue
+
+        raise ValueError("Cast not implemented")
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3491,7 +3505,12 @@ class Unary(Exp):
                     return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
                 
             case UnaryOperator.NOT:
-                retVal = 0 if innerValue.getIntegerValue() else 1
+                if innerValue.valType == StaticEvalType.POINTER:
+                    # A pointer to a static variable is never null.
+                    retVal = 0
+                else:
+                    retVal = 0 if innerValue.getIntegerValue() else 1
+                
                 return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
 
             case _:
@@ -3696,7 +3715,7 @@ class Binary(Exp):
 
         if self.binaryOperator in (BinaryOperator.AND, BinaryOperator.OR):
             # No need to to perform type conversions for AND and OR.
-            self.typeId = BaseDeclaratorType(TypeSpecifier.INT, const=False)
+            self.typeId = BaseDeclaratorType(TypeSpecifier.INT, TypeQualifier())
 
         elif self.binaryOperator in (BinaryOperator.BITWISE_LEFT_SHIFT, BinaryOperator.BITWISE_RIGHT_SHIFT):
             exp1Promoted = self.exp1.checkIntegerPromotion()
@@ -3843,7 +3862,7 @@ class Binary(Exp):
             # Now, both expressions should have the same type.
             if self.binaryOperator.isComparison():
                 # Doing a comparison will always return an integer.
-                self.typeId = BaseDeclaratorType(TypeSpecifier.INT, const=False)
+                self.typeId = BaseDeclaratorType(TypeSpecifier.INT)
             elif self.compoundBinary:
                 # The return type of a compound operation, is the lvalue's type.
                 self.typeId = self.exp1OriginalType
@@ -3855,12 +3874,76 @@ class Binary(Exp):
         exp1Eval = self.exp1.staticEval()
         exp2Eval = self.exp2.staticEval()
 
-        if self.typeId.isDecimal():
-            exp1 = exp1Eval.getFloatValue()
-            exp2 = exp2Eval.getFloatValue()
+        # POINTER EVALUATIONS.
+        isExp1Pointer = exp1Eval.valType == StaticEvalType.POINTER
+        isExp2Pointer = exp2Eval.valType == StaticEvalType.POINTER
+
+        if self.binaryOperator == BinaryOperator.SUM:
+            if isExp1Pointer and not isExp2Pointer:
+                if not isinstance(self.exp1.typeId, PointerDeclaratorType):
+                    raise ValueError()
+                
+                # Pointer sum: exp2 is long.
+                index = exp2Eval.getIntegerValue()
+                return StaticEvalValue(StaticEvalType.POINTER, 
+                                        exp1Eval.value, 
+                                        exp1Eval.pointerOffset + index * self.exp1.typeId.declarator.getByteSize())
+
+            if isExp2Pointer and not isExp1Pointer:
+                if not isinstance(self.exp2.typeId, PointerDeclaratorType):
+                    raise ValueError()
+
+                # Pointer sum: exp1 is long.
+                index = exp1Eval.getIntegerValue()
+                return StaticEvalValue(StaticEvalType.POINTER, 
+                                        exp2Eval.value,
+                                        exp2Eval.pointerOffset + index * self.exp2.typeId.declarator.getByteSize())
+
+        if self.binaryOperator == BinaryOperator.SUBTRACT:
+            if isExp1Pointer and not isExp2Pointer:
+                if not isinstance(self.exp1.typeId, PointerDeclaratorType):
+                    raise ValueError()
+                
+                # Pointer subtraction: exp2 is a long.
+                index = exp2Eval.getIntegerValue()
+                return StaticEvalValue(StaticEvalType.POINTER, 
+                                        exp1Eval.value, 
+                                        exp1Eval.pointerOffset - index * self.exp1.typeId.declarator.getByteSize())
+
+            if isExp2Pointer and isExp1Pointer:
+                if not isinstance(self.exp1.typeId, PointerDeclaratorType):
+                    raise ValueError()
+                
+                # Pointer subtraction: the result is a long. In this case, the base address of both
+                # must be the same.
+                # It's important to use the addresses and not the indices to calculate the resulting
+                # index. Subtracting indices does not generate the right index.
+                if exp1Eval.value != exp2Eval.value:
+                    self.raiseError("Cannot subtract pointers, base addresses must be the same")
+                
+                index = (exp1Eval.pointerOffset - exp2Eval.pointerOffset) // self.exp1.typeId.declarator.getByteSize()
+                return StaticEvalValue(StaticEvalType.INTEGER, str(index))
+
+        if isExp1Pointer and isExp2Pointer and self.binaryOperator.isComparison():
+            if exp1Eval.value != exp2Eval.value:
+                self.raiseError("Cannot compare pointers with different base addresses")
+            # Compare with the indices.
+            exp1 = exp1Eval.pointerOffset
+            exp2 = exp2Eval.pointerOffset
+
+        # ARITHMETIC EVALUATIONS.
+        elif self.typeId.isDecimal():
+            try:
+                exp1 = exp1Eval.getFloatValue()
+                exp2 = exp2Eval.getFloatValue()
+            except:
+                self.raiseError("Expressions must have constant value")
         else:
-            exp1 = exp1Eval.getIntegerValue()
-            exp2 = exp2Eval.getIntegerValue()
+            try:
+                exp1 = exp1Eval.getIntegerValue()
+                exp2 = exp2Eval.getIntegerValue()
+            except:
+                self.raiseError("Expressions must have constant value")
 
         if self.compoundBinary:
             self.raiseError("Cannot evaluate during compilation.")
@@ -4097,10 +4180,13 @@ class AddressOf(Exp):
         else:
             self.inner = inner
 
-        self.typeId = PointerDeclaratorType(self.inner.typeId, const=False)
+        self.typeId = PointerDeclaratorType(self.inner.typeId)
     
     def staticEval(self) -> StaticEvalValue:
-        self.raiseError("Cannot evaluate an address during compilation")        
+        innerEval = self.inner.staticEval()
+        if innerEval.valType != StaticEvalType.VARIABLE:
+            self.raiseError("Expected a variable for the static evaluation")
+        return StaticEvalValue(StaticEvalType.POINTER, innerEval.value, innerEval.pointerOffset)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -4141,8 +4227,24 @@ class Subscript(Exp):
         self.typeId = self.pointer.typeId.declarator
 
     def staticEval(self) -> StaticEvalValue:
-        # TODO: To complete.
-        raise ValueError()
+        if not isinstance(self.pointer.typeId, PointerDeclaratorType):
+            raise ValueError()
+
+        innerEval = self.pointer.staticEval()
+        if innerEval.valType != StaticEvalType.POINTER:
+            self.raiseError("Expression must have a constant value")
+
+        indexEval = self.index.staticEval()
+
+        try:
+            indexEvalInteger = indexEval.getIntegerValue()
+        except:
+            self.raiseError("Cannot evaluate the index")
+
+        # This is still a variable.
+        return StaticEvalValue(StaticEvalType.VARIABLE, 
+                               innerEval.value, 
+                               innerEval.pointerOffset + indexEvalInteger * self.pointer.typeId.declarator.getByteSize())
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -4156,7 +4258,7 @@ class Subscript(Exp):
 
 class Dot(Exp):
     def parse(self, leftExp: Exp):
-        isLeftConst = leftExp.typeId.isConst()
+        leftQualifiers = leftExp.typeId.getTypeQualifiers()
         self.leftExp: Exp = leftExp.preconvertExpression()
         
         if not isinstance(self.leftExp.typeId, BaseDeclaratorType) or \
@@ -4166,14 +4268,13 @@ class Dot(Exp):
         self.expect(".")
         self.member: str = self.expect("identifier").value
 
-        member: ParameterInformation|None = self.leftExp.typeId.baseType.getMember(self.member)
-        if member is None:
+        self.memberInfo: ParameterInformation|None = self.leftExp.typeId.baseType.getMember(self.member)
+        if self.memberInfo is None:
             self.raiseError(f"Member {self.member} is not part of {self.leftExp.typeId}")
 
-        self.typeId = member.type.copy()
-        # It inherits the qualifiers of the left expression (const and volatile).
-        if isLeftConst:
-            self.typeId.setConst(True)
+        self.typeId = self.memberInfo.type.copy()
+        # It inherits the type qualifiers of the left expression.
+        self.typeId.setTypeQualifiers(self.typeId.getTypeQualifiers().union(leftQualifiers))
 
     # Used to check if the dot expression is an lvalue. For example:
     # str.a.b.c is an lvalue if str is an lvalue.
@@ -4188,8 +4289,13 @@ class Dot(Exp):
         return getDotLeftExp(self.leftExp)
 
     def staticEval(self) -> StaticEvalValue:
-        # TODO: To complete.
-        raise ValueError()
+        leftEval = self.leftExp.staticEval()
+        # Calculate the byte offset of the member and add it to the offset of leftEval.
+        if self.memberInfo is None:
+            raise ValueError()
+        return StaticEvalValue(StaticEvalType.VARIABLE, 
+                               leftEval.value, 
+                               leftEval.pointerOffset + self.memberInfo.offset)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -4202,7 +4308,7 @@ class Arrow(Exp):
         if not isinstance(leftExp.typeId, (ArrayDeclaratorType, PointerDeclaratorType)):
             self.raiseError("Expected a pointer to struct or union")
 
-        isLeftConst = leftExp.typeId.declarator.isConst()
+        leftQualifiers = leftExp.typeId.declarator.getTypeQualifiers()
         self.leftExp: Exp = leftExp.preconvertExpression()
 
         if not isinstance(self.leftExp.typeId, PointerDeclaratorType) or \
@@ -4222,19 +4328,23 @@ class Arrow(Exp):
             self.context.unionMap.get(leftExpMangledName) is None:
                 self.raiseError(f"{self.leftExp.typeId} is not a valid type")
 
-        leftExpMember: ParameterInformation|None = self.leftExp.typeId.declarator.baseType.getMember(self.member)
-        if leftExpMember is None:
+        self.memberInfo: ParameterInformation|None = self.leftExp.typeId.declarator.baseType.getMember(self.member)
+        if self.memberInfo is None:
             self.raiseError(f"Member {self.member} is not part of {self.leftExp.typeId}")
 
-        self.typeId = leftExpMember.type.copy()
-        # It inherits the qualifiers of the left expression (const and volatile).
-        if isLeftConst:
-            self.typeId.setConst(True)
+        self.typeId = self.memberInfo.type.copy()
+        # It inherits the type qualifiers of the left expression.
+        self.typeId.setTypeQualifiers(self.typeId.getTypeQualifiers().union(leftQualifiers))
 
     def staticEval(self) -> StaticEvalValue:
-        # TODO: To complete.
-        raise ValueError()
-
+        leftEval = self.leftExp.staticEval()
+        # Calculate the byte offset of the member and add it to the offset of leftEval.
+        if self.memberInfo is None:
+            raise ValueError()
+        return StaticEvalValue(StaticEvalType.VARIABLE, 
+                               leftEval.value, 
+                               leftEval.pointerOffset + self.memberInfo.offset)
+    
     def print(self, padding: int) -> str:
         pad = " " * padding
         leftExpString = self.leftExp.print(0).replace("\n", "")
@@ -4266,7 +4376,7 @@ class SizeOfType(Exp):
         _, qualifierClass, baseType = self.getTypeAndStorageClass(expectsStorageClass=False)
         if self.peek().id != ")":
             declarator = self.createChild(TopAbstractDeclarator)
-            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass.const))
+            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
             self.inner = info.type
         else:
             self.inner = baseType.toBaseType()

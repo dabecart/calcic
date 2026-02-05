@@ -83,6 +83,7 @@ def main() -> None:
         if args.verbose:
             print(f"Tokens:\n{tokens}\n")
     except Exception as e:
+        os.remove(f"{inputFileBasename}.i")
         print(f"Lexer exception:\n{e}", file=sys.stderr)
         if args.verbose:
             print(traceback.format_exc(), file=sys.stderr)
