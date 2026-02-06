@@ -675,7 +675,11 @@ class TAC(ABC):
                 return
 
             case UnionDeclaration():
-                # Nothing to generate with struct declarations.
+                # Nothing to generate with union declarations.
+                return
+
+            case EnumDeclaration():
+                # Nothing to generate with enum declarations.
                 return
 
             case FunctionDeclaration():

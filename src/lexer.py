@@ -27,6 +27,7 @@ keywordPatterns = [
     ("sizeof",              re.compile(r"sizeof\b")),
     ("struct",              re.compile(r"struct\b")),
     ("union",               re.compile(r"union\b")),
+    ("enum",                re.compile(r"enum\b")),
     ("const",               re.compile(r"const\b")),
 ]
 
@@ -110,7 +111,7 @@ lineMarkings = re.compile(
 )
 
 class Token:
-    TYPE_SPECIFIER: list[str] = ["struct", "union", "void", "char", "short", "int", "long", 
+    TYPE_SPECIFIER: list[str] = ["struct", "union", "enum", "void", "char", "short", "int", "long", 
                                  "unsigned", "signed", "double", "float"]
     CAST_SPECIFIER: list[str] = ["const"] + TYPE_SPECIFIER
     SPECIFIER: list[str] = ["static", "extern", "const"] + TYPE_SPECIFIER

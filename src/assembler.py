@@ -242,6 +242,8 @@ class AssemblyType:
                             AssemblyBaseType.BYTEARRAY, 
                             tac.getByteSize(), tac.getAlignment(),
                             members=AssemblyType._classifyUnion(tac))
+                case "ENUM":
+                    return AssemblyType.LONGWORD
                 case _:
                     raise ValueError(f"Cannot convert {tac} to AssemblyType")
         elif isinstance(tac, ArrayDeclaratorType):
