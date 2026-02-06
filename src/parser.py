@@ -112,20 +112,17 @@ class TypeSpecifier:
     def getAlignment(self) -> int:
         return self.alignment
             
-    def getMember(self, memberName: str) -> ParameterInformation|None:
-        if self.name not in ("STRUCT", "UNION"):
-            raise ValueError("Cannot get member of a non struct/union type")
-        
-        for member in self.members:
-            if member.name == memberName:
-                return member
-        return None
-    
     def getMembers(self) -> list[ParameterInformation]:
         if self.name not in ("STRUCT", "UNION"):
             raise ValueError("Cannot get member of a non struct/union type")
 
         return self.members
+    
+    def getMember(self, memberName: str) -> ParameterInformation|None:
+        for member in self.getMembers():
+            if member.name == memberName:
+                return member
+        return None
 
     def isSignedInt(self) -> bool:
         match self:
@@ -4122,6 +4119,13 @@ class Assignment(Exp):
     def parse(self, exp1: Exp, exp2: Exp):
         if not exp1.isLvalueAssignable():
             self.raiseError("Left expression must be a modifiable lvalue")
+
+        # If exp1's type is a struct or union, check that the inner members are not constant.
+        if isinstance(exp1.typeId, BaseDeclaratorType) and \
+           exp1.typeId.baseType.name in ("STRUCT", "UNION"):
+            for mem in exp1.typeId.baseType.getMembers():
+                if mem.type.getTypeQualifiers().const:
+                    self.raiseError("Left expression must be a modifiable lvalue")
 
         # Exp1 = Exp2
         self.exp1 = exp1.preconvertExpression()
