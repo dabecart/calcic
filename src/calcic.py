@@ -1,9 +1,18 @@
+"""
+calcic.py
+
+Entry point of the compiler. Handles command arguments, input routes and subcalls to the 
+preprocessor and linker.
+
+calcic. Written by @dabecart, 2026.
+"""
+
 import argparse
 import subprocess
 import os
 import traceback
 
-from . import lexer, parser, TAC, assembler
+from . import assembler_x64, lexer, parser, TAC
 
 import sys
 
@@ -124,7 +133,7 @@ def main() -> None:
         exit(0)
 
     try:
-        assemblyProgram = assembler.AssemblerProgram(tacProgram)
+        assemblyProgram = assembler_x64.AssemblerProgram(tacProgram)
         # if args.verbose:
         #     print(f"Assembler:\n{assemblyProgram}")
     except Exception as e:

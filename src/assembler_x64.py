@@ -1,7 +1,17 @@
+"""
+assembler_x64.py
+
+Converts the TAC into x86-64 assembly language, using AT&T syntax. Handles all the nuances of the 
+x64 language and the System V ABI.
+
+calcic. Written by @dabecart, 2026.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from .TAC import *
+from .types import *
 from typing import Type, TypeVar
 import math
 import enum

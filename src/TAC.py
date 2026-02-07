@@ -1,7 +1,17 @@
+"""
+TAC.py
+
+Intermediary representation of the code on an agnostic language called Three Address Code (TAC).
+Receives the objects of the parsing stage and interprets them into TAC.
+
+calcic. Written by @dabecart, 2026.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from .parser import *
+from .types import *
 
 from typing import Type, TypeVar
 T = TypeVar("T", bound="TAC")
