@@ -74,7 +74,12 @@ class TypeSpecifier:
         kwargs = dict(identifier = unionDecl.identifier, 
                       members = unionDecl.membersToParamInfo())
         return TypeSpecifier("UNION", f"union {originalIdentifier}", 
-                             unionDecl.byteSize, unionDecl.alignment,**kwargs)
+                             unionDecl.byteSize, unionDecl.alignment, **kwargs)
+
+    @staticmethod
+    def ENUM(originalIdentifier: str) -> TypeSpecifier:
+        # Enums are represented by an int (its size and alignment are 4).
+        return TypeSpecifier("ENUM", f"enum {originalIdentifier}", 4, 4)
 
     def __init__(self, name: str, value: str, byteSize: int, alignment: int, **kwargs) -> None:
         self.name: str = name
@@ -107,20 +112,17 @@ class TypeSpecifier:
     def getAlignment(self) -> int:
         return self.alignment
             
-    def getMember(self, memberName: str) -> ParameterInformation|None:
-        if self.name not in ("STRUCT", "UNION"):
-            raise ValueError("Cannot get member of a non struct/union type")
-        
-        for member in self.members:
-            if member.name == memberName:
-                return member
-        return None
-    
     def getMembers(self) -> list[ParameterInformation]:
         if self.name not in ("STRUCT", "UNION"):
             raise ValueError("Cannot get member of a non struct/union type")
 
         return self.members
+    
+    def getMember(self, memberName: str) -> ParameterInformation|None:
+        for member in self.getMembers():
+            if member.name == memberName:
+                return member
+        return None
 
     def isSignedInt(self) -> bool:
         match self:
@@ -134,7 +136,8 @@ class TypeSpecifier:
         return self in (TypeSpecifier.CHAR, TypeSpecifier.UCHAR, TypeSpecifier.SIGNED_CHAR,
                         TypeSpecifier.SHORT, TypeSpecifier.USHORT, 
                         TypeSpecifier.INT, TypeSpecifier.UINT, 
-                        TypeSpecifier.LONG, TypeSpecifier.ULONG)
+                        TypeSpecifier.LONG, TypeSpecifier.ULONG) or \
+               self.name == "ENUM"
 
     def isDecimal(self) -> bool:
         return self in (TypeSpecifier.DOUBLE, TypeSpecifier.FLOAT)
@@ -144,7 +147,8 @@ class TypeSpecifier:
     
     def needsIntegerPromotion(self) -> bool:
         return self in (TypeSpecifier.CHAR, TypeSpecifier.UCHAR, TypeSpecifier.SIGNED_CHAR, 
-                        TypeSpecifier.SHORT, TypeSpecifier.USHORT)
+                        TypeSpecifier.SHORT, TypeSpecifier.USHORT) or \
+               self.name == "ENUM"
 
     def flattenStruct(self) -> list[DeclaratorType]:
         if self.name != "STRUCT":
@@ -460,6 +464,7 @@ class IdentifierContext:
     mangledName: str
     idType: DeclaratorType
     alreadyDeclared: bool = True
+    constValue: Constant|None = None
 
 @dataclass
 class FunctionContext:
@@ -470,16 +475,9 @@ class FunctionContext:
     isGlobal: bool
     alreadyDefined: bool = False
 
+# Used to manage structs, unions and enums.
 @dataclass(order=True)
-class StructContext:
-    creationOrder: int
-    originalName: str
-    mangledName: str
-    idType: TypeSpecifier
-    alreadyDeclared: bool = True
-
-@dataclass(order=True)
-class UnionContext:
+class TagContext:
     creationOrder: int
     originalName: str
     mangledName: str
@@ -526,10 +524,8 @@ class Context:
     identifierMap: dict[str, IdentifierContext]              = field(default_factory= lambda:{})
     # Stores the attributes of functions.
     functionMap: dict[str, FunctionContext]                  = field(default_factory= lambda:{})
-    # Stores the attributes of structs. Key is the mangled name.
-    structMap: dict[str, StructContext]                      = field(default_factory= lambda:{})
-    # Stores the attributes of unions. Key is the mangled name.
-    unionMap: dict[str, UnionContext]                        = field(default_factory= lambda:{})
+    # Stores the attributes of structs, unions and enums. Key is the mangled name.
+    tagsMap: dict[str, TagContext]                           = field(default_factory= lambda:{})
     # Stores the attributes of variables which are stored on the .data section.
     staticVariablesMap: dict[str, StaticVariableContext]     = field(default_factory= lambda:{})
     # Stores the attributes of variables which are stored on the .rodata section.
@@ -555,34 +551,25 @@ class Context:
         for id in self.identifierMap.values():
             id.alreadyDeclared = False
         
-        # Do the same with the struct map.
-        previousStructMap = self.structMap
-        self.structMap = copy.deepcopy(self.structMap)
-        for struct in self.structMap.values():
-            struct.alreadyDeclared = False
-
-        # Do the same with the union map.
-        previousUnionMap = self.unionMap
-        self.unionMap = copy.deepcopy(self.unionMap)
-        for union in self.unionMap.values():
-            union.alreadyDeclared = False
+        # Do the same with the tags map.
+        previousTagsMap = self.tagsMap
+        self.tagsMap = copy.deepcopy(self.tagsMap)
+        for singleTag in self.tagsMap.values():
+            singleTag.alreadyDeclared = False
 
         yield
 
         # Restore the variable map.
         self.identifierMap.clear()
         self.identifierMap.update(previousIDMap)
-        # Restore the struct map.
-        self.structMap.clear()
-        self.structMap.update(previousStructMap)
-        # Restore the union map.
-        self.unionMap.clear()
-        self.unionMap.update(previousUnionMap)
+        # Restore the tags map.
+        self.tagsMap.clear()
+        self.tagsMap.update(previousTagsMap)
 
-    VARIABLE_COUNTER: ClassVar[int] = 0
+    IDENTIFIER_COUNTER: ClassVar[int] = 0
     def mangleIdentifier(self, originalName: str) -> str:
-        mangledName= f"{originalName}.{Context.VARIABLE_COUNTER}"
-        Context.VARIABLE_COUNTER += 1
+        mangledName= f"{originalName}.{Context.IDENTIFIER_COUNTER}"
+        Context.IDENTIFIER_COUNTER += 1
         return mangledName
     
     def addVariableIdentifier(self, var: VariableDeclaration):
@@ -675,11 +662,13 @@ class Context:
                 else:
                     raise ValueError(f"{label.gotoToken.getPosition()} Missing declaration of label {label.originalName}")
 
-    # Use it to return the most recent struct.
+    # Use it to return the most recent struct, union or enum.
     STRUCT_ORDER: int = 0
+    UNION_ORDER: int = 0
+    ENUM_ORDER: int = 0
     def addStruct(self, structure: StructDeclaration):
         # Add the struct.
-        structContext = StructContext(
+        structContext = TagContext(
             creationOrder=Context.STRUCT_ORDER,
             originalName=structure.originalIdentifier,
             mangledName=structure.identifier,
@@ -688,13 +677,12 @@ class Context:
         Context.STRUCT_ORDER += 1
 
         # Add struct to context using the original identifier.
-        self.structMap[structure.identifier] = structContext
+        self.tagsMap[structure.identifier] = structContext
 
     # Use it to return the most recent union.
-    UNION_ORDER: int = 0
     def addUnion(self, union: UnionDeclaration):
         # Add the union.
-        unionContext = UnionContext(
+        unionContext = TagContext(
             creationOrder=Context.UNION_ORDER,
             originalName=union.originalIdentifier,
             mangledName=union.identifier,
@@ -703,7 +691,43 @@ class Context:
         Context.UNION_ORDER += 1
 
         # Add union to context using the original identifier.
-        self.unionMap[union.identifier] = unionContext
+        self.tagsMap[union.identifier] = unionContext
+
+    def addEnum(self, enum: EnumDeclaration):
+        # Add the enum.
+        enumContext = TagContext(
+            creationOrder=Context.ENUM_ORDER,
+            originalName=enum.originalIdentifier,
+            mangledName=enum.identifier,
+            idType=enum.typeId
+        )
+        Context.ENUM_ORDER += 1
+
+        # Add enum to context using the original identifier.
+        self.tagsMap[enum.identifier] = enumContext
+
+    # Finds an object named "originalName" of type "objectType" in the tags map.
+    # Object type must be "STRUCT", "UNION" or "ENUM".
+    def getTagObjectFromOriginalName(self, objectType: str, originalName: str) -> TagContext|None:
+        ret: list[TagContext] = []
+        for cntx in self.tagsMap.values():
+            if cntx.idType.name == objectType and cntx.originalName == originalName:
+                ret.append(cntx)
+
+        if len(ret) > 0:
+            # Order the list and get the most recent struct using the "creationOrder" index.
+            return sorted(ret)[-1]
+        
+        return None
+    
+    def getStructFromOriginalName(self, originalName: str) -> TagContext|None:
+        return self.getTagObjectFromOriginalName("STRUCT", originalName)
+
+    def getUnionFromOriginalName(self, originalName: str) -> TagContext|None:
+        return self.getTagObjectFromOriginalName("UNION", originalName)
+
+    def getEnumFromOriginalName(self, originalName: str) -> TagContext|None:
+        return self.getTagObjectFromOriginalName("ENUM", originalName)
 
     def completeStruct(self, structure: StructDeclaration):
         # Modify the parameters inside the context.
@@ -724,30 +748,6 @@ class Context:
         ctx.idType.byteSize = union.byteSize
         ctx.idType.alignment = union.alignment
         ctx.idType.members = union.membersToParamInfo()
-
-    def getStructFromOriginalName(self, originalName: str) -> StructContext|None:
-        ret: list[StructContext] = []
-        for cntx in self.structMap.values():
-            if cntx.originalName == originalName:
-                ret.append(cntx)
-
-        if len(ret) > 0:
-            # Order the list and get the most recent struct using the "creationOrder" index.
-            return sorted(ret)[-1]
-        
-        return None
-
-    def getUnionFromOriginalName(self, originalName: str) -> UnionContext|None:
-        ret: list[UnionContext] = []
-        for cntx in self.unionMap.values():
-            if cntx.originalName == originalName:
-                ret.append(cntx)
-
-        if len(ret) > 0:
-            # Order the list and get the most recent union using the "creationOrder" index.
-            return sorted(ret)[-1]
-        
-        return None
 
 # AST components.
 class AST(ABC):
@@ -817,7 +817,7 @@ class AST(ABC):
         tok = self.peek()
         if tok.id not in expectedIDs:
             raise ValueError(
-                f"{tok.getPosition()} Expected {' or '.join(expectedIDs)}, found {tok.id}"
+                f"{tok.getPosition()} Expected {' or '.join(expectedIDs)} but found {tok.id}"
             )
 
         self.pop()
@@ -1002,32 +1002,7 @@ class AST(ABC):
 
     def _parsePrimaryExpression(self) -> Exp:
         tok = self.peek()
-        match tok.id:
-            case "constant" | "unsigned_constant" | "long_constant" | "unsigned_long_constant" | \
-                 "double_constant" | "float_constant" | "character":
-                ret = self._parseConstant()
-
-            case "string":
-                ret = self.createChild(String)
-
-            case "identifier":
-                if self.peek(1).id == "(":
-                    ret = self.createChild(FunctionCall)
-                else:
-                    ret = self.createChild(Variable)
-
-            case "(":
-                self.expect("(")
-                ret = self._parseExpression()
-                self.expect(")")
-
-            case _:
-                self.raiseError(f"Unexpected token {tok} when parsing a Factor")
-
-        return ret
-
-    def _parseConstant(self) -> Constant:
-        tok = self.peek()
+        ret: Exp|None = None
         match tok.id:
             case "constant":
                 # A number (without any ending identifier such as L or ul) can be considered an int 
@@ -1068,9 +1043,31 @@ class AST(ABC):
                 # Characters such as 'e' are taken as integers in C.
                 ret = self.createChild(IntConstant)
 
-            case _:
-                self.raiseError(f"{tok.id} is not a constant")
-        
+            case "string":
+                ret = self.createChild(String)
+
+            case "identifier":
+                if self.peek(1).id == "(":
+                    ret = self.createChild(FunctionCall)
+                elif tok.value in self.context.identifierMap is not None:
+                    # Remove the token.
+                    self.pop()
+                    
+                    ctx = self.context.identifierMap[tok.value]
+                    if ctx.constValue is not None:
+                        # If it's a constant value, return it directly.
+                        ret = ctx.constValue
+                    else:
+                        ret = self.createChild(Variable, tok.value)
+
+            case "(":
+                self.expect("(")
+                ret = self._parseExpression()
+                self.expect(")")
+
+        if ret is None:
+            self.raiseError(f"Unexpected token {tok} when parsing a Factor")
+
         return ret
 
     def _parseBlockItem(self) -> BlockItem:
@@ -1085,6 +1082,8 @@ class AST(ABC):
             return self.createChild(StructDeclaration)
         elif self.peek().id == "union" and self.peek(2).id in (";", "{"):
             return self.createChild(UnionDeclaration)
+        elif self.peek().id == "enum" and self.peek(2).id in (";", "{"):
+            return self.createChild(EnumDeclaration)
         else:
             storageClass, qualifierClass, baseType = self.getTypeAndStorageClass()
             declarator = self.createChild(TopDeclarator)
@@ -1108,6 +1107,24 @@ class AST(ABC):
         else:
             return self.createChild(SingleInitializer, *args)
 
+    # tagType must be one of "struct", "union" or "enum".
+    def _processTags(self, tagType: str) -> TypeSpecifier:
+        # The next token must be the identifier of the "tagType".
+        typeIdentifier = self.expect("identifier").value
+        objectType = self.context.getTagObjectFromOriginalName(tagType.upper(), typeIdentifier)        
+        if objectType is None:
+            self.raiseError(f"{tagType} {typeIdentifier} is not declared")
+
+        # Check that there's no conflict with a different struct, union or enum already defined.
+        oppositeTags = [t for t in ("struct", "union" or "enum") if t != tagType]
+        for tag in oppositeTags:
+            oppositeType = self.context.getTagObjectFromOriginalName(tag.upper(), typeIdentifier)
+            if oppositeType is not None and oppositeType.alreadyDeclared:
+                self.raiseError(f"Previous {oppositeType} conflicts with this type")
+
+        # Return the type stored in the context.
+        return objectType.idType
+
     def getTypeAndStorageClass(self, expectsStorageClass = True) -> tuple[StorageClass|None, TypeQualifier, TypeSpecifier]:
         storageClass: StorageClass|None = None
         qualifierClass: TypeQualifier = TypeQualifier()
@@ -1122,39 +1139,11 @@ class AST(ABC):
                 if tok.id in typeSet:
                     self.raiseError(f"Variable was already defined as {tok.id}")
 
-                if tok.id == "struct":
+                if tok.id in ("struct", "union", "enum"):
                     if idTypeAlreadyDefined:
                         self.raiseError("Conflicting types")
-                    # The next token must be the identifier of the struct.
-                    structIdentifier = self.expect("identifier").value
-                    structType = self.context.getStructFromOriginalName(structIdentifier)
-                    if structType is None:
-                        self.raiseError(f"Struct {structType} is not declared")
 
-                    # Check that there's no conflict with a different union already defined.
-                    enumType = self.context.getUnionFromOriginalName(structIdentifier)
-                    if enumType is not None and enumType.alreadyDeclared:
-                        self.raiseError(f"Previous enum {structIdentifier} conflicts with this type")
-
-                    # Return the type stored in the context.
-                    idType = structType.idType
-                    idTypeAlreadyDefined = True
-
-                elif tok.id == "union":
-                    if idTypeAlreadyDefined:
-                        self.raiseError("Conflicting types")
-                    # The next token must be the identifier of the union.
-                    unionIdentifier = self.expect("identifier").value
-                    unionType = self.context.getUnionFromOriginalName(unionIdentifier)
-                    if unionType is None:
-                        self.raiseError(f"Union {unionType} is not declared")
-
-                    structType = self.context.getStructFromOriginalName(unionIdentifier)
-                    if structType is not None and structType.alreadyDeclared:
-                        self.raiseError(f"Previous struct {unionIdentifier} conflicts with this type")
-
-                    # Return the type stored in the context.
-                    idType = unionType.idType
+                    idType = self._processTags(tok.id)
                     idTypeAlreadyDefined = True
 
                 typeSet.add(tok.id)
@@ -1209,10 +1198,7 @@ class AST(ABC):
             idType = TypeSpecifier.FLOAT
         elif typeSet == {"void"}:
             idType = TypeSpecifier.VOID
-        elif typeSet == {"struct"}:
-            # Value already set a few lines above.
-            pass
-        elif typeSet == {"union"}:
+        elif typeSet in ({"struct"}, {"union"}, {"enum"}):
             # Value already set a few lines above.
             pass
         else:
@@ -1496,9 +1482,10 @@ class DirectDeclarator(DeclaratorAST):
             while self.peek().id == "[":
                 self.pop()
 
-                arrayDim = self._parseConstant()
-                if isinstance(arrayDim, (DoubleConstant, FloatConstant)):
-                    self.raiseError("Array dimension must be an integer")
+                if self.peek().id == "]":
+                    self.raiseError("Variable length arrays not implemented")
+
+                arrayDim = self.parseConstantFromType(TypeSpecifier.LONG.toBaseType(), strict=True)[0]
                 dim = int(arrayDim.constValue)
                 if dim <= 0:
                     self.raiseError("Array dimension must be greater than zero")
@@ -1627,9 +1614,7 @@ class BaseAbstractDeclarator(AbstractDeclaratorAST):
             while self.peek().id == "[":
                 self.pop()
 
-                arrayDim = self._parseConstant()
-                if isinstance(arrayDim, (DoubleConstant, FloatConstant)):
-                    self.raiseError("Array dimension must be an integer")
+                arrayDim = self.parseConstantFromType(TypeSpecifier.LONG.toBaseType(), strict=True)[0]
                 dim = int(arrayDim.constValue)
                 if dim <= 0:
                     self.raiseError("Array dimension must be greater than zero")
@@ -1643,9 +1628,7 @@ class BaseAbstractDeclarator(AbstractDeclaratorAST):
             while True:
                 self.expect("[")
 
-                arrayDim = self._parseConstant()
-                if isinstance(arrayDim, (DoubleConstant, FloatConstant)):
-                    self.raiseError("Array dimension must be an integer")
+                arrayDim = self.parseConstantFromType(TypeSpecifier.LONG.toBaseType(), strict=True)[0]
                 dim = int(arrayDim.constValue)
                 if dim <= 0:
                     self.raiseError("Array dimension must be greater than zero")
@@ -2438,16 +2421,18 @@ class StructDeclaration(Declaration):
         self.originalIdentifier = self.expect("identifier").value
         
         self.members: list[StructMemberDeclaration] = []
-
-        # Create a new mangled name.
-        self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
         self.byteSize: int = -1
         self.alignment: int = -1
 
         # Check that there's no union with this name already defined.
         prevUnion = self.context.getUnionFromOriginalName(self.originalIdentifier)
         if prevUnion is not None and prevUnion.alreadyDeclared:
-            self.raiseError(f"Union {self.originalIdentifier} already declared in this scope")
+            self.raiseError(f"{prevUnion.idType} already declared in this scope")
+
+        # Check that there's no enum with this name already defined.
+        prevEnum = self.context.getEnumFromOriginalName(self.originalIdentifier)
+        if prevEnum is not None and prevEnum.alreadyDeclared:
+            self.raiseError(f"{prevEnum.idType} already declared in this scope")
 
         ctx = self.context.getStructFromOriginalName(self.originalIdentifier)
         if ctx is None or not ctx.alreadyDeclared:
@@ -2503,7 +2488,7 @@ class StructDeclaration(Declaration):
         
         if ctx.alreadyDeclared and len(self.members) > 0:
             if len(ctx.idType.getMembers()) > 0:
-                self.raiseError(f"struct {self.originalIdentifier} already defined in this scope")
+                self.raiseError(f"{ctx.idType} already defined in this scope")
             else:
                 # Set the new members of the struct.
                 self.context.completeStruct(self)
@@ -2551,16 +2536,18 @@ class UnionDeclaration(Declaration):
         self.originalIdentifier = self.expect("identifier").value
         
         self.members: list[UnionMemberDeclaration] = []
-
-        # Create a new mangled name.
-        self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
         self.byteSize: int = -1
         self.alignment: int = -1
 
         # Check that there's no struct with this name already defined.
         prevStruct = self.context.getStructFromOriginalName(self.originalIdentifier)
         if prevStruct is not None and prevStruct.alreadyDeclared:
-            self.raiseError(f"Struct {self.originalIdentifier} already declared in this scope")
+            self.raiseError(f"{prevStruct.idType} already declared in this scope")
+
+        # Check that there's no enum with this name already defined.
+        prevEnum = self.context.getEnumFromOriginalName(self.originalIdentifier)
+        if prevEnum is not None and prevEnum.alreadyDeclared:
+            self.raiseError(f"{prevEnum.idType} already declared in this scope")
 
         ctx = self.context.getUnionFromOriginalName(self.originalIdentifier)
         if ctx is None or not ctx.alreadyDeclared:
@@ -2617,7 +2604,7 @@ class UnionDeclaration(Declaration):
         
         if ctx.alreadyDeclared and len(self.members) > 0:
             if len(ctx.idType.getMembers()) > 0:
-                self.raiseError(f"union {self.originalIdentifier} already defined in this scope")
+                self.raiseError(f"{ctx.idType} already defined in this scope")
             else:
                 # Set the new members of the union.
                 self.context.completeUnion(self)
@@ -2640,6 +2627,124 @@ class UnionDeclaration(Declaration):
             ret += f'{pad}}}\n'
         else:
             ret =f'{pad}Union({self.typeId})\n'
+        return ret
+
+class EnumMemberDeclaration(AST):
+    def parse(self, *args):
+        # An enum member is always a const int.
+        self.typeId = TypeSpecifier.INT.toBaseType(TypeQualifier(const=True))
+        self.name = self.expect("identifier").value
+        self.mangledName = self.context.mangleIdentifier(self.name)
+
+        # If the value is not set on the member declaration, it will be calculated in the 
+        # EnumDeclaration.
+        self.value: Constant
+        self.hasSetValue: bool = False
+        if self.peek().id == "=":
+            self.pop()
+            self.value = self.parseConstantFromType(TypeSpecifier.INT.toBaseType(), True)[0]
+            self.hasSetValue = True
+
+    def print(self, padding: int) -> str:
+        pad = " " * padding
+        return f'{pad}{self.typeId} {self.name}'
+
+class EnumDeclaration(Declaration):
+    def parse(self, *args):
+        self.expect("enum")
+        self.originalIdentifier = self.expect("identifier").value
+        
+        self.members: list[EnumMemberDeclaration] = []
+
+        # Create a new mangled name.
+        self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
+
+        # Check that there's no struct with this name already defined.
+        prevStruct = self.context.getStructFromOriginalName(self.originalIdentifier)
+        if prevStruct is not None and prevStruct.alreadyDeclared:
+            self.raiseError(f"{prevStruct.idType} already declared in this scope")
+
+        # Check that there's no union with this name already defined.
+        prevUnion = self.context.getUnionFromOriginalName(self.originalIdentifier)
+        if prevUnion is not None and prevUnion.alreadyDeclared:
+            self.raiseError(f"{prevUnion.idType} already declared in this scope")
+
+        # Check that there's no enum with this name already defined. Contrary to structs and unions, 
+        # enums cannot be declared first and defined later.
+        prevEnum = self.context.getEnumFromOriginalName(self.originalIdentifier)
+        if prevEnum is not None and prevEnum.alreadyDeclared:
+            self.raiseError(f"{prevEnum.idType} already declared in this scope")
+
+        # If the enum is new, or it is being shadowed by another enum with the same name...
+        # Create a new mangled identifier.
+        self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
+        # Create the type.
+        self.typeId = TypeSpecifier.ENUM(self.originalIdentifier)
+        # Add it to the context map only if it has not been declared in the current scope.
+        self.context.addEnum(self)
+
+        # Parse the members. An enum cannot be forward declared in C99. This is different to structs
+        # and unions.
+        self.expect("{")
+
+        # The enum is going to be defined. It must always have at least one member.
+        # The initial value of the enum is always zero, unless set in the member.
+        nextEnumValue: int = 0
+        while True:
+            decl = self.createChild(EnumMemberDeclaration)
+
+            # The name of the declaration must not be repeated.
+            for mem in self.members:
+                if mem.name == decl.name:
+                    self.raiseError(f"Duplicated member with name {decl.name}")
+
+            # Set the value of the enum if it does not have one.
+            if decl.hasSetValue:
+                nextEnumValue = int(decl.value.constValue)
+            else:
+                decl.value = IntConstant([], None, None, nextEnumValue)
+            # Increment for the next enum value.
+            nextEnumValue += 1
+
+            self.members.append(decl)
+
+            if decl.name in self.context.identifierMap and \
+                self.context.identifierMap[decl.name].alreadyDeclared:
+                self.raiseError(f"{decl.name} already declared in this scope")
+
+            # Add the enum member as a new variable to the context.
+            idContext = IdentifierContext(
+                originalName=decl.name,
+                mangledName=decl.mangledName,
+                idType=decl.typeId,
+                constValue=decl.value
+            )
+            self.context.identifierMap[decl.name] = idContext
+
+            # End of enum.
+            if self.peek().id == "}":
+                break
+
+            # End of enum with trailing comma.
+            if self.peek().id == "," and self.peek(1).id == "}":
+                self.pop()
+                break
+
+            # If there are more members, a comma is expected.
+            self.expect(",")
+
+        self.expect("}")
+        self.expect(";")
+
+    def print(self, padding: int) -> str:
+        pad = " " * padding
+        if len(self.members) > 0:
+            ret  = f'{pad}Enum({self.typeId} = {{\n'
+            for member in self.members:
+                ret += f'{pad}  - {member.name} = {member.value}\n'
+            ret += f'{pad}}}\n'
+        else:
+            ret =f'{pad}Enum({self.typeId})\n'
         return ret
 
 # A block is a list of BlockItems enclosed by {}.
@@ -2675,17 +2780,17 @@ class StaticEvalValue:
     # Byte offset from the base of the pointer.
     pointerOffset: int = 0
 
-    def getIntegerValue(self) -> int:
+    def getIntegerValue(self, referenceAST: AST) -> int:
         if self.valType in (StaticEvalType.POINTER, StaticEvalType.VARIABLE):
-            raise ValueError(f"Cannot get integer value from {self}")
+            referenceAST.raiseError(f"Cannot get integer value during constant folding")
         try:
             return int(self.value)
         except:
             return int(float(self.value))
 
-    def getFloatValue(self) -> float:
+    def getFloatValue(self, referenceAST: AST) -> float:
         if self.valType in (StaticEvalType.POINTER, StaticEvalType.VARIABLE):
-            raise ValueError(f"Cannot get float value from {self}")
+            referenceAST.raiseError(f"Cannot get float value during constant folding")
         return float(self.value)
     
 class Exp(AST):
@@ -3225,16 +3330,13 @@ class PointerInitializer(Constant):
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
 class Variable(Exp):
-    def parse(self, *args):
-        tokenID = self.expect("identifier")
-        if tokenID.value not in self.context.identifierMap:
-            self.raiseError(f"{tokenID.value} is undeclared")
-        
-        ctxVar = self.context.identifierMap[tokenID.value]
+    def parse(self, variableName: str):
+        # This variable is inside the identifierMap, verified at _parsePrimaryExpression.
+        ctxVar = self.context.identifierMap[variableName]
         
         # Get the type of variable from the identifier.
         self.typeId = ctxVar.idType
-        self.originalIdentifier: str = tokenID.value
+        self.originalIdentifier: str = variableName
         self.identifier: str = ctxVar.mangledName
 
     def staticEval(self) -> StaticEvalValue:
@@ -3345,13 +3447,13 @@ class Cast(Exp):
 
         if isinstance(self.typeId, BaseDeclaratorType):
             if self.typeId.baseType.isDecimal():
-                doubleValue = innerValue.getFloatValue()
+                doubleValue = innerValue.getFloatValue(self.inner)
                 if self.typeId.baseType == TypeSpecifier.FLOAT:
                     doubleValue = FloatConstant.convertPythonFloatToCFloat(doubleValue)
                 return StaticEvalValue(StaticEvalType.FLOAT, str(doubleValue))
             
             if self.typeId.baseType.isInteger():
-                intValue = innerValue.getIntegerValue()
+                intValue = innerValue.getIntegerValue(self.inner)
 
                 # C-cast implemented in Python.
                 # Mask to original width (simulating the source C-type storage).
@@ -3376,12 +3478,12 @@ class Cast(Exp):
         if isinstance(self.typeId, PointerDeclaratorType):
             if self.inner.typeId.isInteger():
                 # Integer to pointer.
-                return StaticEvalValue(StaticEvalType.POINTER, "", innerValue.getIntegerValue())
+                return StaticEvalValue(StaticEvalType.POINTER, "", innerValue.getIntegerValue(self.inner))
             if innerValue.valType == StaticEvalType.POINTER:
                 # Pointer from one type to another. 
                 return innerValue
 
-        raise ValueError("Cast not implemented")
+        self.raiseError(f"Static evaluation of cast from {self.inner.typeId} to {self.typeId} not implemented")
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3493,15 +3595,15 @@ class Unary(Exp):
 
         match self.unaryOperator:
             case UnaryOperator.BITWISE_COMPLEMENT:
-                retVal = ~innerValue.getIntegerValue()
+                retVal = ~innerValue.getIntegerValue(self.inner)
                 return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
             
             case UnaryOperator.NEGATION:
                 if self.typeId.isDecimal():
-                    retVal = -innerValue.getFloatValue()
+                    retVal = -innerValue.getFloatValue(self.inner)
                     return StaticEvalValue(StaticEvalType.FLOAT, str(retVal))
                 else:
-                    retVal = -innerValue.getIntegerValue()
+                    retVal = -innerValue.getIntegerValue(self.inner)
                     return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
                 
             case UnaryOperator.NOT:
@@ -3509,7 +3611,7 @@ class Unary(Exp):
                     # A pointer to a static variable is never null.
                     retVal = 0
                 else:
-                    retVal = 0 if innerValue.getIntegerValue() else 1
+                    retVal = 0 if innerValue.getIntegerValue(self.inner) else 1
                 
                 return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
 
@@ -3884,7 +3986,7 @@ class Binary(Exp):
                     raise ValueError()
                 
                 # Pointer sum: exp2 is long.
-                index = exp2Eval.getIntegerValue()
+                index = exp2Eval.getIntegerValue(self.exp2)
                 return StaticEvalValue(StaticEvalType.POINTER, 
                                         exp1Eval.value, 
                                         exp1Eval.pointerOffset + index * self.exp1.typeId.declarator.getByteSize())
@@ -3894,7 +3996,7 @@ class Binary(Exp):
                     raise ValueError()
 
                 # Pointer sum: exp1 is long.
-                index = exp1Eval.getIntegerValue()
+                index = exp1Eval.getIntegerValue(self.exp1)
                 return StaticEvalValue(StaticEvalType.POINTER, 
                                         exp2Eval.value,
                                         exp2Eval.pointerOffset + index * self.exp2.typeId.declarator.getByteSize())
@@ -3905,7 +4007,7 @@ class Binary(Exp):
                     raise ValueError()
                 
                 # Pointer subtraction: exp2 is a long.
-                index = exp2Eval.getIntegerValue()
+                index = exp2Eval.getIntegerValue(self.exp2)
                 return StaticEvalValue(StaticEvalType.POINTER, 
                                         exp1Eval.value, 
                                         exp1Eval.pointerOffset - index * self.exp1.typeId.declarator.getByteSize())
@@ -3933,17 +4035,11 @@ class Binary(Exp):
 
         # ARITHMETIC EVALUATIONS.
         elif self.typeId.isDecimal():
-            try:
-                exp1 = exp1Eval.getFloatValue()
-                exp2 = exp2Eval.getFloatValue()
-            except:
-                self.raiseError("Expressions must have constant value")
+            exp1 = exp1Eval.getFloatValue(self.exp1)
+            exp2 = exp2Eval.getFloatValue(self.exp2)
         else:
-            try:
-                exp1 = exp1Eval.getIntegerValue()
-                exp2 = exp2Eval.getIntegerValue()
-            except:
-                self.raiseError("Expressions must have constant value")
+            exp1 = exp1Eval.getIntegerValue(self.exp1)
+            exp2 = exp2Eval.getIntegerValue(self.exp2)
 
         if self.compoundBinary:
             self.raiseError("Cannot evaluate during compilation.")
@@ -4024,6 +4120,13 @@ class Assignment(Exp):
         if not exp1.isLvalueAssignable():
             self.raiseError("Left expression must be a modifiable lvalue")
 
+        # If exp1's type is a struct or union, check that the inner members are not constant.
+        if isinstance(exp1.typeId, BaseDeclaratorType) and \
+           exp1.typeId.baseType.name in ("STRUCT", "UNION"):
+            for mem in exp1.typeId.baseType.getMembers():
+                if mem.type.getTypeQualifiers().const:
+                    self.raiseError("Left expression must be a modifiable lvalue")
+
         # Exp1 = Exp2
         self.exp1 = exp1.preconvertExpression()
         if self.exp1.typeId == TypeSpecifier.VOID.toBaseType():
@@ -4076,7 +4179,7 @@ class TernaryConditional(Exp):
         thenEval = self.thenExp.staticEval()
         elseEval = self.elseExp.staticEval()
 
-        return thenEval if conditionEval.getIntegerValue() else elseEval
+        return thenEval if conditionEval.getIntegerValue(self.condition) else elseEval
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -4237,7 +4340,7 @@ class Subscript(Exp):
         indexEval = self.index.staticEval()
 
         try:
-            indexEvalInteger = indexEval.getIntegerValue()
+            indexEvalInteger = indexEval.getIntegerValue(self.index)
         except:
             self.raiseError("Cannot evaluate the index")
 
@@ -4321,12 +4424,9 @@ class Arrow(Exp):
 
         # Check the type.
         leftExpMangledName: str = self.leftExp.typeId.declarator.baseType.identifier
-        if self.leftExp.typeId.declarator.baseType.name == "STRUCT" and \
-            self.context.structMap.get(leftExpMangledName) is None:
+        if self.leftExp.typeId.declarator.baseType.name in ("STRUCT", "UNION") and \
+           self.context.tagsMap.get(leftExpMangledName) is None:
             self.raiseError(f"{self.leftExp.typeId} is not a valid type")
-        elif self.leftExp.typeId.declarator.baseType.name == "UNION" and \
-            self.context.unionMap.get(leftExpMangledName) is None:
-                self.raiseError(f"{self.leftExp.typeId} is not a valid type")
 
         self.memberInfo: ParameterInformation|None = self.leftExp.typeId.declarator.baseType.getMember(self.member)
         if self.memberInfo is None:
