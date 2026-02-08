@@ -2537,10 +2537,10 @@ class COMMENT(AssemblerInstruction):
         super().__init__(parentAST)
 
     def emitCode(self) -> str:
-        return f"\t// {self.comment}"
+        return f"\t# {self.comment}"
 
     def print(self) -> str:
-        return f"\n// {self.comment}"
+        return f"\n# {self.comment}"
 
 """
 OPERANDS

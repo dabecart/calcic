@@ -13,6 +13,7 @@ import os
 import traceback
 
 from . import assembler_x64, lexer, parser, TAC
+from . import TAC_optimizer as optimizer
 
 import sys
 
@@ -146,6 +147,25 @@ def main() -> None:
 
     if args.tac:
         exit(0)
+
+    optimizationFlags = optimizer.TACOptimizationFlags(
+        constant_folding                = args.fold_constants               or args.optimize,
+        unreachable_code_elimination    = args.eliminate_unreachable_code   or args.optimize,
+        copy_propagation                = args.propagate_copies             or args.optimize,
+        dead_store_elimination          = args.eliminate_dead_stores        or args.optimize,
+    )
+
+    try:
+        tacOptimizer = optimizer.TACOptimizer(optimizationFlags)
+        # Modifies the inner instructions of the program.
+        tacOptimizer.optimize(tacProgram)
+        if args.verbose:
+            print(f"Optimizer:\n{tacProgram}")
+    except Exception as e:
+        print(f"Optimizer exception:\n{e}", file=sys.stderr)
+        if args.verbose:
+            print(traceback.format_exc(), file=sys.stderr)
+        exit(1)
 
     try:
         assemblyProgram = assembler_x64.AssemblerProgram(tacProgram)

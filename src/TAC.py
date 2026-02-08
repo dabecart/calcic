@@ -180,9 +180,9 @@ class TAC(ABC):
                         # Increment/decrement the pointer.
                         preDereference = TACValue(False, exp.typeId)
                         if exp.unaryOperator == UnaryOperator.PRE_INCREMENT:
-                            delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), "1", self)
+                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "1", self)
                         else:
-                            delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), "-1", self)
+                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "-1", self)
 
                         pointerOp = self.createChild(TACAddToPointer, inner.convert(), 
                             delta, exp.typeId.declarator.getByteSize(), preDereference, insts)
@@ -226,9 +226,9 @@ class TAC(ABC):
                         # Increment/decrement the pointer.
                         preDereference = TACValue(False, exp.typeId)
                         if exp.unaryOperator == UnaryOperator.POST_INCREMENT:
-                            delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), "1", self)
+                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "1", self)
                         else:
-                            delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), "-1", self)
+                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "-1", self)
                         pointerOp = self.createChild(TACAddToPointer, inner.convert(), 
                             delta, exp.typeId.declarator.getByteSize(), preDereference, insts)
                         # Set the value of the original variable to the unary result.
@@ -334,7 +334,7 @@ class TAC(ABC):
                         # Get the base address of the leftmost struct/union.
                         self.createChild(TACGetAddress, preDereference.value, dst, insts)
                         # Add to this address the offset bytes of the field.
-                        delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), str(preDereference.offset), self)
+                        delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), str(preDereference.offset), self)
                         self.createChild(TACAddToPointer, dst, delta, 1, dst, insts)
                         return TACBaseOperand(dst, exp.typeId, insts)
                     case _:
@@ -382,7 +382,7 @@ class TAC(ABC):
                             # If the offset is 0, no need to add it to the pointer.
                             if member.offset != 0:
                                 dstPointer = self.createChild(TACValue, False, PointerDeclaratorType(exp.typeId))
-                                delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), str(member.offset), self)
+                                delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), str(member.offset), self)
                                 self.createChild(TACAddToPointer, inner.value, delta, 1, dstPointer, insts)
                                 return TACDereferencedPointer(dstPointer, exp.typeId, insts)
                             else:
@@ -412,7 +412,7 @@ class TAC(ABC):
 
                     # If the offset is 0, no need to add it to the pointer.
                     if member.offset != 0:
-                        delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), str(member.offset), self)
+                        delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), str(member.offset), self)
                         dstPointer = self.createChild(TACValue, False, PointerDeclaratorType(exp.typeId))
                         self.createChild(TACAddToPointer, inner, delta, 1, dstPointer, insts)
                         return TACDereferencedPointer(dstPointer, exp.typeId, insts)
@@ -1130,10 +1130,12 @@ class TACBinary(TACInstruction):
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
         if len(args) == 1:
             # ast: Binary.
+            self.ASTAsArgument = True
             self.binaryAST: Binary = args[0]
             self.operator = self.binaryAST.binaryOperator
         else:
             # operation, value1, value2
+            self.ASTAsArgument = False
             self.operator: BinaryOperator = args[0]
             self.exp1: TACValue = args[1]
             self.exp2: TACValue = args[2]
@@ -1145,7 +1147,7 @@ class TACBinary(TACInstruction):
             self.insts.pop()
 
     def parse(self)-> TACValue:
-        if hasattr(self, "binaryAST"):
+        if self.ASTAsArgument:
             return self.parseFromASTExpressions()
         else:
             return TACValue(False, self.exp1.valueType)
@@ -1178,13 +1180,13 @@ class TACBinary(TACInstruction):
                 self.createChild(TACJumpIfZero, self.exp2, falseLabel, self.insts)
 
                 self.createChild(TACCopy, 
-                                 TACValue(True, BaseDeclaratorType(TypeSpecifier.INT), "1", self),
+                                 TACValue(True, TypeSpecifier.INT.toBaseType(), "1", self),
                                  dest, self.insts)
                 self.createChild(TACJump, endLabel, self.insts)
 
                 self.createChild(TACLabel, falseLabel, self.insts)
                 self.createChild(TACCopy, 
-                                 TACValue(True, BaseDeclaratorType(TypeSpecifier.INT), "0", self), 
+                                 TACValue(True, TypeSpecifier.INT.toBaseType(), "0", self), 
                                  dest, self.insts)
                 
                 self.createChild(TACLabel, endLabel, self.insts)
@@ -1209,13 +1211,13 @@ class TACBinary(TACInstruction):
                 self.createChild(TACJumpIfNotZero, self.exp2, trueLabel, self.insts)
 
                 self.createChild(TACCopy, 
-                                 TACValue(True, BaseDeclaratorType(TypeSpecifier.INT), "0", self), 
+                                 TACValue(True, TypeSpecifier.INT.toBaseType(), "0", self), 
                                  dest, self.insts)
                 self.createChild(TACJump, endLabel, self.insts)
 
                 self.createChild(TACLabel, trueLabel, self.insts)
                 self.createChild(TACCopy, 
-                                 TACValue(True, BaseDeclaratorType(TypeSpecifier.INT), "1", self), 
+                                 TACValue(True, TypeSpecifier.INT.toBaseType(), "1", self), 
                                  dest, self.insts)
                 
                 self.createChild(TACLabel, endLabel, self.insts)
@@ -1280,7 +1282,7 @@ class TACBinary(TACInstruction):
                     div = TACBinary( 
                             BinaryOperator.DIVISION, 
                             diff.result, 
-                            TACValue(True, BaseDeclaratorType(TypeSpecifier.ULONG), str(pointer1Size), self),
+                            TACValue(True, TypeSpecifier.ULONG.toBaseType(), str(pointer1Size), self),
                             instructionsList=self.insts,
                             parentTAC=self
                     )

@@ -494,6 +494,7 @@ class StaticEvalMsg:
             raise ValueError()
         return self.msgType.value < other.msgType.value
     
+    # This is wrongly written, but it does not conflict with the raise keyword.
     def rise(self, warnFunction, errorFunction):
         if self.msgType == StaticEvalMsgType.WARNING:
             warnFunction(self.msg)
@@ -530,9 +531,12 @@ class StaticEvaluation:
         else:
             try:
                 ret = int(val)
-            except Exception as e:
-                ret = 0
-                retStatus = StaticEvalMsg.ERROR(str(e))
+            except:
+                try:
+                    ret = int(float(val))
+                except Exception as e:
+                    ret = 0
+                    retStatus = StaticEvalMsg.ERROR(str(e))
 
             if t in (TypeSpecifier.CHAR, TypeSpecifier.SIGNED_CHAR):
                 if overflow := (ret >= 0x80):
@@ -623,7 +627,9 @@ class StaticEvaluation:
                     evalStatus = StaticEvalMsg.ERROR("Division by zero")
 
                 if isinstance(v2, float):
-                    if v2 == 0.0:
+                    if abs(v1) == 0.0 and abs(v2) == 0.0:
+                        ret = math.nan
+                    elif v2 == 0.0:
                         ret = math.inf
                     elif v2 == -0.0:
                         ret = -math.inf
