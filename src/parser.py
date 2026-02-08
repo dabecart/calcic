@@ -30,6 +30,12 @@ TBlockItem   = TypeVar("TBlockItem", bound="BlockItem")
 TDeclaration = TypeVar("TDeclaration", bound="Declaration")
 TInitializer = TypeVar("TInitializer", bound="Initializer")
 
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CONTEXT: To handle the state of variables and functions during the compilation.
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+
 # Context information for each identifier.
 @dataclass
 class IdentifierContext:
@@ -322,7 +328,11 @@ class Context:
         ctx.idType.alignment = union.alignment
         ctx.idType.members = union.membersToParamInfo()
 
-# AST components.
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AST BASE CLASS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 class AST(ABC):
     def __init__(self, tokens: list[Token], context: Context|None = None, parentAST: AST|None = None, *args) -> None:
         super().__init__()
@@ -1249,6 +1259,13 @@ class BlockItem(AST):
     def print(self, padding: int) -> str:
         pass
 
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+STATEMENTS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+
 class Statement(BlockItem):
     @abstractmethod
     def parse(self, *args):
@@ -1626,6 +1643,13 @@ class GotoStatement(Statement):
     def print(self, padding: int) -> str:
         pad  = " " * padding
         return f'{pad}Goto({self.labelName})\n'
+
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DECLARATIONS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 
 class Declaration(BlockItem):
     @abstractmethod
@@ -2512,6 +2536,12 @@ class Exp(AST):
         else:
             return None
 
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CONSTANTS: Different kind of C constants of basic types.
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+
 class Constant(Exp):
     def __init__(self, tokens: list[Token], context: Context | None = None, 
                  parentAST: AST | None = None, *args) -> None:
@@ -2533,6 +2563,20 @@ class Constant(Exp):
     def print(self, padding: int) -> str:
         pass
 
+    def _parseIntValue(self):
+        if self.peek().id in ("double_constant", "float_constant"):
+            intVal = math.floor(float(self.pop().value))
+        else:
+            intValToken = self.expect(
+                "constant", "long_constant", 
+                "unsigned_constant", "unsigned_long_constant", "character"
+            )
+            try:
+                intVal = intValToken.parseIntegerToken()
+            except Exception as e:
+                self.raiseError(str(e))
+        return intVal
+
 class CharConstant(Constant):
     def parse(self, *args):
         self.typeId = TypeSpecifier.CHAR.toBaseType()
@@ -2540,25 +2584,12 @@ class CharConstant(Constant):
         if len(args) > 0:
             intVal = int(args[0])
         else:
-            if self.peek().id in ("double_constant", "float_constant"):
-                intVal = math.floor(float(self.pop().value))
-            else:
-                try:
-                    intVal = self.expect(
-                        "constant", "long_constant", "unsigned_constant", "unsigned_long_constant", "character"
-                    ).parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+            intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x80:
-            # This is equivalent to modulo 2^7.
-            intVal &= 0xFF
-            if intVal >= 0x80:
-                intVal -= 0x100
-
-            self.raiseWarning(f"char constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2574,20 +2605,12 @@ class UCharConstant(Constant):
             if self.peek().id in ("double_constant", "float_constant"):
                 intVal = math.floor(float(self.pop().value))
             else:
-                try:
-                    intVal = self.expect(
-                        "constant", "long_constant", "unsigned_constant", "unsigned_long_constant", "character"
-                    ).parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+                intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x100:
-            # This is the same as modulo 2^8.
-            intVal &= 0xFF
-
-            self.raiseWarning(f"unsigned char constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2603,22 +2626,12 @@ class ShortConstant(Constant):
             if self.peek().id in ("double_constant", "float_constant"):
                 intVal = math.floor(float(self.pop().value))
             else:
-                try:
-                    intVal = self.expect(
-                        "constant", "long_constant", "unsigned_constant", "unsigned_long_constant", "character"
-                    ).parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+                intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x8000:
-            # This is equivalent to modulo 2^15.
-            intVal &= 0xFFFF
-            if intVal >= 0x8000:
-                intVal -= 0x10000
-
-            self.raiseWarning(f"short constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2634,20 +2647,12 @@ class UShortConstant(Constant):
             if self.peek().id in ("double_constant", "float_constant"):
                 intVal = math.floor(float(self.pop().value))
             else:
-                try:
-                    intVal = self.expect(
-                        "constant", "long_constant", "unsigned_constant", "unsigned_long_constant", "character"
-                    ).parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+                intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x10000:
-            # This is the same as modulo 2^16.
-            intVal &= 0xFFFF
-
-            self.raiseWarning(f"unsigned short constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2660,27 +2665,12 @@ class IntConstant(Constant):
         if len(args) > 0:
             intVal = int(args[0])
         else:
-            if self.peek().id in ("double_constant", "float_constant"):
-                intVal = math.floor(float(self.pop().value))
-            else:
-                intValToken = self.expect(
-                    "constant", "long_constant", 
-                    "unsigned_constant", "unsigned_long_constant", "character"
-                )
-                try:
-                    intVal = intValToken.parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+            intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x80000000:
-            # This is equivalent to modulo 2^31.
-            intVal &= 0xFFFFFFFF
-            if intVal >= 0x80000000:
-                intVal -= 0x100000000
-
-            self.raiseWarning(f"int constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2693,25 +2683,12 @@ class UIntConstant(Constant):
         if len(args) > 0:
             intVal = int(args[0])
         else:
-            if self.peek().id in ("double_constant", "float_constant"):
-                intVal = math.floor(float(self.pop().value))
-            else:
-                intValToken = self.expect(
-                    "constant", "long_constant", 
-                    "unsigned_constant", "unsigned_long_constant", "character"
-                )
-                try:
-                    intVal = intValToken.parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+            intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x100000000:
-            # This is the same as modulo 2^32.
-            intVal &= 0xFFFFFFFF
-
-            self.raiseWarning(f"unsigned int constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2727,24 +2704,12 @@ class LongConstant(Constant):
             if self.peek().id in ("double_constant", "float_constant"):
                 intVal = math.floor(float(self.pop().value))
             else:
-                intValToken = self.expect(
-                    "constant", "long_constant", 
-                    "unsigned_constant", "unsigned_long_constant", "character"
-                )
-                try:
-                    intVal = intValToken.parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+                intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x8000000000000000:
-            # This is the same as modulo 2^63. 
-            intVal &= 0xFFFFFFFFFFFFFFFF
-            if intVal >= 0x8000000000000000:
-                intVal -= 0x10000000000000000
-
-            self.raiseWarning(f"long constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2769,13 +2734,10 @@ class ULongConstant(Constant):
                 except Exception as e:
                     self.raiseError(str(e))
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x10000000000000000:
-            # This is the same as modulo 2^64. 
-            intVal &= 0xFFFFFFFFFFFFFFFF
-
-            self.raiseWarning(f"unsigned long constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2801,18 +2763,18 @@ class DoubleConstant(Constant):
                     self.raiseError(str(e))    
                 doubleValue = float(intVal)
 
-        self.hex = f"{struct.unpack('<Q', struct.pack('<d', doubleValue))[0]:#0{16}x}"
+        doubleValue, warn = StaticEvaluation.parseValue(self.typeId.baseType, doubleValue)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(doubleValue)
+
+        self.hex = f"{struct.unpack('<Q', struct.pack('<d', doubleValue))[0]:#0{16}x}"
 
     def print(self, padding: int) -> str:
         pad = " " * padding
         return f'{pad}Double = {self.constValue} (0x{self.hex})\n'
 
 class FloatConstant(Constant):
-    @staticmethod
-    def convertPythonFloatToCFloat(val: float) -> float:
-        return struct.unpack('f', struct.pack('f', val))[0]
-
     def parse(self, *args):
         self.typeId = TypeSpecifier.FLOAT.toBaseType()
 
@@ -2832,10 +2794,12 @@ class FloatConstant(Constant):
                     self.raiseError(str(e))
                 doubleValue = float(intVal)
 
-        # Pack into 32-bit float, then unpack again.
-        floatValue = FloatConstant.convertPythonFloatToCFloat(doubleValue)
-        self.hex = f"{struct.unpack('<I', struct.pack('<f', floatValue))[0]:#0{8}x}"
+        floatValue, warn = StaticEvaluation.parseValue(self.typeId.baseType, doubleValue)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(floatValue)
+
+        self.hex = f"{struct.unpack('<I', struct.pack('<f', floatValue))[0]:#0{8}x}"
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2905,6 +2869,12 @@ class PointerInitializer(Constant):
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # END of constants are used to initialize static variables.
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+EXPRESSIONS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 
 class Variable(Exp):
     def parse(self, variableName: str):
@@ -3024,33 +2994,16 @@ class Cast(Exp):
 
         if isinstance(self.typeId, BaseDeclaratorType):
             if self.typeId.baseType.isDecimal():
-                doubleValue = innerValue.getFloatValue(self.inner)
-                if self.typeId.baseType == TypeSpecifier.FLOAT:
-                    doubleValue = FloatConstant.convertPythonFloatToCFloat(doubleValue)
-                return StaticEvalValue(StaticEvalType.FLOAT, str(doubleValue))
+                operand = innerValue.getFloatValue(self.inner)
+                evalType = StaticEvalType.FLOAT
+            else:
+                operand = innerValue.getIntegerValue(self.inner)
+                evalType = StaticEvalType.INTEGER
             
-            if self.typeId.baseType.isInteger():
-                intValue = innerValue.getIntegerValue(self.inner)
-
-                # C-cast implemented in Python.
-                # Mask to original width (simulating the source C-type storage).
-                innerBitCount = self.inner.typeId.getByteSize() * 8
-                intValue &= (1 << innerBitCount) - 1
-                
-                if self.inner.typeId.isSigned():
-                    if intValue & (1 << (innerBitCount - 1)):
-                        intValue -= (1 << innerBitCount)
-
-                # Convert to target width.
-                castBitCount = self.typeId.getByteSize() * 8
-                intValue &= (1 << castBitCount) - 1
-
-                # Interpret as signed if necessary.
-                if self.typeId.isSigned():
-                    if intValue & (1 << (castBitCount - 1)):
-                        intValue -= (1 << castBitCount)
-
-                return StaticEvalValue(StaticEvalType.INTEGER, str(intValue))
+            retValue, warning = StaticEvaluation.parseValue(self.typeId.baseType, operand)
+            if warning:
+                warning.rise(self.raiseWarning, self.raiseError)
+            return StaticEvalValue(evalType, str(retValue))
             
         if isinstance(self.typeId, PointerDeclaratorType):
             if self.inner.typeId.isInteger():
@@ -3079,10 +3032,10 @@ class UnaryOperator(enum.Enum):
     DEREFERENCE         = "*"
     ADDRESS_OF          = "&"
 
-    PRE_INCREMENT       = enum.auto()
-    PRE_DECREMENT       = enum.auto()
-    POST_INCREMENT      = enum.auto()
-    POST_DECREMENT      = enum.auto()
+    PRE_INCREMENT       = "++x"
+    PRE_DECREMENT       = "--x"
+    POST_INCREMENT      = "x++"
+    POST_DECREMENT      = "x--"
 
     def convertToSimple(self) -> UnaryOperator:
         match self:
@@ -3170,30 +3123,25 @@ class Unary(Exp):
     def staticEval(self) -> StaticEvalValue:
         innerValue = self.inner.staticEval()
 
-        match self.unaryOperator:
-            case UnaryOperator.BITWISE_COMPLEMENT:
-                retVal = ~innerValue.getIntegerValue(self.inner)
-                return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
-            
-            case UnaryOperator.NEGATION:
-                if self.typeId.isDecimal():
-                    retVal = -innerValue.getFloatValue(self.inner)
-                    return StaticEvalValue(StaticEvalType.FLOAT, str(retVal))
-                else:
-                    retVal = -innerValue.getIntegerValue(self.inner)
-                    return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
-                
-            case UnaryOperator.NOT:
-                if innerValue.valType == StaticEvalType.POINTER:
-                    # A pointer to a static variable is never null.
-                    retVal = 0
-                else:
-                    retVal = 0 if innerValue.getIntegerValue(self.inner) else 1
-                
-                return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
+        if self.unaryOperator == UnaryOperator.NOT and innerValue.valType == StaticEvalType.POINTER:
+            # A pointer to a static variable is never null.
+            retVal = 0
+            warning = EVAL_OK
+        else:
+            if self.typeId.isDecimal():
+                operand = innerValue.getFloatValue(self.inner)
+            else:
+                operand = innerValue.getIntegerValue(self.inner)
+            retVal, warning = StaticEvaluation.evalDecl(
+                self.unaryOperator.value, self.inner.typeId, self.typeId, operand)
 
-            case _:
-                self.raiseError("Cannot evaluate during compilation")
+        if warning:
+            warning.rise(self.raiseWarning, self.raiseError)
+            
+        return StaticEvalValue(
+            StaticEvalType.INTEGER if isinstance(retVal, int) else StaticEvalType.FLOAT, 
+            str(retVal)
+        )
         
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3236,10 +3184,10 @@ class BinaryOperator(enum.Enum):
     COMPOUND_BITWISE_XOR         = "^="
     COMPOUND_BITWISE_OR          = "|="
 
-    LOGIC_LEFT_SHIFT            = enum.auto()
-    ARITHMETIC_LEFT_SHIFT       = enum.auto()
-    LOGIC_RIGHT_SHIFT           = enum.auto()
-    ARITHMETIC_RIGHT_SHIFT      = enum.auto()
+    LOGIC_LEFT_SHIFT            = "logic<<"
+    ARITHMETIC_LEFT_SHIFT       = "arith<<"
+    LOGIC_RIGHT_SHIFT           = "logic>>"
+    ARITHMETIC_RIGHT_SHIFT      = "arith>>"
 
     def isCompound(self) -> bool:
         return self.name.startswith("COMPOUND_")
@@ -3263,6 +3211,15 @@ class BinaryOperator(enum.Enum):
         except:
             return None
         return op
+    
+    def getBaseOperator(self) -> BinaryOperator:
+        if self.isCompound():
+            return BinaryOperator(self.value.replace("=", ""))
+        if "logic" in self.value:
+            return BinaryOperator(self.value.replace("logic", ""))
+        if "arith" in self.value:
+            return BinaryOperator(self.value.replace("arith", ""))
+        return self
     
     # Based on https://en.cppreference.com/w/c/language/operator_precedence.html
     def getPrecedence(self) -> int:
@@ -3607,11 +3564,17 @@ class Binary(Exp):
             if exp1Eval.value != exp2Eval.value:
                 self.raiseError("Cannot compare pointers with different base addresses")
             # Compare with the indices.
-            exp1 = exp1Eval.pointerOffset
-            exp2 = exp2Eval.pointerOffset
+            result, warning = StaticEvaluation.eval(
+                self.binaryOperator.value, TypeSpecifier.LONG, TypeSpecifier.LONG,
+                exp1Eval.pointerOffset, exp2Eval.pointerOffset
+            )
+            if warning:
+                warning.rise(self.raiseWarning, self.raiseError)
+
+            return StaticEvalValue(StaticEvalType.INTEGER, str(result))
 
         # ARITHMETIC EVALUATIONS.
-        elif self.typeId.isDecimal():
+        if self.typeId.isDecimal():
             exp1 = exp1Eval.getFloatValue(self.exp1)
             exp2 = exp2Eval.getFloatValue(self.exp2)
         else:
@@ -3621,67 +3584,14 @@ class Binary(Exp):
         if self.compoundBinary:
             self.raiseError("Cannot evaluate during compilation.")
 
-        match self.binaryOperator:
-            case BinaryOperator.MULTIPLICATION:
-                retVal = exp1 * exp2
-            case BinaryOperator.DIVISION:
-                if exp2 == 0:
-                    self.raiseError("Cannot divide by zero")
-                if self.typeId.isDecimal():
-                    retVal = exp1 / exp2
-                else:
-                    retVal = exp1 // exp2
-            case BinaryOperator.MODULUS:
-                if exp2 == 0:
-                    self.raiseError("Cannot mod by zero")
-                retVal = exp1 % exp2
-            case BinaryOperator.SUM:
-                retVal = exp1 + exp2
-            case BinaryOperator.SUBTRACT:
-                retVal = exp1 - exp2
-            case BinaryOperator.LOGIC_LEFT_SHIFT | BinaryOperator.ARITHMETIC_LEFT_SHIFT:
-                if isinstance(exp1, float) or isinstance(exp2, float):
-                    raise ValueError()
-                retVal = exp1 << exp2
-            case BinaryOperator.LOGIC_RIGHT_SHIFT | BinaryOperator.ARITHMETIC_RIGHT_SHIFT:
-                if isinstance(exp1, float) or isinstance(exp2, float):
-                    raise ValueError()
-                retVal = exp1 >> exp2
-            case BinaryOperator.GREATER_THAN:
-                retVal = 1 if exp1 > exp2 else 0
-            case BinaryOperator.GREATER_OR_EQUAL:
-                retVal = 1 if exp1 >= exp2 else 0
-            case BinaryOperator.LESS_THAN:
-                retVal = 1 if exp1 < exp2 else 0
-            case BinaryOperator.LESS_OR_EQUAL:
-                retVal = 1 if exp1 <= exp2 else 0
-            case BinaryOperator.EQUAL:
-                retVal = 1 if exp1 == exp2 else 0
-            case BinaryOperator.NOT_EQUAL:
-                retVal = 1 if exp1 != exp2 else 0
-            case BinaryOperator.BITWISE_AND:
-                if isinstance(exp1, float) or isinstance(exp2, float):
-                    raise ValueError()
-                retVal = exp1 & exp2
-            case BinaryOperator.BITWISE_XOR:
-                if isinstance(exp1, float) or isinstance(exp2, float):
-                    raise ValueError()
-                retVal = exp1 ^ exp2
-            case BinaryOperator.BITWISE_OR:
-                if isinstance(exp1, float) or isinstance(exp2, float):
-                    raise ValueError()
-                retVal = exp1 | exp2
-            case BinaryOperator.AND:
-                retVal = 1 if exp1 and exp2 else 0
-            case BinaryOperator.OR:
-                retVal = 1 if exp1 or exp2 else 0
+        result, warning = StaticEvaluation.evalDecl(
+            self.binaryOperator.getBaseOperator().value, self.exp1.typeId, self.typeId, exp1, exp2)
+        if warning:
+            warning.rise(self.raiseWarning, self.raiseError)
 
-            case _:
-                self.raiseError(f"Cannot evaluate {self.binaryOperator.name} during compilation")
-        
         return StaticEvalValue(
-            StaticEvalType.INTEGER if isinstance(retVal, int) else StaticEvalType.FLOAT,
-            str(retVal)
+            StaticEvalType.INTEGER if isinstance(result, int) else StaticEvalType.FLOAT,
+            str(result)
         )
 
     def print(self, padding: int) -> str:
@@ -4068,6 +3978,13 @@ class SizeOfType(Exp):
     def print(self, padding: int) -> str:
         pad = " " * padding
         return f'{pad}SizeOf({self.typeId})\n'
+
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+INITIALIZERS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 
 class Initializer(AST):
     @abstractmethod

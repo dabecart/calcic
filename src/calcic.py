@@ -59,6 +59,21 @@ def main() -> None:
     argParser.add_argument("--codegen",
                            help="Performs lexing, parsing and assembly generation.",
                            action="store_true")
+    argParser.add_argument("--fold-constants",
+                           help="Enables constant folding.",
+                           action="store_true")
+    argParser.add_argument("--propagate-copies",
+                           help="Enables copy propagation.",
+                           action="store_true")
+    argParser.add_argument("--eliminate-unreachable-code",
+                           help="Enables unreachable code elimination.",
+                           action="store_true")
+    argParser.add_argument("--eliminate-dead-stores",
+                           help="Enables dead store elimination.",
+                           action="store_true")
+    argParser.add_argument("-O", "--optimize",
+                           help="Enables all optimizations.",
+                           action="store_true")
     argParser.add_argument("-c",
                            help="Compile and assemble, but do not link. Generates a .o file.",
                            action="store_true",

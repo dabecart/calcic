@@ -9,8 +9,16 @@ calcic. Written by @dabecart, 2026.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-import enum
 from dataclasses import dataclass
+import enum
+import struct
+import math
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TYPES
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 
 # Util to store parameter info, such as those of functions, structs or unions.
 @dataclass
@@ -206,6 +214,13 @@ TypeSpecifier.LONG          = TypeSpecifier("LONG",         "long",          8, 
 TypeSpecifier.ULONG         = TypeSpecifier("ULONG",        "unsigned long", 8,  8)
 TypeSpecifier.DOUBLE        = TypeSpecifier("DOUBLE",       "double",        8,  8)
 TypeSpecifier.FLOAT         = TypeSpecifier("FLOAT",        "float",         4,  4)
+
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DECLARATORS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 
 # When parsing the "type" of variable being declared, a DeclaratorType will be used. 
 # There are three types of declarators:
@@ -453,3 +468,237 @@ class DeclaratorInformation:
     name: str
     type: DeclaratorType
     params: list[ParameterInformation]
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+STATIC EVALUATION
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+
+class StaticEvalMsgType(enum.Enum):
+    # Ordered by priority.
+    SUCCESSFUL = enum.auto()
+    WARNING = enum.auto()
+    ERROR = enum.auto()
+
+@dataclass
+class StaticEvalMsg:
+    msgType: StaticEvalMsgType
+    msg: str = ""
+
+    def __bool__(self) -> bool:
+        return self.msgType != StaticEvalMsgType.SUCCESSFUL
+    
+    def __lt__(self, other) -> bool:
+        if not isinstance(other, StaticEvalMsg):
+            raise ValueError()
+        return self.msgType.value < other.msgType.value
+    
+    def rise(self, warnFunction, errorFunction):
+        if self.msgType == StaticEvalMsgType.WARNING:
+            warnFunction(self.msg)
+        elif self.msgType == StaticEvalMsgType.ERROR:
+            errorFunction(self.msg)
+    
+    @staticmethod
+    def WARNING(msg: str) -> StaticEvalMsg:
+        return StaticEvalMsg(StaticEvalMsgType.WARNING, msg)
+
+    @staticmethod
+    def ERROR(msg: str) -> StaticEvalMsg:
+        return StaticEvalMsg(StaticEvalMsgType.ERROR, msg)
+
+EVAL_OK = StaticEvalMsg(StaticEvalMsgType.SUCCESSFUL)
+
+# Used to calculate values during compilation using C-like behavior. 
+class StaticEvaluation:
+    @staticmethod
+    def parseValue(t: TypeSpecifier, val: str|int|float) -> tuple[int|float, StaticEvalMsg]:
+        ret: float|int
+        retStatus = EVAL_OK
+        overflow = False
+
+        if t in (TypeSpecifier.DOUBLE, TypeSpecifier.FLOAT):
+            try:
+                ret = float(val)
+            except Exception as e:
+                ret = 0.0
+                retStatus = StaticEvalMsg.ERROR(str(e))
+
+            if t == TypeSpecifier.FLOAT:
+                ret = struct.unpack('f', struct.pack('f', float(val)))[0]
+        else:
+            try:
+                ret = int(val)
+            except Exception as e:
+                ret = 0
+                retStatus = StaticEvalMsg.ERROR(str(e))
+
+            if t in (TypeSpecifier.CHAR, TypeSpecifier.SIGNED_CHAR):
+                if overflow := (ret >= 0x80):
+                    ret &= 0xFF
+                    if ret >= 0x80:
+                        ret -= 0x100
+            elif t == TypeSpecifier.UCHAR:
+                if ret < 0:
+                    ret += 0x100
+                if overflow := (ret >= 0x100):
+                    ret &= 0xFF
+            elif t == TypeSpecifier.SHORT:
+                if overflow := (ret >= 0x8000):
+                    ret &= 0xFFFF
+                    if ret >= 0x8000:
+                        ret -= 0x10000
+            elif t == TypeSpecifier.USHORT:
+                if ret < 0:
+                    ret += 0x10000
+                if overflow := (ret >= 0x10000):
+                    ret &= 0xFFFF
+            elif t == TypeSpecifier.INT:
+                if overflow := (ret >= 0x80000000):
+                    ret &= 0xFFFFFFFF
+                    if ret >= 0x80000000:
+                        ret -= 0x100000000
+            elif t == TypeSpecifier.UINT:
+                if ret < 0:
+                    ret += 0x100000000
+                if overflow := (ret >= 0x100000000):
+                    ret &= 0xFFFFFFFF
+            elif t == TypeSpecifier.LONG:
+                if overflow := (ret >= 0x8000000000000000):
+                    ret &= 0xFFFFFFFFFFFFFFFF
+                    if ret >= 0x8000000000000000:
+                        ret -= 0x10000000000000000
+            elif t == TypeSpecifier.ULONG:
+                if ret < 0:
+                    ret += 0x10000000000000000
+                if overflow := (ret >= 0x10000000000000000):
+                    ret &= 0xFFFFFFFFFFFFFFFF
+            else:
+                raise ValueError()
+
+        if overflow:
+            retStatus = StaticEvalMsg.WARNING(f"{t} {val} overflows to {ret}")
+        
+        return (ret, retStatus)
+
+    # Static evaluation of operations.
+    @staticmethod
+    def eval(op: str, tinput: TypeSpecifier, tresult: TypeSpecifier,
+             v1: str|int|float, v2: str|int|float|None = None) -> tuple[int|float, StaticEvalMsg]:
+
+        retStatus: StaticEvalMsg = EVAL_OK
+
+        # Evaluate v1 and v2 using tinput.
+        v1, w1 = StaticEvaluation.parseValue(tinput, v1)
+        if w1 > retStatus:
+            retStatus = w1
+
+        if v2 is not None:
+            v2, w2 = StaticEvaluation.parseValue(tinput, v2)
+            if w2 > retStatus:
+                retStatus = w2
+        
+        # Operate.
+        evalStatus: StaticEvalMsg = EVAL_OK
+        # Unary operations.
+        if op == "~":
+            if isinstance(v1, float):
+                raise ValueError("Cannot calculate bitwise complement of float")
+            ret = ~v1
+        elif op == "-" and v2 is None:
+            ret = -v1
+        elif op == "!":
+            ret = 0 if int(v1) else 1
+        
+        # Binary operations.
+        else:
+            if v2 is None:
+                raise ValueError()
+            
+            elif op == "*":
+                ret = v1 * v2
+            elif op == "/":
+                if v2 == 0:
+                    evalStatus = StaticEvalMsg.ERROR("Division by zero")
+
+                if isinstance(v2, float):
+                    if v2 == 0.0:
+                        ret = math.inf
+                    elif v2 == -0.0:
+                        ret = -math.inf
+                    else:
+                        ret = v1 / v2
+                else:
+                    if v2 == 0:
+                        ret = 0xFFFFFFFFFFFFFFFF
+                    else:
+                        ret = v1 // v2
+            elif op == "%":
+                if v2 == 0:
+                    ret = 0
+                    evalStatus = StaticEvalMsg.ERROR("Division by zero")
+                else:
+                    ret = v1 % v2
+            elif op == "+":
+                ret = v1 + v2
+            elif op == "-":
+                ret = v1 - v2
+            elif op == "<<":
+                if isinstance(v1, float) or isinstance(v2, float):
+                    raise ValueError()
+                ret = v1 << v2
+            elif op == ">>":
+                if isinstance(v1, float) or isinstance(v2, float):
+                    raise ValueError()
+                ret = v1 >> v2
+            elif op == ">":
+                ret = 1 if v1 > v2 else 0
+            elif op == ">=":
+                ret = 1 if v1 >= v2 else 0
+            elif op == "<":
+                ret = 1 if v1 < v2 else 0
+            elif op == "<=":
+                ret = 1 if v1 <= v2 else 0
+            elif op == "==":
+                ret = 1 if v1 == v2 else 0
+            elif op == "!=":
+                ret = 1 if v1 != v2 else 0
+            elif op == "&":
+                if isinstance(v1, float) or isinstance(v2, float):
+                    raise ValueError()
+                ret = v1 & v2
+            elif op == "^":
+                if isinstance(v1, float) or isinstance(v2, float):
+                    raise ValueError()
+                ret = v1 ^ v2
+            elif op == "|":
+                if isinstance(v1, float) or isinstance(v2, float):
+                    raise ValueError()
+                ret = v1 | v2
+            elif op == "&&":
+                ret = 1 if v1 and v2 else 0
+            elif op == "||":
+                ret = 1 if v1 or v2 else 0
+            else:
+                raise ValueError(f"Invalid operation {op} found during static evaluation")
+
+            if evalStatus > retStatus:
+                retStatus = evalStatus
+
+        # Evaluate the result using tresult.
+        ret, w_end = StaticEvaluation.parseValue(tresult, ret)
+        if w_end > retStatus:
+            retStatus = w_end
+
+        return (ret, retStatus)
+
+    # Similar to above but using declarators instead of type specifiers.
+    @staticmethod
+    def evalDecl(op: str, tinput: DeclaratorType, tresult: DeclaratorType,
+                v1: str|int|float, v2: str|int|float|None = None) -> tuple[int|float, StaticEvalMsg]:
+        
+        if not isinstance(tinput, BaseDeclaratorType) or not isinstance(tresult, BaseDeclaratorType):
+            raise ValueError("Invalid declarators in static evaluation")
+    
+        return StaticEvaluation.eval(op, tinput.baseType, tresult.baseType, v1, v2)
