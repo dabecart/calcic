@@ -85,7 +85,7 @@ class SwitchContext:
     name: str
     # Type of the variable controlling the switch.
     controlType: DeclaratorType
-    cases: list[CaseStatement]          = field(default_factory= lambda:[])
+    cases: list[CaseStatement]          = field(default_factory=list)
     defaultCase: DefaultStatement|None  = None
 
 @dataclass
@@ -100,19 +100,19 @@ class LabelContext:
 class Context:
     # Only used to map the identifiers. To get the properties of the objects, use functionMap or 
     # variableMap. Key is the original name of the variable.
-    identifierMap: dict[str, IdentifierContext]              = field(default_factory= lambda:{})
+    identifierMap: dict[str, IdentifierContext]              = field(default_factory=dict)
     # Stores the attributes of functions.
-    functionMap: dict[str, FunctionContext]                  = field(default_factory= lambda:{})
+    functionMap: dict[str, FunctionContext]                  = field(default_factory=dict)
     # Stores the attributes of structs, unions and enums. Key is the mangled name.
-    tagsMap: dict[str, TagContext]                           = field(default_factory= lambda:{})
+    tagsMap: dict[str, TagContext]                           = field(default_factory=dict)
     # Stores the attributes of variables which are stored on the .data section.
-    staticVariablesMap: dict[str, StaticVariableContext]     = field(default_factory= lambda:{})
+    staticVariablesMap: dict[str, StaticVariableContext]     = field(default_factory=dict)
     # Stores the attributes of variables which are stored on the .rodata section.
-    constantVariablesMap: dict[str, ConstantVariableContext] = field(default_factory= lambda:{})
+    constantVariablesMap: dict[str, ConstantVariableContext] = field(default_factory=dict)
     
-    loopTracking: list[str]                     = field(default_factory= lambda:[])
-    switchTracking: list[SwitchContext]         = field(default_factory= lambda:[])
-    labelTracking: dict[str,LabelContext]       = field(default_factory= lambda:{})
+    loopTracking: list[str]                     = field(default_factory=list)
+    switchTracking: list[SwitchContext]         = field(default_factory=list)
+    labelTracking: dict[str,LabelContext]       = field(default_factory=dict)
     insideAFunction: bool                       = False
     # The function the context is currently in.
     insideFunctionName: str                     = ""
