@@ -728,9 +728,28 @@ class TACValue(TAC):
             elif type(value) is str:
                 self.vbeName: str = value
             else:
-                # Using : to differentiate between parser Variables (which use .) and TAC temporary variables.
+                # Using : to differentiate between parser Variables (which use .) and TAC temporary 
+                # variables.
                 self.vbeName = f"tmp:{TACValue._VARIABLE_COUNT}"
                 TACValue._VARIABLE_COUNT += 1
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, TACValue):
+            return False
+        ret = self.isConstant == other.isConstant and \
+               self.valueType == other.valueType
+        if not ret:
+            return False
+        if self.isConstant:
+            return self.constantValue == other.constantValue
+        else:
+            return self.vbeName == other.vbeName
+
+    def __hash__(self) -> int:
+        if self.isConstant:
+            return hash((self.isConstant, self.valueType, self.constantValue))
+        else:
+            return hash((self.isConstant, self.valueType, self.vbeName))
 
     def parse(self):
         pass
@@ -740,6 +759,9 @@ class TACValue(TAC):
             return self.constantValue
         else:
             return self.vbeName
+        
+    def isStatic(self) -> bool:
+        return not self.isConstant and self.vbeName in TACStaticVariable.staticVariables
         
 class TACExpressionResult(TAC):
     def __init__(self, value: TACValue, processedType: DeclaratorType, insts: list[TACInstruction], 
@@ -961,6 +983,9 @@ class TACInstruction(TAC):
         # Add this instruction to the list once the inner instructions have been parsed.
         self.insts.append(self)
 
+        # Used on the optimizer stage.
+        self.reachingCopies: set[TACCopy] = set()
+
     @abstractmethod
     def parse(self)-> TACValue:
         pass
@@ -970,16 +995,29 @@ class TACInstruction(TAC):
         pass
 
 class TACReturn(TACInstruction):
-    def __init__(self, returnAST: ReturnStatement, 
+    def __init__(self, data, 
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
-        self.returnAST = returnAST
+        if isinstance(data, ReturnStatement):
+            self.fromAST = True
+            self.returnAST: ReturnStatement = data
+        elif isinstance(data, TACValue):
+            self.fromAST = False
+            self.returnValue: TACValue = data
+        else:
+            raise ValueError()
+        
         super().__init__(instructionsList, parentTAC)
 
     def parse(self)-> TACValue:
-        if self.returnAST.exp is not None:
-            return self.parseTACExpression(self.returnAST.exp, self.insts).convert()
-        
-        return TACValue(False, TypeSpecifier.VOID.toBaseType())
+        if self.fromAST:
+            if self.returnAST.exp is not None:
+                # The return instruction returns something.
+                return self.parseTACExpression(self.returnAST.exp, self.insts).convert()
+            
+            # The return instruction returns nothing.
+            return TACValue(False, TypeSpecifier.VOID.toBaseType())
+        else:
+            return self.returnValue
 
     def print(self) -> str:
         return f"Return({self.result})\n"
@@ -1314,6 +1352,14 @@ class TACCopy(TACInstruction):
         self.src = src
         self.dst = dst
         super().__init__(instructionsList, parentTAC)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, TACCopy):
+            return False
+        return self.src == other.src and self.dst == other.dst
+    
+    def __hash__(self) -> int:
+        return hash((self.src, self.dst))
 
     def parse(self)-> TACValue:
         return self.dst

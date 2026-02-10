@@ -884,12 +884,14 @@ class AssemblerFunction(AssemblyAST):
 
         # Convert the function's TAC instructions into assembler instructions.
         for inst in self.function.instructions:
-            # Add a comment between instructions to know what each block of assembler instructions is doing.
-            self.createInst(COMMENT, inst.print())
+            # Add a comment between instructions to know what each block of assembler instructions 
+            # is doing. Skip labels.
+            if not isinstance(inst, TACLabel):
+                self.createInst(COMMENT, inst.print())
 
             match inst:
                 case TACReturn():
-                    if inst.returnAST.exp is not None:
+                    if inst.result.valueType != TypeSpecifier.VOID.toBaseType():
                         intRegArgs, doubleRegArgs, returnInStack = self.classifyReturnValue(inst.result)
                         if returnInStack:
                             # Get the address of where the return value should be stored.

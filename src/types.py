@@ -65,6 +65,9 @@ class TypeQualifier:
         un = self.toSet() | other.toSet()
         return TypeQualifier.fromSet(un)
 
+    def __hash__(self) -> int:
+        return hash(self.const)
+
     def __str__(self) -> str:
         ret = ""
         if self.const: ret += "const "
@@ -121,6 +124,12 @@ class TypeSpecifier:
             # Check the struct and union's declaration, in particular, the mangled identifier.
             ret = self.identifier == other.identifier
         return ret
+    
+    def __hash__(self) -> int:
+        if self.name in ("STRUCT", "UNION"):
+            return hash((self.name, self.value, self.identifier))
+        else:
+            return hash((self.name, self.value))
     
     def __str__(self) -> str:
         return self.value
@@ -245,6 +254,10 @@ class DeclaratorType(ABC):
         pass
 
     @abstractmethod
+    def __hash__(self) -> int:
+        pass
+
+    @abstractmethod
     def __str__(self) -> str:
         return super().__str__()
     
@@ -355,6 +368,9 @@ class BaseDeclaratorType(DeclaratorType):
             return False
         return self.baseType == other.baseType and self.qualifiers == other.qualifiers
     
+    def __hash__(self) -> int:
+        return hash((self.baseType, self.qualifiers))
+    
     def copy(self) -> BaseDeclaratorType:
         return BaseDeclaratorType(self.baseType, self.qualifiers)
     
@@ -389,7 +405,10 @@ class PointerDeclaratorType(DeclaratorType):
         if not isinstance(other, PointerDeclaratorType):
             return False
         return self.declarator == other.declarator and self.qualifiers == other.qualifiers
-    
+
+    def __hash__(self) -> int:
+        return hash((self.declarator, self.qualifiers))
+
     def unqualify(self) -> PointerDeclaratorType:
         ret = self.copy()
         ret.qualifiers = TypeQualifier()
@@ -423,7 +442,10 @@ class ArrayDeclaratorType(DeclaratorType):
         if not isinstance(other, ArrayDeclaratorType):
             return False
         return self.declarator == other.declarator and self.size == other.size
-    
+
+    def __hash__(self) -> int:
+        return hash((self.declarator, self.size))
+
     def unqualify(self) -> ArrayDeclaratorType:
         return ArrayDeclaratorType(self.declarator.unqualify(), self.size)
     
@@ -453,7 +475,10 @@ class FunctionDeclaratorType(DeclaratorType):
         if not isinstance(other, FunctionDeclaratorType):
             return False
         return self.returnDeclarator == other.returnDeclarator and all([p1 == p2 for p1, p2 in zip(self.params, other.params)])
-    
+
+    def __hash__(self) -> int:
+        return hash((self.returnDeclarator, tuple(self.params)))
+
     def unqualify(self) -> FunctionDeclaratorType:
         raise ValueError()
     
@@ -611,14 +636,19 @@ class StaticEvaluation:
                 raise ValueError("Cannot calculate bitwise complement of float")
             ret = ~v1
         elif op == "-" and v2 is None:
+            # To differentiate between the binary expression, v2 must be None.
             ret = -v1
         elif op == "!":
             ret = 0 if int(v1) else 1
+        elif op == "++":
+            ret = v1 + 1
+        elif op == "--":
+            ret = v1 - 1
         
         # Binary operations.
         else:
             if v2 is None:
-                raise ValueError()
+                raise ValueError(f"Null operand received in binary evaluation of {op}")
             
             elif op == "*":
                 ret = v1 * v2

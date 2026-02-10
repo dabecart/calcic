@@ -58,9 +58,14 @@ class TACOptimizer:
 
             optInsts = cfg.toInstructionList()
 
-            if optInsts == funcInsts or len(optInsts) == 0:
+            # If there are no more instructions, exit.
+            if len(optInsts) == 0:
                 return optInsts
             
+            # Are the same instructions?
+            if len(optInsts) == len(funcInsts) and all(ins1 == ins2 for ins1, ins2 in zip(optInsts, funcInsts)):
+                return optInsts
+
             # Continue the loop.
             funcInsts = optInsts
     
@@ -150,7 +155,7 @@ class TACOptimizer:
     def runUnreachableCodeElimination(self, cfg: ControlFlowGraph) -> ControlFlowGraph:
         # >> Delete unreachable nodes. 
         # For that, traverse the graph keeping track of the nodes nodes visited.
-        visitedNodes = cfg.traverse()
+        visitedNodes = set(cfg.traverse())
         allNodes = set(cfg.nodes.keys())
 
         # After that, remove those that weren't visited.
@@ -209,17 +214,32 @@ class TACOptimizer:
         return cfg
 
     def runCopyPropagation(self, cfg: ControlFlowGraph) -> ControlFlowGraph:
+        # This will calculate the reaching copies of all instructions.
+        cfg.calculateReachingCopies()
+        # Apply the reaching copies of all nodes.
+        for node in cfg.nodes.values():
+            node.applyReachingCopies()
         return cfg
 
     def runDeadStoreElimination(self, cfg: ControlFlowGraph) -> ControlFlowGraph:
         return cfg
 
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CONTROL FLOW NODE
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 @dataclass(eq=False)
 class ControlFlowNode:
     nodeID: int
     instructions: list[TACInstruction]      = field(default_factory=list)
     predecessors: set[int]                  = field(default_factory=set)
     successors: set[int]                    = field(default_factory=set)
+
+    # For the copy propagation algorithm:
+    # Stores the reaching TACCopy instructions. Set to None when the set hasn't been calculated.
+    reachingCopies: set[TACCopy]            = field(default_factory=set)
 
     def connectSuccessor(self, successor: ControlFlowNode):
         self.successors.add(successor.nodeID)
@@ -236,6 +256,167 @@ class ControlFlowNode:
     def getTerminator(self) -> TACInstruction|None:
         return self.instructions[-1] if len(self.instructions) > 0 else None
 
+    """
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    COPY PROPAGATION
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    """
+    # Iterates over each instruction and anotates each one with the TACCopy instructions that reach
+    # it. This will be used to run the Copy Propagation algorithm. 
+    # startingCopies receives the reaching copy instructions from a predecessor node.
+    # At the end, the block gets anotated with the reaching copies of the last instruction.
+    # Note: This function is also called the transfer function in Data Flow Analysis.
+    def anotate(self, startingCopies: set[TACCopy]):
+        reachingCopies = startingCopies
+
+        for inst in self.instructions:
+            # Set the reaching copies for this instruction.
+            inst.reachingCopies = set(reachingCopies)
+
+            match inst:
+                case TACCopy():
+                    # If we have x = y, and this instruction is y = x, we are left with the same 
+                    # thing.
+                    if TACCopy(inst.dst, inst.src, []) in reachingCopies:
+                        continue
+
+                    # Search for copies inside reachingCopies which get modified (or killed) by this 
+                    # instruction.
+                    copiesToRemove: set[TACCopy] = set()
+                    for copy in reachingCopies:
+                        if inst.dst in (copy.src, copy.dst):
+                            copiesToRemove.add(copy)
+                    reachingCopies -= copiesToRemove
+
+                    # Add the current copy to the reachingCopies set.
+                    reachingCopies.add(inst)
+                
+                case TACFunctionCall():
+                    # Instead of analyzing the behavior of the function being called and how it 
+                    # affects the reaching copies of static variables, whenever a function call is 
+                    # made, all reaching copies related with static variables will get killed.
+                    # Take into account the returning value of the function call too.
+                    copiesToRemove: set[TACCopy] = set()
+                    for copy in reachingCopies:
+                        if copy.src.isStatic() or copy.dst.isStatic() or inst.result in (copy.src, copy.dst):
+                            copiesToRemove.add(copy)
+                    reachingCopies -= copiesToRemove
+
+                case TACUnary() | TACBinary():
+                    copiesToRemove: set[TACCopy] = set()
+                    for copy in reachingCopies:
+                        if inst.result in (copy.src, copy.dst):
+                            copiesToRemove.add(copy)
+                    reachingCopies -= copiesToRemove
+
+                case _:
+                    continue
+        
+        self.reachingCopies = reachingCopies
+
+    def _replaceOperand(self, operand: TACValue, instReachingCopies: set[TACCopy]) -> tuple[bool, TACValue]:
+        if operand.isConstant:
+            return (False, operand)
+        
+        # E.g. if we reach z = y + 10, and before that we had y = x (Copy x to y), we can replace y 
+        # by x.
+        for copy in instReachingCopies:
+            if copy.dst == operand:
+                return (True, copy.src)
+        
+        return (False, operand)
+    
+    def _rewriteInstruction(self, inst: TACInstruction) -> TACInstruction|None:
+        # If the instruction is not replaceable, the same instruction will be returned at the end of 
+        # this function.
+        match inst:
+            case TACCopy():
+                for copy in inst.reachingCopies:
+                    # We can cut this TACCopy instruction if the same copy instruction exists or if
+                    # x = y reaches the instruction y = x.
+                    if (copy == inst) or (copy.src == inst.dst and copy.dst == inst.src):
+                        return None
+                    
+                isReplaceable, newSrc = self._replaceOperand(inst.src, inst.reachingCopies)
+                if isReplaceable:
+                    return TACCopy(newSrc, inst.dst, [])
+            
+            case TACUnary():
+                isReplaceable, newExp = self._replaceOperand(inst.exp, inst.reachingCopies)
+                if isReplaceable:
+                    ret = TACUnary(inst.operator, newExp, [])
+                    ret.result = inst.result
+                    return ret
+            
+            case TACBinary():
+                isReplaceable1, newExp1 = self._replaceOperand(inst.exp1, inst.reachingCopies)
+                isReplaceable2, newExp2 = self._replaceOperand(inst.exp2, inst.reachingCopies)
+                if isReplaceable1 or isReplaceable2:
+                    ret = TACBinary(inst.operator, newExp1, newExp2, instructionsList=[])
+                    ret.result = inst.result
+                    return ret
+
+            case TACReturn():
+                isReplaceable, newResult = self._replaceOperand(inst.result, inst.reachingCopies)
+                if isReplaceable:
+                    ret = TACReturn(newResult, [])
+                    return ret
+                
+            case TACFunctionCall():
+                isReplaceable: bool = False
+                newArguments: list[TACValue] = []
+                for arg in inst.arguments:
+                    isArgumentReplaceable, newArgument = self._replaceOperand(arg, inst.reachingCopies)
+                    
+                    isReplaceable = isReplaceable or isArgumentReplaceable
+                    newArguments.append(newArgument)
+                
+                if isReplaceable:
+                    ret = TACFunctionCall(inst.identifier, inst.returnType, newArguments, [])
+                    ret.result = inst.result
+                    return ret
+                
+            case TACJumpIfZero():
+                isReplaceable, newCondition = self._replaceOperand(inst.condition, inst.reachingCopies)
+                if isReplaceable:
+                    ret = TACJumpIfZero(newCondition, inst.target, [])
+                    return ret
+
+            case TACJumpIfNotZero():
+                isReplaceable, newCondition = self._replaceOperand(inst.condition, inst.reachingCopies)
+                if isReplaceable:
+                    ret = TACJumpIfNotZero(newCondition, inst.target, [])
+                    return ret
+
+            case TACJumpIfValue():
+                isConditionReplaceable, newCondition = self._replaceOperand(inst.condition, inst.reachingCopies)
+                isValueReplaceable, newValue = self._replaceOperand(inst.value, inst.reachingCopies)
+                if isConditionReplaceable or isValueReplaceable:
+                    ret = TACJumpIfValue(newCondition, newValue, inst.target, [])
+                    return ret
+
+            case TACJump() | TACLabel():
+                pass
+
+            case _:
+                raise ValueError(f"Invalid instruction {type(inst)}")
+
+        return inst
+
+    def applyReachingCopies(self):
+        newInstructionList: list[TACInstruction] = []
+        for inst in self.instructions:
+            newInst = self._rewriteInstruction(inst)
+            if newInst is not None:
+                newInstructionList.append(newInst)
+        
+        self.instructions = newInstructionList
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CONTROL FLOW GRAPH
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 class ControlFlowGraph:
     def __init__(self, insts: list[TACInstruction]) -> None:
         self.entryNode = ControlFlowNode(-1)
@@ -250,32 +431,32 @@ class ControlFlowGraph:
             ret.extend(self.nodes[nodeID].instructions)
         return ret
     
-    # Use to traverse the graph and run a function for each node. Returns a set of all the visited 
-    # node's IDs.
-    def traverse(self) -> set[int]:
-        visitedNodes: set[int] = set()
-        nodeStack: list[ControlFlowNode] = [self.entryNode]
+    # Traverse the graph in using Depth First Search (DFS).
+    # Returns a list of all the visited node's IDs in postorder (the children are added before the 
+    # parent).
+    #       A
+    #     /   \   
+    #    B     C        -> [D, B, C, A]
+    #     \   /
+    #       D
+    def traverse(self) -> list[int]:
+        # Use the set to keep track of visited nodes, for O(1) search.
+        visitedNodesSet: set[int] = set()
+        # Use the list to keep track of the order.
+        orderedNodes: list[int] = []
 
-        while nodeStack:
-            currentNode = nodeStack.pop()
+        def postorder(nodeId: int):
+            # The node is now visited.
+            visitedNodesSet.add(nodeId)
+            # Order the successors.
+            for succ in self._getNodeByID(nodeId).successors:
+                if succ not in visitedNodesSet:
+                    postorder(succ)
+            # When the successors have been added, add the current node.
+            orderedNodes.append(nodeId)
 
-            if currentNode not in visitedNodes:
-                visitedNodes.add(currentNode.nodeID)
-
-            # Add successors to stack (reversed to maintain original order). Skip those that were
-            # already visited.
-            succs = [nodeId 
-                 for nodeId in reversed(list(currentNode.successors)) 
-                 if nodeId not in visitedNodes]
-            for s in succs:
-                if s == -1:
-                    nodeStack.append(self.entryNode)
-                elif s == -2:
-                    nodeStack.append(self.exitNode)
-                else:
-                    nodeStack.append(self.nodes[s])
-
-        return visitedNodes
+        postorder(self.entryNode.nodeID)
+        return orderedNodes
 
     def _createNodes(self, insts: list[TACInstruction]) -> tuple[dict[int, ControlFlowNode], dict[str, int]]:
         # Key: ID of the node. Value: the node.
@@ -335,7 +516,7 @@ class ControlFlowGraph:
                     # so.
                     targetNode = self.nodes[self.names[finalInst.target]]
                     node.connectSuccessor(targetNode)
-                case TACJumpIfZero() | TACJumpIfValue():
+                case TACJumpIfZero() | TACJumpIfNotZero() | TACJumpIfValue():
                     # Connect to the target node and the next one, the target will be reached in 
                     # case the condition is met, and the next node otherwise.
                     targetNode = self.nodes[self.names[finalInst.target]]
@@ -343,3 +524,87 @@ class ControlFlowGraph:
                     node.connectSuccessor(nextNode)
                 case _:
                     node.connectSuccessor(nextNode)
+
+    def _getNodeByID(self, id: int) -> ControlFlowNode:
+        if id == -1:
+            return self.entryNode
+        if id == -2:
+            return self.exitNode
+        
+        if id not in self.nodes:
+            raise ValueError(f"Node with id {id} does not exist")
+
+        return self.nodes[id]
+
+    def _getNodeByName(self, name: str) -> ControlFlowNode:
+        nodeID = self.names.get(name)
+        if nodeID is None:
+            raise ValueError(f"Node named {name} does not exist")
+        return self._getNodeByID(nodeID)
+    
+    def _getAllCopyInstructions(self) -> list[TACCopy]:
+        foundCopies: list[TACCopy] = []
+        for node in self.nodes.values():
+            foundInNode = [ins for ins in node.instructions if isinstance(ins, TACCopy)]
+            foundCopies.extend(foundInNode)
+        return foundCopies
+
+    """
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    COPY PROPAGATION
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    """
+    # Calculates the input reaching copies of the node, that is, the intersection of the outgoing 
+    # reaching copies of the predecessor nodes. If all predecessors have the same reaching copy, 
+    # then it reaches this node.
+    # This is also called the meet operator in Data Flow Theory.
+    def _calculateIncomingCopies(self, node: ControlFlowNode) -> set[TACCopy]:
+        predIDList = list(node.predecessors)
+        predecessorList = [self._getNodeByID(id) for id in predIDList]
+        
+        # No predecessors, no reaching copies. This block would be removed by the unreachable code
+        # algorithm, but this is left as a safeguard.
+        if len(predecessorList) == 0:
+            return set()
+        
+        # This is the same as getting the identity element of the set of all TACCopy instructions.
+        incomingCopies = set(self._getAllCopyInstructions())
+        for pred in predecessorList:
+            incomingCopies &= pred.reachingCopies
+
+        return incomingCopies
+    
+    def calculateReachingCopies(self):
+        identitySet = set(self._getAllCopyInstructions())
+        nodeStack: list[ControlFlowNode] = []
+
+        # We'll be analyzing the nodes in reverse postorder. This makes sure that we'll normally 
+        # operate on a block whose input transfer copies have already been calculated; in other 
+        # words, the transfer copies of all the predecessors have been calculated. This though will 
+        # not always the case in graph with loops, but it's as good as it gets.
+        for nodeID in self.traverse():
+            if nodeID < 0:
+                # Skip the entry and exit blocks.
+                continue
+            node = self._getNodeByID(nodeID)
+            nodeStack.append(node)
+            # Initialize the reaching copies of all nodes with the identity set.
+            node.reachingCopies = identitySet
+
+        # Operate until there are no more changes in the incoming nodes.
+        while len(nodeStack) > 0:
+            node = nodeStack.pop()
+            # Store the current reaching copies.
+            startingReachingCopies = node.reachingCopies
+            # Calculate the reaching copies with the current graph information.
+            incomingCopies = self._calculateIncomingCopies(node)
+            node.anotate(incomingCopies)
+            if startingReachingCopies != node.reachingCopies:
+                # The current analysis changed this node incoming copies, therefore, all successors
+                # have to be recalculated. Only add them if they're not in the stack.
+                for succID in node.successors:
+                    if succID < 0: 
+                        continue
+                    succ = self._getNodeByID(succID)
+                    if succ not in nodeStack:
+                        nodeStack.insert(0, succ)
