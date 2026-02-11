@@ -37,11 +37,27 @@ class TACOptimizer:
         # Set the program top level with the optimized blocks.
         tacProgram.topLevel = optimizedTAC
 
+    # Aliased variables are those whose address is used during the program. This type of alias 
+    # analysis is called "Address Taken Analysis".
+    def _getAliasedVariables(self, insts: list[TACInstruction]) -> set[TACValue]:
+        # We'll suppose that static variables are also aliased variables, as their address can be 
+        # get from other functions in the code.
+        aliased: set[TACValue] = set([
+            TACValue(False, staticVbe.valueType, staticVbe.identifier)
+            for staticVbe in TACStaticVariable.staticVariables.values()
+        ])
+        for inst in insts:
+            if isinstance(inst, TACGetAddress):
+                aliased.add(inst.src)
+        return aliased
+    
     def _optimizeFunction(self, funcInsts: list[TACInstruction]) -> list[TACInstruction]:
         if len(funcInsts) == 0:
             return funcInsts
         
         while True:
+            aliasedVariables = self._getAliasedVariables(funcInsts)
+
             if self.flags.constant_folding:
                 optInsts = self.runConstantFolding(funcInsts)
             else:
@@ -52,9 +68,9 @@ class TACOptimizer:
             if self.flags.unreachable_code_elimination:
                 cfg = self.runUnreachableCodeElimination(cfg)
             if self.flags.copy_propagation:
-                cfg = self.runCopyPropagation(cfg)
+                cfg = self.runCopyPropagation(cfg, aliasedVariables)
             if self.flags.dead_store_elimination:
-                cfg = self.runDeadStoreElimination(cfg)
+                cfg = self.runDeadStoreElimination(cfg, aliasedVariables)
 
             optInsts = cfg.toInstructionList()
 
@@ -136,7 +152,7 @@ class TACOptimizer:
                         if isinstance(inst.result.valueType, BaseDeclaratorType):
                             toType = inst.result.valueType.baseType
                         else:
-                            # TODO: This is only for 64 bits.
+                            # TODO: This is only for 64-bit systems.
                             toType = TypeSpecifier.ULONG
 
                         value, warning = StaticEvaluation.parseValue(toType, inst.exp.constantValue)
@@ -213,15 +229,15 @@ class TACOptimizer:
 
         return cfg
 
-    def runCopyPropagation(self, cfg: ControlFlowGraph) -> ControlFlowGraph:
+    def runCopyPropagation(self, cfg: ControlFlowGraph, aliased: set[TACValue]) -> ControlFlowGraph:
         # This will calculate the reaching copies of all instructions.
-        cfg.calculateReachingCopies()
+        cfg.calculateReachingCopies(aliased)
         # Apply the reaching copies of all nodes.
         for node in cfg.nodes.values():
             node.applyReachingCopies()
         return cfg
 
-    def runDeadStoreElimination(self, cfg: ControlFlowGraph) -> ControlFlowGraph:
+    def runDeadStoreElimination(self, cfg: ControlFlowGraph, aliased: set[TACValue]) -> ControlFlowGraph:
         return cfg
 
 
@@ -263,10 +279,11 @@ class ControlFlowNode:
     """
     # Iterates over each instruction and anotates each one with the TACCopy instructions that reach
     # it. This will be used to run the Copy Propagation algorithm. 
-    # startingCopies receives the reaching copy instructions from a predecessor node.
+    # - startingCopies receives the reaching copy instructions from a predecessor node.
+    # - aliased contains the variables whose address is calculated at some point in the code.
     # At the end, the block gets anotated with the reaching copies of the last instruction.
     # Note: This function is also called the transfer function in Data Flow Analysis.
-    def anotate(self, startingCopies: set[TACCopy]):
+    def anotate(self, startingCopies: set[TACCopy], aliased: set[TACValue]):
         reachingCopies = startingCopies
 
         for inst in self.instructions:
@@ -288,29 +305,60 @@ class ControlFlowNode:
                             copiesToRemove.add(copy)
                     reachingCopies -= copiesToRemove
 
-                    # Add the current copy to the reachingCopies set.
-                    reachingCopies.add(inst)
+                    # Add the current copy to the reachingCopies set only if its operands are the 
+                    # same type or if they are both pointers. If they're not, then this copy 
+                    # instruction is to transfer data between types and this would create two 
+                    # separate variables.
+                    # char and signed char are different types in the parser, but not here.
+                    sameTypes = inst.src.valueType == inst.dst.valueType
+                    bothPointers = isinstance(inst.src.valueType, PointerDeclaratorType) and isinstance(inst.dst.valueType, PointerDeclaratorType)
+                    charTuple = (TypeSpecifier.CHAR.toBaseType(), TypeSpecifier.SIGNED_CHAR.toBaseType())
+                    bothChars = inst.src.valueType in charTuple and inst.dst.valueType in charTuple
+                    if sameTypes or bothPointers or bothChars:
+                        reachingCopies.add(inst)
                 
                 case TACFunctionCall():
                     # Instead of analyzing the behavior of the function being called and how it 
                     # affects the reaching copies of static variables, whenever a function call is 
                     # made, all reaching copies related with static variables will get killed.
-                    # Take into account the returning value of the function call too.
+                    # Take also into account the returning value of the function call: if it is 
+                    # modified, it also gets killed.
                     copiesToRemove: set[TACCopy] = set()
                     for copy in reachingCopies:
-                        if copy.src.isStatic() or copy.dst.isStatic() or inst.result in (copy.src, copy.dst):
+                        if copy.src in aliased or copy.dst in aliased or \
+                           inst.result in (copy.src, copy.dst):
                             copiesToRemove.add(copy)
                     reachingCopies -= copiesToRemove
 
-                case TACUnary() | TACBinary():
+                case TACStore():
+                    # We are going to suppose that a TACStore updates all aliased variables (this 
+                    # is a very conservative approach). Therefore, all copies with aliased variables
+                    # will get killed.
+                    copiesToRemove: set[TACCopy] = set()
+                    for copy in reachingCopies:
+                        if copy.src in aliased or copy.dst in aliased:
+                            copiesToRemove.add(copy)
+                    reachingCopies -= copiesToRemove
+
+                case TACUnary() | TACBinary() | TACSignExtend() | TACZeroExtend() | \
+                     TACDecimalToDecimal() | TACDecimalToInt() | TACDecimalToUInt() | \
+                     TACIntToDecimal() | TACUIntToDecimal() | TACTruncate() | \
+                     TACGetAddress() | TACLoad() | TACStore() | TACAddToPointer() | \
+                     TACCopyToOffset() | TACCopyFromOffset():
+                    # These instructions only kill copies if their result modify one either the 
+                    # source or destination of a reaching copy.
                     copiesToRemove: set[TACCopy] = set()
                     for copy in reachingCopies:
                         if inst.result in (copy.src, copy.dst):
                             copiesToRemove.add(copy)
                     reachingCopies -= copiesToRemove
 
-                case _:
+                case TACReturn() | TACLabel() | \
+                     TACJump() | TACJumpIfZero() | TACJumpIfNotZero() | TACJumpIfValue():
                     continue
+
+                case _:
+                    raise ValueError(f"Cannot anotate a {type(inst)} instruction")
         
         self.reachingCopies = reachingCopies
 
@@ -376,16 +424,10 @@ class ControlFlowNode:
                     ret.result = inst.result
                     return ret
                 
-            case TACJumpIfZero():
+            case TACJumpIfZero() | TACJumpIfNotZero():
                 isReplaceable, newCondition = self._replaceOperand(inst.condition, inst.reachingCopies)
                 if isReplaceable:
-                    ret = TACJumpIfZero(newCondition, inst.target, [])
-                    return ret
-
-            case TACJumpIfNotZero():
-                isReplaceable, newCondition = self._replaceOperand(inst.condition, inst.reachingCopies)
-                if isReplaceable:
-                    ret = TACJumpIfNotZero(newCondition, inst.target, [])
+                    ret = type(inst)(newCondition, inst.target, [])
                     return ret
 
             case TACJumpIfValue():
@@ -395,7 +437,39 @@ class ControlFlowNode:
                     ret = TACJumpIfValue(newCondition, newValue, inst.target, [])
                     return ret
 
-            case TACJump() | TACLabel():
+            case TACSignExtend() | TACZeroExtend() |  TACTruncate() | \
+                 TACDecimalToDecimal() | TACDecimalToInt() | TACDecimalToUInt() | \
+                 TACIntToDecimal() | TACUIntToDecimal():
+                isReplaceable, newExp = self._replaceOperand(inst.exp, inst.reachingCopies)
+                if isReplaceable:
+                    ret = type(inst)(newExp, inst.castType, [])
+                    ret.result = inst.result
+                    return ret
+            
+            case TACLoad() | TACStore():
+                isReplaceable, newSrc = self._replaceOperand(inst.src, inst.reachingCopies)
+                if isReplaceable:
+                    return type(inst)(newSrc, inst.dst, [])
+                
+            case TACAddToPointer():
+                isPointerReplaceable, newPointer = self._replaceOperand(inst.pointer, inst.reachingCopies)
+                isIndexReplaceable, newIndex = self._replaceOperand(inst.index, inst.reachingCopies)
+                if isPointerReplaceable or isIndexReplaceable:
+                    return TACAddToPointer(newPointer, newIndex, inst.scale, inst.dst, [])
+
+            case TACCopyToOffset():
+                isReplaceable, newSrc = self._replaceOperand(inst.src, inst.reachingCopies)
+                if isReplaceable:
+                    return TACCopyToOffset(newSrc, inst.dst, inst.byteOffset, [])
+
+            case TACCopyFromOffset():
+                isReplaceable, newSrc = self._replaceOperand(inst.src, inst.reachingCopies)
+                if isReplaceable:
+                    return TACCopyFromOffset(newSrc, inst.byteOffset, inst.dst, [])
+
+            case TACJump() | TACLabel() | TACGetAddress():
+                # TACGetAddress uses the address of the source and not the value; therefore, the
+                # source cannot be substituted.
                 pass
 
             case _:
@@ -574,7 +648,7 @@ class ControlFlowGraph:
 
         return incomingCopies
     
-    def calculateReachingCopies(self):
+    def calculateReachingCopies(self, aliased: set[TACValue]):
         identitySet = set(self._getAllCopyInstructions())
         nodeStack: list[ControlFlowNode] = []
 
@@ -598,7 +672,7 @@ class ControlFlowGraph:
             startingReachingCopies = node.reachingCopies
             # Calculate the reaching copies with the current graph information.
             incomingCopies = self._calculateIncomingCopies(node)
-            node.anotate(incomingCopies)
+            node.anotate(incomingCopies, aliased)
             if startingReachingCopies != node.reachingCopies:
                 # The current analysis changed this node incoming copies, therefore, all successors
                 # have to be recalculated. Only add them if they're not in the stack.

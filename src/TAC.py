@@ -428,7 +428,14 @@ class TAC(ABC):
     def parseTACBlockItem(self, blockItem: AST, insts: list[TACInstruction]):
         match blockItem:
             case ReturnStatement():
-                self.createChild(TACReturn, blockItem, insts)
+                if blockItem.exp is not None:
+                    # The return instruction returns something.
+                    retValue = self.parseTACExpression(blockItem.exp, insts).convert()
+                else:
+                    # The return instruction returns nothing.
+                    retValue = TACValue(False, TypeSpecifier.VOID.toBaseType())
+
+                self.createChild(TACReturn, retValue, insts)
             
             case IfStatement():
                 endIfLabel: str = TACLabel.getNewLabelName()
@@ -961,8 +968,8 @@ class TACFunction(TACTopLevel):
         
         # Always add a "return 0" at the end of functions. If the function already has a return it
         # will be pruned on the optimization stage.
-        ret0 = ReturnStatement([], None, None, 0)
-        self.createChild(TACReturn, ret0, self.instructions)
+        self.createChild(TACReturn, 
+                         TACValue(True, TypeSpecifier.INT.toBaseType(), "0"), self.instructions)
 
     def print(self) -> str:
         ret = f"--- {self.identifier} ---\n"
@@ -995,29 +1002,14 @@ class TACInstruction(TAC):
         pass
 
 class TACReturn(TACInstruction):
-    def __init__(self, data, 
+    def __init__(self, retValue: TACValue, 
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
-        if isinstance(data, ReturnStatement):
-            self.fromAST = True
-            self.returnAST: ReturnStatement = data
-        elif isinstance(data, TACValue):
-            self.fromAST = False
-            self.returnValue: TACValue = data
-        else:
-            raise ValueError()
         
+        self.returnValue = retValue
         super().__init__(instructionsList, parentTAC)
 
     def parse(self)-> TACValue:
-        if self.fromAST:
-            if self.returnAST.exp is not None:
-                # The return instruction returns something.
-                return self.parseTACExpression(self.returnAST.exp, self.insts).convert()
-            
-            # The return instruction returns nothing.
-            return TACValue(False, TypeSpecifier.VOID.toBaseType())
-        else:
-            return self.returnValue
+        return self.returnValue
 
     def print(self) -> str:
         return f"Return({self.result})\n"

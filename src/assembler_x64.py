@@ -1623,7 +1623,7 @@ class MOV(AssemblerInstruction):
     def thirdPass(self) -> list[AssemblerInstruction]:
         if (isinstance(self.src, (Memory, Data)) and isinstance(self.dst, (Memory, Data))) \
             or \
-           (isinstance(self.src, Immediate) and self.src.assemblyType.isQuad()):
+           (isinstance(self.src, Immediate) and self.src.isQuadImmediate()):
             # - MOV cannot have two memory addresses. Save the src into a temporary register and 
             # then pass it to the dst.
             # - Cannot move a 64-bit immediate, instead move it to a register and then to memory.
@@ -2685,15 +2685,7 @@ class Register(AssemblerOperand):
 class Immediate(AssemblerOperand):
     def __init__(self, value: TACValue, parentAST: AssemblyAST | None = None) -> None:
         self.value = value
-        if not self.value.isConstant:
-            raise ValueError("Cannot create an Immediate operand from a not constant value")
-        super().__init__(AssemblyType.fromTAC(self.value.valueType), parentAST)
-
-    def createCopy(self) -> Immediate:
-        return Immediate(self.value, self.parent)
-
-    def emitCode(self) -> str:
-        valueStr = self.value.print()
+        self.valueStr = self.value.print()
 
         if isinstance(self.value.valueType, BaseDeclaratorType):
             baseType = self.value.valueType.baseType
@@ -2702,21 +2694,31 @@ class Immediate(AssemblerOperand):
 
         # Immediate values are always taken as signed, so the unsigned values must be converted
         # to the 2's complement equivalent.
+        self.intVal = int(self.valueStr)
         if baseType == TypeSpecifier.UINT:
-            intVal = int(valueStr)
-            if intVal >= 0x80000000:
-                intVal -= 0x100000000
-                valueStr = str(intVal)
+            if self.intVal >= 0x80000000:
+                self.intVal -= 0x100000000
+                self.valueStr = str(self.intVal)
         elif baseType == TypeSpecifier.ULONG:
-            intVal = int(valueStr)
-            if intVal >= 0x8000000000000000:
-                intVal -= 0x10000000000000000
-                valueStr = str(intVal)
+            if self.intVal >= 0x8000000000000000:
+                self.intVal -= 0x10000000000000000
+                self.valueStr = str(self.intVal)
 
-        return f"${valueStr}"
+        if not self.value.isConstant:
+            raise ValueError("Cannot create an Immediate operand from a not constant value")
+        super().__init__(AssemblyType.fromTAC(self.value.valueType), parentAST)
+
+    def createCopy(self) -> Immediate:
+        return Immediate(self.value, self.parent)
+
+    def emitCode(self) -> str:
+        return f"${self.valueStr}"
 
     def print(self) -> str:
         return f"Imm({self.value})"
+    
+    def isQuadImmediate(self) -> bool:
+        return not(-0x80000000 <= self.intVal < 0x80000000)
 
 # Stores a temporary variable from TAC into an imaginary register. Used for single variables.
 class Pseudo(AssemblerOperand):

@@ -564,45 +564,37 @@ class StaticEvaluation:
                     retStatus = StaticEvalMsg.ERROR(str(e))
 
             if t in (TypeSpecifier.CHAR, TypeSpecifier.SIGNED_CHAR):
-                if overflow := (ret >= 0x80):
-                    ret &= 0xFF
-                    if ret >= 0x80:
-                        ret -= 0x100
+                overflow = ret >= 0x80
+                ret &= 0xFF
+                if ret >= 0x80:
+                    ret -= 0x100
             elif t == TypeSpecifier.UCHAR:
-                if ret < 0:
-                    ret += 0x100
-                if overflow := (ret >= 0x100):
-                    ret &= 0xFF
+                overflow = (ret >= 0x100)
+                ret &= 0xFF
             elif t == TypeSpecifier.SHORT:
-                if overflow := (ret >= 0x8000):
-                    ret &= 0xFFFF
-                    if ret >= 0x8000:
-                        ret -= 0x10000
+                overflow = ret >= 0x8000
+                ret &= 0xFFFF
+                if ret >= 0x8000:
+                    ret -= 0x10000
             elif t == TypeSpecifier.USHORT:
-                if ret < 0:
-                    ret += 0x10000
-                if overflow := (ret >= 0x10000):
-                    ret &= 0xFFFF
+                overflow = ret >= 0x10000
+                ret &= 0xFFFF
             elif t == TypeSpecifier.INT:
-                if overflow := (ret >= 0x80000000):
-                    ret &= 0xFFFFFFFF
-                    if ret >= 0x80000000:
-                        ret -= 0x100000000
+                overflow = ret >= 0x80000000
+                ret &= 0xFFFFFFFF
+                if ret >= 0x80000000:
+                    ret -= 0x100000000
             elif t == TypeSpecifier.UINT:
-                if ret < 0:
-                    ret += 0x100000000
-                if overflow := (ret >= 0x100000000):
-                    ret &= 0xFFFFFFFF
+                overflow = ret >= 0x100000000
+                ret &= 0xFFFFFFFF
             elif t == TypeSpecifier.LONG:
-                if overflow := (ret >= 0x8000000000000000):
-                    ret &= 0xFFFFFFFFFFFFFFFF
-                    if ret >= 0x8000000000000000:
-                        ret -= 0x10000000000000000
+                overflow = ret >= 0x8000000000000000
+                ret &= 0xFFFFFFFFFFFFFFFF
+                if ret >= 0x8000000000000000:
+                    ret -= 0x10000000000000000
             elif t == TypeSpecifier.ULONG:
-                if ret < 0:
-                    ret += 0x10000000000000000
-                if overflow := (ret >= 0x10000000000000000):
-                    ret &= 0xFFFFFFFFFFFFFFFF
+                overflow = ret >= 0x10000000000000000
+                ret &= 0xFFFFFFFFFFFFFFFF
             else:
                 raise ValueError()
 
