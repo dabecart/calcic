@@ -992,6 +992,7 @@ class TACInstruction(TAC):
 
         # Used on the optimizer stage.
         self.reachingCopies: set[TACCopy] = set()
+        self.liveVariables: set[TACValue] = set()
 
     @abstractmethod
     def parse(self)-> TACValue:

@@ -238,6 +238,11 @@ class TACOptimizer:
         return cfg
 
     def runDeadStoreElimination(self, cfg: ControlFlowGraph, aliased: set[TACValue]) -> ControlFlowGraph:
+        # This will calculate the live variables of all instructions.
+        cfg.calculateLiveVariables(aliased)
+        # Apply the live variables of all nodes.
+        for node in cfg.nodes.values():
+            node.applyLiveVariables()
         return cfg
 
 
@@ -254,8 +259,11 @@ class ControlFlowNode:
     successors: set[int]                    = field(default_factory=set)
 
     # For the copy propagation algorithm:
-    # Stores the reaching TACCopy instructions. Set to None when the set hasn't been calculated.
+    # Stores the reaching TACCopy instructions at the end of the node's instructions.
     reachingCopies: set[TACCopy]            = field(default_factory=set)
+    # For the dead store elimination algorithm:
+    # Stores the TACValues that are alive at the start of the node's instructions.
+    liveVariables: set[TACValue]            = field(default_factory=set)
 
     def connectSuccessor(self, successor: ControlFlowNode):
         self.successors.add(successor.nodeID)
@@ -283,7 +291,7 @@ class ControlFlowNode:
     # - aliased contains the variables whose address is calculated at some point in the code.
     # At the end, the block gets anotated with the reaching copies of the last instruction.
     # Note: This function is also called the transfer function in Data Flow Analysis.
-    def anotate(self, startingCopies: set[TACCopy], aliased: set[TACValue]):
+    def anotateReachingCopies(self, startingCopies: set[TACCopy], aliased: set[TACValue]):
         reachingCopies = startingCopies
 
         for inst in self.instructions:
@@ -358,7 +366,7 @@ class ControlFlowNode:
                     continue
 
                 case _:
-                    raise ValueError(f"Cannot anotate a {type(inst)} instruction")
+                    raise ValueError(f"Cannot anotate reaching copies of a {type(inst)} instruction")
         
         self.reachingCopies = reachingCopies
 
@@ -369,12 +377,13 @@ class ControlFlowNode:
         # E.g. if we reach z = y + 10, and before that we had y = x (Copy x to y), we can replace y 
         # by x.
         for copy in instReachingCopies:
-            if copy.dst == operand:
+            # Don't substitute something with the same thing! It creates an infinite loop!
+            if copy.dst == operand and copy.src != operand:
                 return (True, copy.src)
         
         return (False, operand)
     
-    def _rewriteInstruction(self, inst: TACInstruction) -> TACInstruction|None:
+    def _rewriteInstWithReachingCopies(self, inst: TACInstruction) -> TACInstruction|None:
         # If the instruction is not replaceable, the same instruction will be returned at the end of 
         # this function.
         match inst:
@@ -480,11 +489,109 @@ class ControlFlowNode:
     def applyReachingCopies(self):
         newInstructionList: list[TACInstruction] = []
         for inst in self.instructions:
-            newInst = self._rewriteInstruction(inst)
+            newInst = self._rewriteInstWithReachingCopies(inst)
             if newInst is not None:
                 newInstructionList.append(newInst)
         
         self.instructions = newInstructionList
+
+    """
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    DEAD STORE ELIMINATION
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    """
+    # Starting from the latest instruction in the node, annotate which variables are alive just
+    # before each instruction. 
+    def anotateLiveVariables(self, endingVariables: set[TACValue], aliasedVariables: set[TACValue]):
+        liveVariables = endingVariables
+
+        for inst in reversed(self.instructions):
+            inst.liveVariables = set(liveVariables)
+
+            match inst:
+                case TACReturn():
+                    if not inst.returnValue.isConstant:
+                        liveVariables.add(inst.returnValue)
+
+                case TACCopy():
+                    if inst.dst in liveVariables:
+                        liveVariables.remove(inst.dst)
+
+                    if not inst.src.isConstant:
+                        liveVariables.add(inst.src)
+                
+                case TACBinary():
+                    # The result is either a new variable or a modification of a previous one. In 
+                    # either case, this instruction doesn't care for the value it had, therefore, 
+                    # it is killed.
+                    if inst.result in liveVariables:
+                        liveVariables.remove(inst.result)
+
+                    # The terms in the instruction need to be declared somewhere previously in the 
+                    # code, if they are variables. They need to be alive until the execution of the 
+                    # instruction.
+                    if not inst.exp1.isConstant:
+                        liveVariables.add(inst.exp1)
+                    if not inst.exp2.isConstant:
+                        liveVariables.add(inst.exp2)
+
+                case TACUnary():
+                    if inst.result in liveVariables:
+                        liveVariables.remove(inst.result)
+
+                    if not inst.exp.isConstant:
+                        liveVariables.add(inst.exp)
+
+                case TACJumpIfZero() | TACJumpIfNotZero():
+                    if not inst.condition.isConstant:
+                        liveVariables.add(inst.condition)
+
+                case TACJumpIfValue():
+                    if not inst.condition.isConstant:
+                        liveVariables.add(inst.condition)
+                    if not inst.value.isConstant:
+                        liveVariables.add(inst.value)
+
+                case TACFunctionCall():
+                    if inst.result in liveVariables:
+                        liveVariables.remove(inst.result)
+
+                    for arg in inst.arguments:
+                        if not arg.isConstant:
+                            liveVariables.add(arg)
+
+                    # We'll suppose that all aliased variables will be live before a function call,
+                    # as they may be needed inside.
+                    liveVariables |= aliasedVariables
+
+                case TACLabel() | TACJump():
+                    continue
+
+                case _:
+                    raise ValueError(f"Cannot anotate live variables of a {type(inst)} instruction")
+        
+        self.liveVariables = liveVariables
+
+    def _isDeadStore(self, inst: TACInstruction) -> bool:
+        match inst:
+            case TACFunctionCall():
+                # We cannot eliminate function calls as they may affect other parts of the code.
+                return False
+            
+            case TACUnary() | TACBinary() | TACCopy():
+                if inst.result not in inst.liveVariables:
+                    return True
+                
+        return False
+
+    def applyLiveVariables(self):
+        # If an instruction is a dead store, remove it.
+        newInstructions = [
+            inst
+            for inst in self.instructions
+            if not self._isDeadStore(inst)
+        ]
+        self.instructions = newInstructions
 
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -632,9 +739,8 @@ class ControlFlowGraph:
     # reaching copies of the predecessor nodes. If all predecessors have the same reaching copy, 
     # then it reaches this node.
     # This is also called the meet operator in Data Flow Theory.
-    def _calculateIncomingCopies(self, node: ControlFlowNode) -> set[TACCopy]:
-        predIDList = list(node.predecessors)
-        predecessorList = [self._getNodeByID(id) for id in predIDList]
+    def _calculateReachingCopiesToNode(self, node: ControlFlowNode) -> set[TACCopy]:
+        predecessorList = [self._getNodeByID(id) for id in list(node.predecessors)]
         
         # No predecessors, no reaching copies. This block would be removed by the unreachable code
         # algorithm, but this is left as a safeguard.
@@ -671,8 +777,8 @@ class ControlFlowGraph:
             # Store the current reaching copies.
             startingReachingCopies = node.reachingCopies
             # Calculate the reaching copies with the current graph information.
-            incomingCopies = self._calculateIncomingCopies(node)
-            node.anotate(incomingCopies, aliased)
+            incomingCopies = self._calculateReachingCopiesToNode(node)
+            node.anotateReachingCopies(incomingCopies, aliased)
             if startingReachingCopies != node.reachingCopies:
                 # The current analysis changed this node incoming copies, therefore, all successors
                 # have to be recalculated. Only add them if they're not in the stack.
@@ -682,3 +788,58 @@ class ControlFlowGraph:
                     succ = self._getNodeByID(succID)
                     if succ not in nodeStack:
                         nodeStack.insert(0, succ)
+
+    """
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    DEAD STORE ELIMINATION
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    """
+    def _calculateLiveVariablesFromNode(self, node: ControlFlowNode) -> set[TACValue]:
+        successorList = [self._getNodeByID(id) for id in list(node.successors)]
+        
+        if len(successorList) == 0:
+            return set()
+        
+        # All variables which are alive at the start of the successors must be alive at the end of 
+        # the parent node. 
+        liveVars: set[TACValue] = set()
+        for succ in successorList:
+            liveVars |= succ.liveVariables
+
+        return liveVars
+    
+    def calculateLiveVariables(self, aliased: set[TACValue]):
+        nodeStack: list[ControlFlowNode] = []
+
+        # We'll be analyzing the nodes in postorder. This makes sure that we'll normally operate on 
+        # a block with all successors liveness calculated.
+        for nodeID in reversed(self.traverse()):
+            if nodeID < 0:
+                # Skip the entry and exit blocks.
+                continue
+            node = self._getNodeByID(nodeID)
+            nodeStack.append(node)
+            # Initialize the reaching copies of all nodes with the null set.
+            node.reachingCopies = set()
+
+        # We'll suppose that all aliased variables will be live at the exit node.
+        self.exitNode.liveVariables = aliased
+
+        # Operate until there are no more changes in the nodes.
+        while len(nodeStack) > 0:
+            node = nodeStack.pop()
+            # Store the current live variables.
+            startingLiveVariables = node.liveVariables
+            # Calculate the live variables with the current graph information.
+            liveVariables = self._calculateLiveVariablesFromNode(node)
+            node.anotateLiveVariables(liveVariables, aliased)
+            if startingLiveVariables != node.liveVariables:
+                # The current analysis changed this node, therefore, all predecessors have to be 
+                # recalculated. Only add them if they're not in the stack.
+                for succID in node.predecessors:
+                    if succID < 0: 
+                        continue
+                    succ = self._getNodeByID(succID)
+                    if succ not in nodeStack:
+                        nodeStack.insert(0, succ)
+
