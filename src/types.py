@@ -631,7 +631,7 @@ class StaticEvaluation:
             # To differentiate between the binary expression, v2 must be None.
             ret = -v1
         elif op == "!":
-            ret = 0 if int(v1) else 1
+            ret = 0 if v1 else 1
         elif op == "++":
             ret = v1 + 1
         elif op == "--":
@@ -668,6 +668,10 @@ class StaticEvaluation:
                     evalStatus = StaticEvalMsg.ERROR("Division by zero")
                 else:
                     ret = v1 % v2
+                    # In C, the remainder always takes the same sign as the divisor. 
+                    # E.g. 6 % -5 in Python is -4, but in C it's 1.
+                    if ret < 0:
+                        ret -= v2
             elif op == "+":
                 ret = v1 + v2
             elif op == "-":

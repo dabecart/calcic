@@ -22,6 +22,8 @@ class TACOptimizationFlags:
     copy_propagation: bool
     dead_store_elimination: bool
 
+    iteration_steps: int
+
 class TACOptimizer:
     def __init__(self, optimizationFlags: TACOptimizationFlags) -> None:
         self.flags = optimizationFlags
@@ -40,23 +42,25 @@ class TACOptimizer:
     # Aliased variables are those whose address is used during the program. This type of alias 
     # analysis is called "Address Taken Analysis".
     def _getAliasedVariables(self, insts: list[TACInstruction]) -> set[TACValue]:
-        # We'll suppose that static variables are also aliased variables, as their address can be 
-        # get from other functions in the code.
-        aliased: set[TACValue] = set([
+        return set([
+            inst.src
+            for inst in insts
+            if isinstance(inst, TACGetAddress)
+        ])
+        
+    def _getStaticVariables(self, insts: list[TACInstruction]) -> set[TACValue]:
+        return set([
             TACValue(False, staticVbe.valueType, staticVbe.identifier)
             for staticVbe in TACStaticVariable.staticVariables.values()
         ])
-        for inst in insts:
-            if isinstance(inst, TACGetAddress):
-                aliased.add(inst.src)
-        return aliased
     
     def _optimizeFunction(self, funcInsts: list[TACInstruction]) -> list[TACInstruction]:
-        if len(funcInsts) == 0:
+        if len(funcInsts) == 0 or self.flags.iteration_steps <= 0:
             return funcInsts
         
-        while True:
+        for _ in range(self.flags.iteration_steps):
             aliasedVariables = self._getAliasedVariables(funcInsts)
+            staticVariables = self._getStaticVariables(funcInsts)
 
             if self.flags.constant_folding:
                 optInsts = self.runConstantFolding(funcInsts)
@@ -68,22 +72,26 @@ class TACOptimizer:
             if self.flags.unreachable_code_elimination:
                 cfg = self.runUnreachableCodeElimination(cfg)
             if self.flags.copy_propagation:
-                cfg = self.runCopyPropagation(cfg, aliasedVariables)
+                # To run copy propagation, we'll suppose that static variables are also aliased 
+                # variables, as their address can be obtained from other functions in the code.
+                cfg = self.runCopyPropagation(cfg, aliasedVariables | staticVariables)
             if self.flags.dead_store_elimination:
-                cfg = self.runDeadStoreElimination(cfg, aliasedVariables)
+                cfg = self.runDeadStoreElimination(cfg, aliasedVariables, staticVariables)
 
             optInsts = cfg.toInstructionList()
 
             # If there are no more instructions, exit.
             if len(optInsts) == 0:
-                return optInsts
+                break
             
             # Are the same instructions?
             if len(optInsts) == len(funcInsts) and all(ins1 == ins2 for ins1, ins2 in zip(optInsts, funcInsts)):
-                return optInsts
+                break
 
             # Continue the loop.
             funcInsts = optInsts
+
+        return optInsts
     
     def runConstantFolding(self, insts: list[TACInstruction]) -> list[TACInstruction]:
         optInsts: list[TACInstruction] = []
@@ -172,24 +180,25 @@ class TACOptimizer:
         # >> Delete unreachable nodes. 
         # For that, traverse the graph keeping track of the nodes nodes visited.
         visitedNodes = set(cfg.traverse())
-        allNodes = set(cfg.nodes.keys())
+        allNodeIDs = set(cfg.nodes.keys())
 
         # After that, remove those that weren't visited.
-        toRemoveNodes = allNodes - visitedNodes
+        toRemoveNodes = allNodeIDs - visitedNodes
         if len(toRemoveNodes) > 0:
-            for id in toRemoveNodes:
-                del cfg.nodes[id]
+            for toRemoveId in toRemoveNodes:
+                del cfg.nodes[toRemoveId]
 
             # Delete the references to the deleted nodes.
-            for nodeID in cfg.nodes.values():
-                nodeID.predecessors -= toRemoveNodes
-                nodeID.successors -= toRemoveNodes
+            allNodes = [*cfg.nodes.values(), cfg.entryNode, cfg.exitNode]
+            for node in allNodes:
+                node.predecessors -= toRemoveNodes
+                node.successors -= toRemoveNodes
 
         # >> Delete useless labels and jumps. 
         # Sort the current nodes in a list based on their ID.
         sortedNodeIDs: list[int] = sorted(cfg.nodes.keys())
-        for i, nodeID in enumerate(sortedNodeIDs):
-            node = cfg.nodes[nodeID]
+        for i, node in enumerate(sortedNodeIDs):
+            node = cfg.nodes[node]
             # Find nodes with a starting label.
             if isinstance(node.getInitiator(), TACLabel):
                 # Get the previous node.
@@ -214,18 +223,34 @@ class TACOptimizer:
                 if node.successors == {nextNodeId}:
                     node.instructions.pop()
 
-        # >> Remove empty nodes.
+        # >> Remove empty nodes (nodes with no instructions left).
         toRemoveNodes: set[int] = set(
             [n.nodeID for n in cfg.nodes.values() if len(n.instructions) == 0]
         )
-        # Remove from the dictionary.
         if len(toRemoveNodes) > 0:
-            for id in toRemoveNodes:
-                del cfg.nodes[id]
-            # Remove from antecessor/successors.
-            for node in cfg.nodes.values():
-                node.predecessors -= toRemoveNodes
-                node.successors -= toRemoveNodes
+            # If the graph is N0 -> N1 -> N2, and N1 is removed:
+            # - N0 gains a successor:   N2 <- N0 gains the successors of N1.
+            # - N2 gains a predecessor: N0 <- N2 gains the predecessors of N1.
+            # - Both lose N1.
+            for toRemoveId in toRemoveNodes:
+                toRemove = cfg._getNodeByID(toRemoveId)
+
+                for predId in toRemove.predecessors:
+                    predNode = cfg._getNodeByID(predId)
+                    # Inherit the successors of the node to be removed.
+                    predNode.successors |= toRemove.successors
+                    # Remove the node which is going to be removed.
+                    predNode.successors.remove(toRemoveId)
+
+                for succId in toRemove.successors:
+                    succNode = cfg._getNodeByID(succId)
+                    # Inherit the predecessors of the node to be removed.
+                    succNode.predecessors |= toRemove.predecessors
+                    # Remove the node which is going to be removed.
+                    succNode.predecessors.remove(toRemoveId)
+
+                # Finally, remove the node from the graph.
+                del cfg.nodes[toRemoveId]
 
         return cfg
 
@@ -237,9 +262,10 @@ class TACOptimizer:
             node.applyReachingCopies()
         return cfg
 
-    def runDeadStoreElimination(self, cfg: ControlFlowGraph, aliased: set[TACValue]) -> ControlFlowGraph:
+    def runDeadStoreElimination(self, cfg: ControlFlowGraph, 
+                                aliasedVbes: set[TACValue], staticVbes: set[TACValue]) -> ControlFlowGraph:
         # This will calculate the live variables of all instructions.
-        cfg.calculateLiveVariables(aliased)
+        cfg.calculateLiveVariables(aliasedVbes, staticVbes)
         # Apply the live variables of all nodes.
         for node in cfg.nodes.values():
             node.applyLiveVariables()
@@ -509,17 +535,6 @@ class ControlFlowNode:
             inst.liveVariables = set(liveVariables)
 
             match inst:
-                case TACReturn():
-                    if not inst.returnValue.isConstant:
-                        liveVariables.add(inst.returnValue)
-
-                case TACCopy():
-                    if inst.dst in liveVariables:
-                        liveVariables.remove(inst.dst)
-
-                    if not inst.src.isConstant:
-                        liveVariables.add(inst.src)
-                
                 case TACBinary():
                     # The result is either a new variable or a modification of a previous one. In 
                     # either case, this instruction doesn't care for the value it had, therefore, 
@@ -535,12 +550,65 @@ class ControlFlowNode:
                     if not inst.exp2.isConstant:
                         liveVariables.add(inst.exp2)
 
+                case TACReturn():
+                    if not inst.returnValue.isConstant:
+                        liveVariables.add(inst.returnValue)
+
+                case TACSignExtend() | TACZeroExtend() |  TACTruncate() | \
+                    TACDecimalToDecimal() | TACDecimalToInt() | TACDecimalToUInt() | \
+                    TACIntToDecimal() | TACUIntToDecimal():
+                    if inst.result in liveVariables:
+                        liveVariables.remove(inst.result)
+                    
+                    if not inst.exp.isConstant:
+                        liveVariables.add(inst.exp)
+
                 case TACUnary():
                     if inst.result in liveVariables:
                         liveVariables.remove(inst.result)
 
                     if not inst.exp.isConstant:
                         liveVariables.add(inst.exp)
+
+                case TACCopy():
+                    if inst.dst in liveVariables:
+                        liveVariables.remove(inst.dst)
+
+                    if not inst.src.isConstant:
+                        liveVariables.add(inst.src)
+
+                case TACGetAddress():
+                    if inst.dst in liveVariables:
+                        liveVariables.remove(inst.dst)
+
+                    # Getting the address of a variable does not make it live.
+
+                case TACLoad() | TACCopyFromOffset():
+                    if inst.dst in liveVariables:
+                        liveVariables.remove(inst.dst)
+
+                    if not inst.src.isConstant:
+                        liveVariables.add(inst.src)
+                    # We'll suppose that all aliased variables will be needed when loading from 
+                    # memory.
+                    liveVariables |= aliasedVariables
+
+                case TACStore() | TACCopyToOffset():
+                    # A store won't kill anything as we don't really know where the value is being 
+                    # written to.
+                    if not inst.src.isConstant:
+                        liveVariables.add(inst.src)
+                    if not inst.dst.isConstant:
+                        liveVariables.add(inst.dst)
+
+                case TACAddToPointer():
+                    if inst.dst in liveVariables:
+                        liveVariables.remove(inst.dst)
+
+                    if not inst.pointer.isConstant:
+                        liveVariables.add(inst.pointer)
+                    if not inst.index.isConstant:
+                        liveVariables.add(inst.index)
 
                 case TACJumpIfZero() | TACJumpIfNotZero():
                     if not inst.condition.isConstant:
@@ -578,11 +646,24 @@ class ControlFlowNode:
                 # We cannot eliminate function calls as they may affect other parts of the code.
                 return False
             
-            case TACUnary() | TACBinary() | TACCopy():
-                if inst.result not in inst.liveVariables:
-                    return True
+            case TACStore():
+                # We don't know if the destination of the store is dear or not, so we should never
+                # delete TACStore instructions.
+                return False
+            
+            case TACUnary() | TACBinary() | TACCopy() | \
+                 TACSignExtend() | TACZeroExtend() |  TACTruncate() | \
+                 TACDecimalToDecimal() | TACDecimalToInt() | TACDecimalToUInt() | \
+                 TACIntToDecimal() | TACUIntToDecimal() | TACGetAddress() | \
+                 TACLoad() | TACAddToPointer() | TACCopyToOffset() | TACCopyFromOffset():
+                # If the result is not in the live variables, it is a dead store and can be deleted.
+                return inst.result not in inst.liveVariables
                 
-        return False
+            case TACJump() | TACJumpIfValue() | TACJumpIfZero() | TACJumpIfValue() | \
+                TACJumpIfNotZero() | TACLabel() | TACReturn():
+                return False
+
+        raise ValueError(f"Invalid check for dead store in instruction {type(inst)}")
 
     def applyLiveVariables(self):
         # If an instruction is a dead store, remove it.
@@ -808,7 +889,7 @@ class ControlFlowGraph:
 
         return liveVars
     
-    def calculateLiveVariables(self, aliased: set[TACValue]):
+    def calculateLiveVariables(self, aliasedVariables: set[TACValue], staticVbes: set[TACValue]):
         nodeStack: list[ControlFlowNode] = []
 
         # We'll be analyzing the nodes in postorder. This makes sure that we'll normally operate on 
@@ -823,7 +904,7 @@ class ControlFlowGraph:
             node.reachingCopies = set()
 
         # We'll suppose that all aliased variables will be live at the exit node.
-        self.exitNode.liveVariables = aliased
+        self.exitNode.liveVariables = staticVbes
 
         # Operate until there are no more changes in the nodes.
         while len(nodeStack) > 0:
@@ -832,7 +913,8 @@ class ControlFlowGraph:
             startingLiveVariables = node.liveVariables
             # Calculate the live variables with the current graph information.
             liveVariables = self._calculateLiveVariablesFromNode(node)
-            node.anotateLiveVariables(liveVariables, aliased)
+            # We'll suppose that static variables will also be aliased.
+            node.anotateLiveVariables(liveVariables, staticVbes | aliasedVariables)
             if startingLiveVariables != node.liveVariables:
                 # The current analysis changed this node, therefore, all predecessors have to be 
                 # recalculated. Only add them if they're not in the stack.

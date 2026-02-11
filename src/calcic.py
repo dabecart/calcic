@@ -73,8 +73,8 @@ def main() -> None:
                            help="Enables dead store elimination.",
                            action="store_true")
     argParser.add_argument("-O", "--optimize",
-                           help="Enables all optimizations.",
-                           action="store_true")
+                           help="Enables all optimizations. You can specify the number of steps in the optimization algorithm.",
+                           type=int, choices=range(1, 13), nargs='?', const=12, default=0)
     argParser.add_argument("-c",
                            help="Compile and assemble, but do not link. Generates a .o file.",
                            action="store_true",
@@ -148,11 +148,20 @@ def main() -> None:
     if args.tac:
         exit(0)
 
+    if (args.optimize == 0) and (
+        args.fold_constants or args.eliminate_unreachable_code or \
+        args.propagate_copies or args.eliminate_dead_stores):
+        # For the case when only the flags are used, but not the -O flag.
+        iterationSteps = 12
+    else:
+        iterationSteps = args.optimize
+
     optimizationFlags = optimizer.TACOptimizationFlags(
-        constant_folding                = args.fold_constants               or args.optimize,
-        unreachable_code_elimination    = args.eliminate_unreachable_code   or args.optimize,
-        copy_propagation                = args.propagate_copies             or args.optimize,
-        dead_store_elimination          = args.eliminate_dead_stores        or args.optimize,
+        constant_folding                = args.fold_constants               or bool(args.optimize),
+        unreachable_code_elimination    = args.eliminate_unreachable_code   or bool(args.optimize),
+        copy_propagation                = args.propagate_copies             or bool(args.optimize),
+        dead_store_elimination          = args.eliminate_dead_stores        or bool(args.optimize),
+        iteration_steps                 = iterationSteps
     )
 
     try:
