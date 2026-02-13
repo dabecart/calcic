@@ -1,3 +1,12 @@
+"""
+parser.py
+
+Interprets the tokens given by the lexing stage. Applies the grammar and semantic rules of C99 and 
+generates an Abstract Syntax Tree (AST) of the file. 
+
+calcic. Written by @dabecart, 2026.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -9,6 +18,10 @@ from dataclasses import dataclass, field
 from contextlib import contextmanager
 from typing import ClassVar, TypeVar, overload
 from .lexer import Token 
+from .types import *
+
+# Used to generate the verbose output.
+PADDING_INCREMENT: int = 2
 
 ASTType      = TypeVar("ASTType", bound="AST")
 TExp         = TypeVar("TExp", bound="Exp")
@@ -16,446 +29,12 @@ TStmt        = TypeVar("TStmt", bound="Statement")
 TBlockItem   = TypeVar("TBlockItem", bound="BlockItem")
 TDeclaration = TypeVar("TDeclaration", bound="Declaration")
 TInitializer = TypeVar("TInitializer", bound="Initializer")
-PADDING_INCREMENT: int = 2
 
-class StorageClass(enum.Enum):
-    STATIC = "static"
-    EXTERN = "extern"
-
-@dataclass
-class TypeQualifier:
-    const: bool = False
-    # TODO: volatile, restrict
-
-    def toSet(self) -> set[str]:
-        ret = set()
-        if self.const: ret.add("const")
-        return ret
-
-    @staticmethod
-    def fromSet(inputSet: set[str]) -> TypeQualifier:
-        return TypeQualifier("const" in inputSet)
-
-    def contains(self, other: TypeQualifier) -> bool:
-        return other.toSet() <= self.toSet()
-    
-    def union(self, other: TypeQualifier) -> TypeQualifier:
-        un = self.toSet() | other.toSet()
-        return TypeQualifier.fromSet(un)
-
-    def __str__(self) -> str:
-        ret = ""
-        if self.const: ret += "const "
-        return ret
-
-class TypeSpecifier:
-    VOID: TypeSpecifier
-    CHAR: TypeSpecifier
-    SIGNED_CHAR: TypeSpecifier
-    UCHAR: TypeSpecifier
-    SHORT: TypeSpecifier
-    INT: TypeSpecifier
-    LONG: TypeSpecifier
-    USHORT: TypeSpecifier
-    UINT: TypeSpecifier
-    ULONG: TypeSpecifier
-    DOUBLE: TypeSpecifier
-    FLOAT: TypeSpecifier
-
-    @staticmethod
-    def STRUCT(originalIdentifier: str, structDecl: StructDeclaration) -> TypeSpecifier:
-        kwargs = dict(identifier = structDecl.identifier, 
-                      members = structDecl.membersToParamInfo())
-        return TypeSpecifier("STRUCT", f"struct {originalIdentifier}", 
-                             structDecl.byteSize, structDecl.alignment, **kwargs)
-    
-    @staticmethod
-    def UNION(originalIdentifier: str, unionDecl: UnionDeclaration) -> TypeSpecifier:
-        kwargs = dict(identifier = unionDecl.identifier, 
-                      members = unionDecl.membersToParamInfo())
-        return TypeSpecifier("UNION", f"union {originalIdentifier}", 
-                             unionDecl.byteSize, unionDecl.alignment, **kwargs)
-
-    @staticmethod
-    def ENUM(originalIdentifier: str) -> TypeSpecifier:
-        # Enums are represented by an int (its size and alignment are 4).
-        return TypeSpecifier("ENUM", f"enum {originalIdentifier}", 4, 4)
-
-    def __init__(self, name: str, value: str, byteSize: int, alignment: int, **kwargs) -> None:
-        self.name: str = name
-        self.value: str = value
-        self.byteSize: int = byteSize
-        self.alignment: int = alignment
-        
-        # Struct/union stuff.
-        self.identifier: str = kwargs.get("identifier", "") # Mangled identifier.
-        self.members: list[ParameterInformation] = kwargs.get("members", [])
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, TypeSpecifier):
-            return False
-        ret = self.name == other.name and self.value == other.value
-        if ret and self.name in ("STRUCT", "UNION"):
-            # Check the struct and union's declaration, in particular, the mangled identifier.
-            ret = self.identifier == other.identifier
-        return ret
-    
-    def __str__(self) -> str:
-        return self.value
-    
-    def toBaseType(self, qualifiers = TypeQualifier()) -> BaseDeclaratorType:
-        return BaseDeclaratorType(self, qualifiers)
-
-    def getByteSize(self) -> int:
-        return self.byteSize
-    
-    def getAlignment(self) -> int:
-        return self.alignment
-            
-    def getMembers(self) -> list[ParameterInformation]:
-        if self.name not in ("STRUCT", "UNION"):
-            raise ValueError("Cannot get member of a non struct/union type")
-
-        return self.members
-    
-    def getMember(self, memberName: str) -> ParameterInformation|None:
-        for member in self.getMembers():
-            if member.name == memberName:
-                return member
-        return None
-
-    def isSignedInt(self) -> bool:
-        match self:
-            case TypeSpecifier.CHAR | TypeSpecifier.SIGNED_CHAR | \
-                 TypeSpecifier.SHORT | TypeSpecifier.INT | TypeSpecifier.LONG:      
-                return True
-            case _:
-                return False
-            
-    def isInteger(self) -> bool:
-        return self in (TypeSpecifier.CHAR, TypeSpecifier.UCHAR, TypeSpecifier.SIGNED_CHAR,
-                        TypeSpecifier.SHORT, TypeSpecifier.USHORT, 
-                        TypeSpecifier.INT, TypeSpecifier.UINT, 
-                        TypeSpecifier.LONG, TypeSpecifier.ULONG) or \
-               self.name == "ENUM"
-
-    def isDecimal(self) -> bool:
-        return self in (TypeSpecifier.DOUBLE, TypeSpecifier.FLOAT)
-    
-    def isCharacter(self) -> bool:
-        return self in (TypeSpecifier.CHAR, TypeSpecifier.UCHAR, TypeSpecifier.SIGNED_CHAR) 
-    
-    def needsIntegerPromotion(self) -> bool:
-        return self in (TypeSpecifier.CHAR, TypeSpecifier.UCHAR, TypeSpecifier.SIGNED_CHAR, 
-                        TypeSpecifier.SHORT, TypeSpecifier.USHORT) or \
-               self.name == "ENUM"
-
-    def flattenStruct(self) -> list[DeclaratorType]:
-        if self.name != "STRUCT":
-            raise ValueError(f"Cannot flatten {self.name}")
-        
-        ret: list[DeclaratorType] = []
-        
-        # Padding will be defined using void.
-        def addPadding(byteCount: int):
-            ret.extend([TypeSpecifier.VOID.toBaseType()] * byteCount)
-        
-        lastOffset: int = 0
-        member: ParameterInformation
-        for member in self.members:
-            addPadding(member.offset - lastOffset)
-            lastOffset = member.offset + member.type.getByteSize()
-
-            if isinstance(member.type, BaseDeclaratorType) and member.type.baseType.name == "STRUCT":
-                ret.extend(member.type.baseType.flattenStruct())
-            elif isinstance(member.type, ArrayDeclaratorType):
-                arrayBaseType = member.type.getArrayBaseType()
-                totalArrayLength = member.type.getByteSize() // arrayBaseType.getByteSize()
-                ret.extend([arrayBaseType] * totalArrayLength)
-            else:
-                ret.append(member.type)
-
-        # Add the final padding.
-        addPadding(self.getByteSize() - lastOffset)
-
-        return ret
-
-TypeSpecifier.VOID          = TypeSpecifier("VOID",         "void",         -1, -1)
-TypeSpecifier.CHAR          = TypeSpecifier("CHAR",         "char",          1,  1)
-TypeSpecifier.SIGNED_CHAR   = TypeSpecifier("SIGNED_CHAR",  "signed char",   1,  1)
-TypeSpecifier.UCHAR         = TypeSpecifier("UCHAR",        "unsigned char", 1,  1)
-TypeSpecifier.SHORT         = TypeSpecifier("SHORT",        "short",         2,  2)
-TypeSpecifier.USHORT        = TypeSpecifier("USHORT",       "unsigned short",2,  2)
-TypeSpecifier.INT           = TypeSpecifier("INT",          "int",           4,  4)
-TypeSpecifier.UINT          = TypeSpecifier("UINT",         "unsigned int",  4,  4)
-TypeSpecifier.LONG          = TypeSpecifier("LONG",         "long",          8,  8)
-TypeSpecifier.ULONG         = TypeSpecifier("ULONG",        "unsigned long", 8,  8)
-TypeSpecifier.DOUBLE        = TypeSpecifier("DOUBLE",       "double",        8,  8)
-TypeSpecifier.FLOAT         = TypeSpecifier("FLOAT",        "float",         4,  4)
-
-# When parsing the "type" of variable being declared, a DeclaratorType will be used. 
-# There are three types of declarators:
-# - Base types, which are normal types (int, long, float...).
-# - Pointer.
-# - Function.
-# DeclaratorType stores types in a reverse order to normal C.
-# An example, int (*param)[3][4] is read as "param is a POINTER to an ARRAY of 3 of an ARRAY of 4 int"
-# DeclaratorType is Array(Array(Pointer(Base(int)), 3), 4)
-class DeclaratorType(ABC):
-    def __init__(self) -> None:
-        super().__init__()
-
-    # Returns a new decayed declarator type (if the innermost type is an array, it is converted to
-    # a pointer).
-    @abstractmethod
-    def decay(self) -> DeclaratorType:
-        pass
-
-    @abstractmethod
-    def __eq__(self, other) -> bool:
-        pass
-
-    @abstractmethod
-    def __str__(self) -> str:
-        return super().__str__()
-    
-    @abstractmethod
-    def unqualify(self) -> BaseDeclaratorType:
-        pass
-
-    @abstractmethod
-    def getTypeQualifiers(self) -> TypeQualifier:
-        pass
-
-    @abstractmethod
-    def setTypeQualifiers(self, newQualifiers: TypeQualifier):
-        pass
-
-    @abstractmethod
-    def copy(self) -> PointerDeclaratorType:
-        pass
-
-    def __repr__(self) -> str:
-        return self.__str__()
-
-    def isInteger(self) -> bool:
-        if isinstance(self, BaseDeclaratorType):
-            return self.baseType.isInteger()
-        return False
-
-    def isDecimal(self) -> bool:
-        if isinstance(self, BaseDeclaratorType):
-            return self.baseType.isDecimal()
-        return False
-
-    def getByteSize(self) -> int:
-        if isinstance(self, BaseDeclaratorType):
-            return self.baseType.getByteSize()
-        elif isinstance(self, PointerDeclaratorType):
-            # TODO: For 64 bit systems...
-            return 8
-        elif isinstance(self, ArrayDeclaratorType):
-            return self.declarator.getByteSize() * self.size
-
-        raise ValueError("Not implemented")
-    
-    def getAlignment(self) -> int:
-        if isinstance(self, BaseDeclaratorType):
-            return self.baseType.getAlignment()
-        elif isinstance(self, PointerDeclaratorType):
-            # TODO: For 64 bit systems...
-            return 8
-        elif isinstance(self, ArrayDeclaratorType):
-            # ABI says that for arrays bigger or equal to 16 bytes, the alignment is 16. 
-            # return 16 if self.getByteSize() >= 16 else self.declarator.getAlignment()
-            # TODO: is the rule above necessary for structs?
-            return self.declarator.getAlignment()
-
-        raise ValueError("Not implemented")
-
-    def isSigned(self) -> bool:
-        if isinstance(self, BaseDeclaratorType):
-            return self.baseType.isSignedInt()
-        return False
-    
-    # Traverses an array type 
-    def getArrayBaseType(self) -> DeclaratorType:
-        if isinstance(self, ArrayDeclaratorType):
-            return self.declarator.getArrayBaseType()
-        else:
-            return self
-    
-    def isComplete(self) -> bool:
-        # Void is always incomplete.
-        if isinstance(self, BaseDeclaratorType) and self.baseType == TypeSpecifier.VOID:
-            return False
-        # If the byte size cannot be calculated or is negative, then it's an incomplete type.
-        try:
-            byteSize = self.getByteSize()
-        except:
-            return False
-        return byteSize >= 0
-    
-    def isScalar(self) -> bool:
-        if isinstance(self, (ArrayDeclaratorType, FunctionDeclaration)) or \
-           self == TypeSpecifier.VOID.toBaseType() or \
-           (isinstance(self, BaseDeclaratorType) and self.baseType.name in ("STRUCT", "UNION")):
-            return False
-        return True
-    
-    def isArithmetic(self) -> bool:
-        if isinstance(self, BaseDeclaratorType):
-            return self.baseType.name not in ("STRUCT", "UNION", "VOID")
-        return False
-    
-class BaseDeclaratorType(DeclaratorType):
-    def __init__(self, baseType: TypeSpecifier, qualifiers: TypeQualifier = TypeQualifier()) -> None:
-        self.baseType = baseType
-        self.qualifiers = qualifiers
-        super().__init__()
-
-    def decay(self) -> DeclaratorType:
-        # Base types do not decay.
-        return BaseDeclaratorType(self.baseType, self.qualifiers)
-
-    def __str__(self) -> str:
-            return f"{self.qualifiers}{self.baseType}"
-    
-    def __eq__(self, other):
-        if not isinstance(other, BaseDeclaratorType):
-            return False
-        return self.baseType == other.baseType and self.qualifiers == other.qualifiers
-    
-    def copy(self) -> BaseDeclaratorType:
-        return BaseDeclaratorType(self.baseType, self.qualifiers)
-    
-    def unqualify(self) -> BaseDeclaratorType:
-        ret = self.copy()
-        ret.qualifiers = TypeQualifier()
-        return ret
-
-    def getTypeQualifiers(self) -> TypeQualifier:
-        return self.qualifiers
-
-    def setTypeQualifiers(self, newQualifiers: TypeQualifier):
-        self.qualifiers = newQualifiers
-
-class PointerDeclaratorType(DeclaratorType):
-    def __init__(self, declarator: DeclaratorType, qualifiers: TypeQualifier = TypeQualifier()) -> None:
-        self.declarator = declarator
-        self.qualifiers = qualifiers
-        super().__init__()
-
-    def decay(self) -> DeclaratorType:
-        # Pointers do not decay.
-        return PointerDeclaratorType(self.declarator, self.qualifiers)
-    
-    def copy(self) -> PointerDeclaratorType:
-        return PointerDeclaratorType(self.declarator, self.qualifiers)
-        
-    def __str__(self) -> str:
-            return f"{self.qualifiers}pointer to {self.declarator}"
-    
-    def __eq__(self, other):
-        if not isinstance(other, PointerDeclaratorType):
-            return False
-        return self.declarator == other.declarator and self.qualifiers == other.qualifiers
-    
-    def unqualify(self) -> PointerDeclaratorType:
-        ret = self.copy()
-        ret.qualifiers = TypeQualifier()
-        return ret
-    
-    def getTypeQualifiers(self) -> TypeQualifier:
-        return self.qualifiers
-    
-    def setTypeQualifiers(self, newQualifiers: TypeQualifier):
-        self.qualifiers = newQualifiers
-
-class ArrayDeclaratorType(DeclaratorType):
-    def __init__(self, declarator: DeclaratorType, size: int) -> None:
-        self.declarator = declarator
-        self.size = size
-        super().__init__()
-
-    def decay(self) -> DeclaratorType:
-        # An array in C decays to pointer to their first element.
-        # For example, int[3][4] decays to int (*)[4].
-        # Another example, *int[4] decays to int**.
-        return PointerDeclaratorType(self.declarator, self.getTypeQualifiers())
-    
-    def copy(self) -> ArrayDeclaratorType:
-        return ArrayDeclaratorType(self.declarator, self.size)
-
-    def __str__(self) -> str:
-        return f"array[{self.size}] of {self.declarator}"
-    
-    def __eq__(self, other):
-        if not isinstance(other, ArrayDeclaratorType):
-            return False
-        return self.declarator == other.declarator and self.size == other.size
-    
-    def unqualify(self) -> ArrayDeclaratorType:
-        return ArrayDeclaratorType(self.declarator.unqualify(), self.size)
-    
-    def getTypeQualifiers(self) -> TypeQualifier:
-        return self.declarator.getTypeQualifiers()
-    
-    def setTypeQualifiers(self, newQualifiers: TypeQualifier):
-        self.qualifiers = newQualifiers
-
-@dataclass
-class ParameterInformation:
-    type: DeclaratorType
-    name: str
-
-    # Used for the parameters of structs.
-    offset: int = 0
-
-    def __str__(self) -> str:
-        return f"{self.type} {self.name}"
-    
-    def __eq__(self, other):
-        if not isinstance(other, ParameterInformation):
-            return False
-        return self.type == other.type
-
-class FunctionDeclaratorType(DeclaratorType):
-    def __init__(self, params: list[ParameterInformation], declarator: DeclaratorType) -> None:
-        self.params = params
-        self.returnDeclarator = declarator
-        super().__init__()
-
-    def decay(self) -> DeclaratorType:
-        raise ValueError()
-
-    def copy(self) -> FunctionDeclaratorType:
-        return FunctionDeclaratorType(self.params, self.returnDeclarator)
-
-    def __str__(self) -> str:
-        paramStrings = [str(p) for p in self.params]
-        return f"{self.returnDeclarator}({', '.join(paramStrings)})"
-    
-    def __eq__(self, other):
-        if not isinstance(other, FunctionDeclaratorType):
-            return False
-        return self.returnDeclarator == other.returnDeclarator and all([p1 == p2 for p1, p2 in zip(self.params, other.params)])
-    
-    def unqualify(self) -> FunctionDeclaratorType:
-        raise ValueError()
-    
-    def getTypeQualifiers(self) -> TypeQualifier:
-        raise ValueError()
-
-    def setTypeQualifiers(self, newQualifiers: TypeQualifier):
-        raise ValueError()
-
-@dataclass
-class DeclaratorInformation:
-    name: str
-    type: DeclaratorType
-    params: list[ParameterInformation]
-
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CONTEXT: To handle the state of variables and functions during the compilation.
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 
 # Context information for each identifier.
 @dataclass
@@ -506,7 +85,7 @@ class SwitchContext:
     name: str
     # Type of the variable controlling the switch.
     controlType: DeclaratorType
-    cases: list[CaseStatement]          = field(default_factory= lambda:[])
+    cases: list[CaseStatement]          = field(default_factory=list)
     defaultCase: DefaultStatement|None  = None
 
 @dataclass
@@ -521,19 +100,19 @@ class LabelContext:
 class Context:
     # Only used to map the identifiers. To get the properties of the objects, use functionMap or 
     # variableMap. Key is the original name of the variable.
-    identifierMap: dict[str, IdentifierContext]              = field(default_factory= lambda:{})
+    identifierMap: dict[str, IdentifierContext]              = field(default_factory=dict)
     # Stores the attributes of functions.
-    functionMap: dict[str, FunctionContext]                  = field(default_factory= lambda:{})
+    functionMap: dict[str, FunctionContext]                  = field(default_factory=dict)
     # Stores the attributes of structs, unions and enums. Key is the mangled name.
-    tagsMap: dict[str, TagContext]                           = field(default_factory= lambda:{})
+    tagsMap: dict[str, TagContext]                           = field(default_factory=dict)
     # Stores the attributes of variables which are stored on the .data section.
-    staticVariablesMap: dict[str, StaticVariableContext]     = field(default_factory= lambda:{})
+    staticVariablesMap: dict[str, StaticVariableContext]     = field(default_factory=dict)
     # Stores the attributes of variables which are stored on the .rodata section.
-    constantVariablesMap: dict[str, ConstantVariableContext] = field(default_factory= lambda:{})
+    constantVariablesMap: dict[str, ConstantVariableContext] = field(default_factory=dict)
     
-    loopTracking: list[str]                     = field(default_factory= lambda:[])
-    switchTracking: list[SwitchContext]         = field(default_factory= lambda:[])
-    labelTracking: dict[str,LabelContext]       = field(default_factory= lambda:{})
+    loopTracking: list[str]                     = field(default_factory=list)
+    switchTracking: list[SwitchContext]         = field(default_factory=list)
+    labelTracking: dict[str,LabelContext]       = field(default_factory=dict)
     insideAFunction: bool                       = False
     # The function the context is currently in.
     insideFunctionName: str                     = ""
@@ -749,7 +328,11 @@ class Context:
         ctx.idType.alignment = union.alignment
         ctx.idType.members = union.membersToParamInfo()
 
-# AST components.
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AST BASE CLASS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 class AST(ABC):
     def __init__(self, tokens: list[Token], context: Context|None = None, parentAST: AST|None = None, *args) -> None:
         super().__init__()
@@ -1676,6 +1259,13 @@ class BlockItem(AST):
     def print(self, padding: int) -> str:
         pass
 
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+STATEMENTS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+
 class Statement(BlockItem):
     @abstractmethod
     def parse(self, *args):
@@ -2053,6 +1643,13 @@ class GotoStatement(Statement):
     def print(self, padding: int) -> str:
         pad  = " " * padding
         return f'{pad}Goto({self.labelName})\n'
+
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DECLARATIONS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 
 class Declaration(BlockItem):
     @abstractmethod
@@ -2440,7 +2037,9 @@ class StructDeclaration(Declaration):
             # Create a new mangled identifier.
             self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
             # Create the type.
-            self.typeId = TypeSpecifier.STRUCT(self.originalIdentifier, self)
+            self.typeId = TypeSpecifier.STRUCT(self.originalIdentifier, self.identifier, 
+                                               self.byteSize, self.alignment, 
+                                               self.membersToParamInfo())
             # Add it to the context map only if it has not been declared in the current scope.
             self.context.addStruct(self)
         else:
@@ -2555,7 +2154,9 @@ class UnionDeclaration(Declaration):
             # Create a new mangled identifier.
             self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
             # Create the type.
-            self.typeId = TypeSpecifier.UNION(self.originalIdentifier, self)
+            self.typeId = TypeSpecifier.UNION(self.originalIdentifier, self.identifier, 
+                                               self.byteSize, self.alignment, 
+                                               self.membersToParamInfo())
             # Add it to the context map only if it has not been declared in the current scope.
             self.context.addUnion(self)
         else:
@@ -2935,6 +2536,12 @@ class Exp(AST):
         else:
             return None
 
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CONSTANTS: Different kind of C constants of basic types.
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+
 class Constant(Exp):
     def __init__(self, tokens: list[Token], context: Context | None = None, 
                  parentAST: AST | None = None, *args) -> None:
@@ -2956,6 +2563,20 @@ class Constant(Exp):
     def print(self, padding: int) -> str:
         pass
 
+    def _parseIntValue(self):
+        if self.peek().id in ("double_constant", "float_constant"):
+            intVal = math.floor(float(self.pop().value))
+        else:
+            intValToken = self.expect(
+                "constant", "long_constant", 
+                "unsigned_constant", "unsigned_long_constant", "character"
+            )
+            try:
+                intVal = intValToken.parseIntegerToken()
+            except Exception as e:
+                self.raiseError(str(e))
+        return intVal
+
 class CharConstant(Constant):
     def parse(self, *args):
         self.typeId = TypeSpecifier.CHAR.toBaseType()
@@ -2963,25 +2584,12 @@ class CharConstant(Constant):
         if len(args) > 0:
             intVal = int(args[0])
         else:
-            if self.peek().id in ("double_constant", "float_constant"):
-                intVal = math.floor(float(self.pop().value))
-            else:
-                try:
-                    intVal = self.expect(
-                        "constant", "long_constant", "unsigned_constant", "unsigned_long_constant", "character"
-                    ).parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+            intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x80:
-            # This is equivalent to modulo 2^7.
-            intVal &= 0xFF
-            if intVal >= 0x80:
-                intVal -= 0x100
-
-            self.raiseWarning(f"char constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2997,20 +2605,12 @@ class UCharConstant(Constant):
             if self.peek().id in ("double_constant", "float_constant"):
                 intVal = math.floor(float(self.pop().value))
             else:
-                try:
-                    intVal = self.expect(
-                        "constant", "long_constant", "unsigned_constant", "unsigned_long_constant", "character"
-                    ).parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+                intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x100:
-            # This is the same as modulo 2^8.
-            intVal &= 0xFF
-
-            self.raiseWarning(f"unsigned char constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3026,22 +2626,12 @@ class ShortConstant(Constant):
             if self.peek().id in ("double_constant", "float_constant"):
                 intVal = math.floor(float(self.pop().value))
             else:
-                try:
-                    intVal = self.expect(
-                        "constant", "long_constant", "unsigned_constant", "unsigned_long_constant", "character"
-                    ).parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+                intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x8000:
-            # This is equivalent to modulo 2^15.
-            intVal &= 0xFFFF
-            if intVal >= 0x8000:
-                intVal -= 0x10000
-
-            self.raiseWarning(f"short constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3057,20 +2647,12 @@ class UShortConstant(Constant):
             if self.peek().id in ("double_constant", "float_constant"):
                 intVal = math.floor(float(self.pop().value))
             else:
-                try:
-                    intVal = self.expect(
-                        "constant", "long_constant", "unsigned_constant", "unsigned_long_constant", "character"
-                    ).parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+                intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x10000:
-            # This is the same as modulo 2^16.
-            intVal &= 0xFFFF
-
-            self.raiseWarning(f"unsigned short constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3083,27 +2665,12 @@ class IntConstant(Constant):
         if len(args) > 0:
             intVal = int(args[0])
         else:
-            if self.peek().id in ("double_constant", "float_constant"):
-                intVal = math.floor(float(self.pop().value))
-            else:
-                intValToken = self.expect(
-                    "constant", "long_constant", 
-                    "unsigned_constant", "unsigned_long_constant", "character"
-                )
-                try:
-                    intVal = intValToken.parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+            intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x80000000:
-            # This is equivalent to modulo 2^31.
-            intVal &= 0xFFFFFFFF
-            if intVal >= 0x80000000:
-                intVal -= 0x100000000
-
-            self.raiseWarning(f"int constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3116,25 +2683,12 @@ class UIntConstant(Constant):
         if len(args) > 0:
             intVal = int(args[0])
         else:
-            if self.peek().id in ("double_constant", "float_constant"):
-                intVal = math.floor(float(self.pop().value))
-            else:
-                intValToken = self.expect(
-                    "constant", "long_constant", 
-                    "unsigned_constant", "unsigned_long_constant", "character"
-                )
-                try:
-                    intVal = intValToken.parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+            intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x100000000:
-            # This is the same as modulo 2^32.
-            intVal &= 0xFFFFFFFF
-
-            self.raiseWarning(f"unsigned int constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3150,24 +2704,12 @@ class LongConstant(Constant):
             if self.peek().id in ("double_constant", "float_constant"):
                 intVal = math.floor(float(self.pop().value))
             else:
-                intValToken = self.expect(
-                    "constant", "long_constant", 
-                    "unsigned_constant", "unsigned_long_constant", "character"
-                )
-                try:
-                    intVal = intValToken.parseIntegerToken()
-                except Exception as e:
-                    self.raiseError(str(e))
+                intVal = self._parseIntValue()
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x8000000000000000:
-            # This is the same as modulo 2^63. 
-            intVal &= 0xFFFFFFFFFFFFFFFF
-            if intVal >= 0x8000000000000000:
-                intVal -= 0x10000000000000000
-
-            self.raiseWarning(f"long constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3192,13 +2734,10 @@ class ULongConstant(Constant):
                 except Exception as e:
                     self.raiseError(str(e))
 
+        intVal, warn = StaticEvaluation.parseValue(self.typeId.baseType, intVal)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(intVal)
-        if intVal >= 0x10000000000000000:
-            # This is the same as modulo 2^64. 
-            intVal &= 0xFFFFFFFFFFFFFFFF
-
-            self.raiseWarning(f"unsigned long constant {self.constValue} overflows to {intVal}")
-            self.constValue = str(intVal)
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3224,18 +2763,18 @@ class DoubleConstant(Constant):
                     self.raiseError(str(e))    
                 doubleValue = float(intVal)
 
-        self.hex = f"{struct.unpack('<Q', struct.pack('<d', doubleValue))[0]:#0{16}x}"
+        doubleValue, warn = StaticEvaluation.parseValue(self.typeId.baseType, doubleValue)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(doubleValue)
+
+        self.hex = f"{struct.unpack('<Q', struct.pack('<d', doubleValue))[0]:#0{16}x}"
 
     def print(self, padding: int) -> str:
         pad = " " * padding
         return f'{pad}Double = {self.constValue} (0x{self.hex})\n'
 
 class FloatConstant(Constant):
-    @staticmethod
-    def convertPythonFloatToCFloat(val: float) -> float:
-        return struct.unpack('f', struct.pack('f', val))[0]
-
     def parse(self, *args):
         self.typeId = TypeSpecifier.FLOAT.toBaseType()
 
@@ -3255,10 +2794,12 @@ class FloatConstant(Constant):
                     self.raiseError(str(e))
                 doubleValue = float(intVal)
 
-        # Pack into 32-bit float, then unpack again.
-        floatValue = FloatConstant.convertPythonFloatToCFloat(doubleValue)
-        self.hex = f"{struct.unpack('<I', struct.pack('<f', floatValue))[0]:#0{8}x}"
+        floatValue, warn = StaticEvaluation.parseValue(self.typeId.baseType, doubleValue)
+        if warn:
+            warn.rise(self.raiseWarning, self.raiseError)
         self.constValue = str(floatValue)
+
+        self.hex = f"{struct.unpack('<I', struct.pack('<f', floatValue))[0]:#0{8}x}"
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3328,6 +2869,12 @@ class PointerInitializer(Constant):
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # END of constants are used to initialize static variables.
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+EXPRESSIONS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 
 class Variable(Exp):
     def parse(self, variableName: str):
@@ -3447,33 +2994,16 @@ class Cast(Exp):
 
         if isinstance(self.typeId, BaseDeclaratorType):
             if self.typeId.baseType.isDecimal():
-                doubleValue = innerValue.getFloatValue(self.inner)
-                if self.typeId.baseType == TypeSpecifier.FLOAT:
-                    doubleValue = FloatConstant.convertPythonFloatToCFloat(doubleValue)
-                return StaticEvalValue(StaticEvalType.FLOAT, str(doubleValue))
+                operand = innerValue.getFloatValue(self.inner)
+                evalType = StaticEvalType.FLOAT
+            else:
+                operand = innerValue.getIntegerValue(self.inner)
+                evalType = StaticEvalType.INTEGER
             
-            if self.typeId.baseType.isInteger():
-                intValue = innerValue.getIntegerValue(self.inner)
-
-                # C-cast implemented in Python.
-                # Mask to original width (simulating the source C-type storage).
-                innerBitCount = self.inner.typeId.getByteSize() * 8
-                intValue &= (1 << innerBitCount) - 1
-                
-                if self.inner.typeId.isSigned():
-                    if intValue & (1 << (innerBitCount - 1)):
-                        intValue -= (1 << innerBitCount)
-
-                # Convert to target width.
-                castBitCount = self.typeId.getByteSize() * 8
-                intValue &= (1 << castBitCount) - 1
-
-                # Interpret as signed if necessary.
-                if self.typeId.isSigned():
-                    if intValue & (1 << (castBitCount - 1)):
-                        intValue -= (1 << castBitCount)
-
-                return StaticEvalValue(StaticEvalType.INTEGER, str(intValue))
+            retValue, warning = StaticEvaluation.parseValue(self.typeId.baseType, operand)
+            if warning:
+                warning.rise(self.raiseWarning, self.raiseError)
+            return StaticEvalValue(evalType, str(retValue))
             
         if isinstance(self.typeId, PointerDeclaratorType):
             if self.inner.typeId.isInteger():
@@ -3502,10 +3032,10 @@ class UnaryOperator(enum.Enum):
     DEREFERENCE         = "*"
     ADDRESS_OF          = "&"
 
-    PRE_INCREMENT       = enum.auto()
-    PRE_DECREMENT       = enum.auto()
-    POST_INCREMENT      = enum.auto()
-    POST_DECREMENT      = enum.auto()
+    PRE_INCREMENT       = "++x"
+    PRE_DECREMENT       = "--x"
+    POST_INCREMENT      = "x++"
+    POST_DECREMENT      = "x--"
 
     def convertToSimple(self) -> UnaryOperator:
         match self:
@@ -3593,30 +3123,25 @@ class Unary(Exp):
     def staticEval(self) -> StaticEvalValue:
         innerValue = self.inner.staticEval()
 
-        match self.unaryOperator:
-            case UnaryOperator.BITWISE_COMPLEMENT:
-                retVal = ~innerValue.getIntegerValue(self.inner)
-                return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
-            
-            case UnaryOperator.NEGATION:
-                if self.typeId.isDecimal():
-                    retVal = -innerValue.getFloatValue(self.inner)
-                    return StaticEvalValue(StaticEvalType.FLOAT, str(retVal))
-                else:
-                    retVal = -innerValue.getIntegerValue(self.inner)
-                    return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
-                
-            case UnaryOperator.NOT:
-                if innerValue.valType == StaticEvalType.POINTER:
-                    # A pointer to a static variable is never null.
-                    retVal = 0
-                else:
-                    retVal = 0 if innerValue.getIntegerValue(self.inner) else 1
-                
-                return StaticEvalValue(StaticEvalType.INTEGER, str(retVal))
+        if self.unaryOperator == UnaryOperator.NOT and innerValue.valType == StaticEvalType.POINTER:
+            # A pointer to a static variable is never null.
+            retVal = 0
+            warning = EVAL_OK
+        else:
+            if self.typeId.isDecimal():
+                operand = innerValue.getFloatValue(self.inner)
+            else:
+                operand = innerValue.getIntegerValue(self.inner)
+            retVal, warning = StaticEvaluation.evalDecl(
+                self.unaryOperator.value, self.inner.typeId, self.typeId, operand)
 
-            case _:
-                self.raiseError("Cannot evaluate during compilation")
+        if warning:
+            warning.rise(self.raiseWarning, self.raiseError)
+            
+        return StaticEvalValue(
+            StaticEvalType.INTEGER if isinstance(retVal, int) else StaticEvalType.FLOAT, 
+            str(retVal)
+        )
         
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3659,10 +3184,10 @@ class BinaryOperator(enum.Enum):
     COMPOUND_BITWISE_XOR         = "^="
     COMPOUND_BITWISE_OR          = "|="
 
-    LOGIC_LEFT_SHIFT            = enum.auto()
-    ARITHMETIC_LEFT_SHIFT       = enum.auto()
-    LOGIC_RIGHT_SHIFT           = enum.auto()
-    ARITHMETIC_RIGHT_SHIFT      = enum.auto()
+    LOGIC_LEFT_SHIFT            = "logic<<"
+    ARITHMETIC_LEFT_SHIFT       = "arith<<"
+    LOGIC_RIGHT_SHIFT           = "logic>>"
+    ARITHMETIC_RIGHT_SHIFT      = "arith>>"
 
     def isCompound(self) -> bool:
         return self.name.startswith("COMPOUND_")
@@ -3686,6 +3211,15 @@ class BinaryOperator(enum.Enum):
         except:
             return None
         return op
+    
+    def getBaseOperator(self) -> BinaryOperator:
+        if self.isCompound():
+            return BinaryOperator(self.value.replace("=", ""))
+        if "logic" in self.value:
+            return BinaryOperator(self.value.replace("logic", ""))
+        if "arith" in self.value:
+            return BinaryOperator(self.value.replace("arith", ""))
+        return self
     
     # Based on https://en.cppreference.com/w/c/language/operator_precedence.html
     def getPrecedence(self) -> int:
@@ -4030,11 +3564,17 @@ class Binary(Exp):
             if exp1Eval.value != exp2Eval.value:
                 self.raiseError("Cannot compare pointers with different base addresses")
             # Compare with the indices.
-            exp1 = exp1Eval.pointerOffset
-            exp2 = exp2Eval.pointerOffset
+            result, warning = StaticEvaluation.eval(
+                self.binaryOperator.value, TypeSpecifier.LONG, TypeSpecifier.LONG,
+                exp1Eval.pointerOffset, exp2Eval.pointerOffset
+            )
+            if warning:
+                warning.rise(self.raiseWarning, self.raiseError)
+
+            return StaticEvalValue(StaticEvalType.INTEGER, str(result))
 
         # ARITHMETIC EVALUATIONS.
-        elif self.typeId.isDecimal():
+        if self.typeId.isDecimal():
             exp1 = exp1Eval.getFloatValue(self.exp1)
             exp2 = exp2Eval.getFloatValue(self.exp2)
         else:
@@ -4044,67 +3584,14 @@ class Binary(Exp):
         if self.compoundBinary:
             self.raiseError("Cannot evaluate during compilation.")
 
-        match self.binaryOperator:
-            case BinaryOperator.MULTIPLICATION:
-                retVal = exp1 * exp2
-            case BinaryOperator.DIVISION:
-                if exp2 == 0:
-                    self.raiseError("Cannot divide by zero")
-                if self.typeId.isDecimal():
-                    retVal = exp1 / exp2
-                else:
-                    retVal = exp1 // exp2
-            case BinaryOperator.MODULUS:
-                if exp2 == 0:
-                    self.raiseError("Cannot mod by zero")
-                retVal = exp1 % exp2
-            case BinaryOperator.SUM:
-                retVal = exp1 + exp2
-            case BinaryOperator.SUBTRACT:
-                retVal = exp1 - exp2
-            case BinaryOperator.LOGIC_LEFT_SHIFT | BinaryOperator.ARITHMETIC_LEFT_SHIFT:
-                if isinstance(exp1, float) or isinstance(exp2, float):
-                    raise ValueError()
-                retVal = exp1 << exp2
-            case BinaryOperator.LOGIC_RIGHT_SHIFT | BinaryOperator.ARITHMETIC_RIGHT_SHIFT:
-                if isinstance(exp1, float) or isinstance(exp2, float):
-                    raise ValueError()
-                retVal = exp1 >> exp2
-            case BinaryOperator.GREATER_THAN:
-                retVal = 1 if exp1 > exp2 else 0
-            case BinaryOperator.GREATER_OR_EQUAL:
-                retVal = 1 if exp1 >= exp2 else 0
-            case BinaryOperator.LESS_THAN:
-                retVal = 1 if exp1 < exp2 else 0
-            case BinaryOperator.LESS_OR_EQUAL:
-                retVal = 1 if exp1 <= exp2 else 0
-            case BinaryOperator.EQUAL:
-                retVal = 1 if exp1 == exp2 else 0
-            case BinaryOperator.NOT_EQUAL:
-                retVal = 1 if exp1 != exp2 else 0
-            case BinaryOperator.BITWISE_AND:
-                if isinstance(exp1, float) or isinstance(exp2, float):
-                    raise ValueError()
-                retVal = exp1 & exp2
-            case BinaryOperator.BITWISE_XOR:
-                if isinstance(exp1, float) or isinstance(exp2, float):
-                    raise ValueError()
-                retVal = exp1 ^ exp2
-            case BinaryOperator.BITWISE_OR:
-                if isinstance(exp1, float) or isinstance(exp2, float):
-                    raise ValueError()
-                retVal = exp1 | exp2
-            case BinaryOperator.AND:
-                retVal = 1 if exp1 and exp2 else 0
-            case BinaryOperator.OR:
-                retVal = 1 if exp1 or exp2 else 0
+        result, warning = StaticEvaluation.evalDecl(
+            self.binaryOperator.getBaseOperator().value, self.exp1.typeId, self.typeId, exp1, exp2)
+        if warning:
+            warning.rise(self.raiseWarning, self.raiseError)
 
-            case _:
-                self.raiseError(f"Cannot evaluate {self.binaryOperator.name} during compilation")
-        
         return StaticEvalValue(
-            StaticEvalType.INTEGER if isinstance(retVal, int) else StaticEvalType.FLOAT,
-            str(retVal)
+            StaticEvalType.INTEGER if isinstance(result, int) else StaticEvalType.FLOAT,
+            str(result)
         )
 
     def print(self, padding: int) -> str:
@@ -4491,6 +3978,13 @@ class SizeOfType(Exp):
     def print(self, padding: int) -> str:
         pad = " " * padding
         return f'{pad}SizeOf({self.typeId})\n'
+
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+INITIALIZERS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
 
 class Initializer(AST):
     @abstractmethod

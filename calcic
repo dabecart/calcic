@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+"""
+calcic
+
+Runner of the calcic compiler.
+
+calcic. Written by @dabecart, 2026.
+"""
+
 import src.calcic
 
 if __name__ == "__main__":

@@ -1,9 +1,19 @@
+"""
+calcic.py
+
+Entry point of the compiler. Handles command arguments, input routes and subcalls to the 
+preprocessor and linker.
+
+calcic. Written by @dabecart, 2026.
+"""
+
 import argparse
 import subprocess
 import os
 import traceback
 
-from . import lexer, parser, TAC, assembler
+from . import assembler_x64, lexer, parser, TAC
+from . import TAC_optimizer as optimizer
 
 import sys
 
@@ -50,6 +60,23 @@ def main() -> None:
     argParser.add_argument("--codegen",
                            help="Performs lexing, parsing and assembly generation.",
                            action="store_true")
+    argParser.add_argument("--fold-constants",
+                           help="Enables constant folding.",
+                           action="store_true")
+    argParser.add_argument("--propagate-copies",
+                           help="Enables copy propagation.",
+                           action="store_true")
+    argParser.add_argument("--eliminate-unreachable-code",
+                           help="Enables unreachable code elimination.",
+                           action="store_true")
+    argParser.add_argument("--eliminate-dead-stores",
+                           help="Enables dead store elimination.",
+                           action="store_true")
+    argParser.add_argument("-O", "--optimize",
+                           help="Enables all optimizations. You can specify the number of steps in the optimization algorithm.",
+                           type=int, 
+                           choices=range(1, optimizer.MAX_ITERATION_STEPS + 1), 
+                           nargs='?', const=optimizer.MAX_ITERATION_STEPS, default=0)
     argParser.add_argument("-c",
                            help="Compile and assemble, but do not link. Generates a .o file.",
                            action="store_true",
@@ -123,8 +150,36 @@ def main() -> None:
     if args.tac:
         exit(0)
 
+    if (args.optimize == 0) and (
+        args.fold_constants or args.eliminate_unreachable_code or \
+        args.propagate_copies or args.eliminate_dead_stores):
+        # For the case when only the flags are used, but not the -O flag.
+        iterationSteps = optimizer.MAX_ITERATION_STEPS
+    else:
+        iterationSteps = args.optimize
+
+    optimizationFlags = optimizer.TACOptimizationFlags(
+        constant_folding                = args.fold_constants               or bool(args.optimize),
+        unreachable_code_elimination    = args.eliminate_unreachable_code   or bool(args.optimize),
+        copy_propagation                = args.propagate_copies             or bool(args.optimize),
+        dead_store_elimination          = args.eliminate_dead_stores        or bool(args.optimize),
+        iteration_steps                 = iterationSteps
+    )
+
     try:
-        assemblyProgram = assembler.AssemblerProgram(tacProgram)
+        tacOptimizer = optimizer.TACOptimizer(optimizationFlags)
+        # Modifies the inner instructions of the program.
+        tacOptimizer.optimize(tacProgram)
+        if args.verbose:
+            print(f"Optimizer:\n{tacProgram}")
+    except Exception as e:
+        print(f"Optimizer exception:\n{e}", file=sys.stderr)
+        if args.verbose:
+            print(traceback.format_exc(), file=sys.stderr)
+        exit(1)
+
+    try:
+        assemblyProgram = assembler_x64.AssemblerProgram(tacProgram)
         # if args.verbose:
         #     print(f"Assembler:\n{assemblyProgram}")
     except Exception as e:

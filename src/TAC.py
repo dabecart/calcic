@@ -1,7 +1,17 @@
+"""
+TAC.py
+
+Intermediary representation of the code on an agnostic language called Three Address Code (TAC).
+Receives the objects of the parsing stage and interprets them into TAC.
+
+calcic. Written by @dabecart, 2026.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from .parser import *
+from .types import *
 
 from typing import Type, TypeVar
 T = TypeVar("T", bound="TAC")
@@ -170,9 +180,9 @@ class TAC(ABC):
                         # Increment/decrement the pointer.
                         preDereference = TACValue(False, exp.typeId)
                         if exp.unaryOperator == UnaryOperator.PRE_INCREMENT:
-                            delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), "1", self)
+                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "1", self)
                         else:
-                            delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), "-1", self)
+                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "-1", self)
 
                         pointerOp = self.createChild(TACAddToPointer, inner.convert(), 
                             delta, exp.typeId.declarator.getByteSize(), preDereference, insts)
@@ -216,9 +226,9 @@ class TAC(ABC):
                         # Increment/decrement the pointer.
                         preDereference = TACValue(False, exp.typeId)
                         if exp.unaryOperator == UnaryOperator.POST_INCREMENT:
-                            delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), "1", self)
+                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "1", self)
                         else:
-                            delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), "-1", self)
+                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "-1", self)
                         pointerOp = self.createChild(TACAddToPointer, inner.convert(), 
                             delta, exp.typeId.declarator.getByteSize(), preDereference, insts)
                         # Set the value of the original variable to the unary result.
@@ -324,7 +334,7 @@ class TAC(ABC):
                         # Get the base address of the leftmost struct/union.
                         self.createChild(TACGetAddress, preDereference.value, dst, insts)
                         # Add to this address the offset bytes of the field.
-                        delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), str(preDereference.offset), self)
+                        delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), str(preDereference.offset), self)
                         self.createChild(TACAddToPointer, dst, delta, 1, dst, insts)
                         return TACBaseOperand(dst, exp.typeId, insts)
                     case _:
@@ -372,7 +382,7 @@ class TAC(ABC):
                             # If the offset is 0, no need to add it to the pointer.
                             if member.offset != 0:
                                 dstPointer = self.createChild(TACValue, False, PointerDeclaratorType(exp.typeId))
-                                delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), str(member.offset), self)
+                                delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), str(member.offset), self)
                                 self.createChild(TACAddToPointer, inner.value, delta, 1, dstPointer, insts)
                                 return TACDereferencedPointer(dstPointer, exp.typeId, insts)
                             else:
@@ -402,7 +412,7 @@ class TAC(ABC):
 
                     # If the offset is 0, no need to add it to the pointer.
                     if member.offset != 0:
-                        delta = TACValue(True, BaseDeclaratorType(TypeSpecifier.LONG), str(member.offset), self)
+                        delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), str(member.offset), self)
                         dstPointer = self.createChild(TACValue, False, PointerDeclaratorType(exp.typeId))
                         self.createChild(TACAddToPointer, inner, delta, 1, dstPointer, insts)
                         return TACDereferencedPointer(dstPointer, exp.typeId, insts)
@@ -418,7 +428,14 @@ class TAC(ABC):
     def parseTACBlockItem(self, blockItem: AST, insts: list[TACInstruction]):
         match blockItem:
             case ReturnStatement():
-                self.createChild(TACReturn, blockItem, insts)
+                if blockItem.exp is not None:
+                    # The return instruction returns something.
+                    retValue = self.parseTACExpression(blockItem.exp, insts).convert()
+                else:
+                    # The return instruction returns nothing.
+                    retValue = TACValue(False, TypeSpecifier.VOID.toBaseType())
+
+                self.createChild(TACReturn, retValue, insts)
             
             case IfStatement():
                 endIfLabel: str = TACLabel.getNewLabelName()
@@ -718,9 +735,28 @@ class TACValue(TAC):
             elif type(value) is str:
                 self.vbeName: str = value
             else:
-                # Using : to differentiate between parser Variables (which use .) and TAC temporary variables.
+                # Using : to differentiate between parser Variables (which use .) and TAC temporary 
+                # variables.
                 self.vbeName = f"tmp:{TACValue._VARIABLE_COUNT}"
                 TACValue._VARIABLE_COUNT += 1
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, TACValue):
+            return False
+        # Do not check the type, it may interfere with structs/unions.
+        if self.isConstant != other.isConstant:
+            return False
+        if self.isConstant:
+            return self.constantValue == other.constantValue
+        else:
+            return self.vbeName == other.vbeName
+
+    def __hash__(self) -> int:
+        # Is important to not hash the type, it would mess the optimizer step with structs.
+        if self.isConstant:
+            return hash((self.isConstant, self.constantValue))
+        else:
+            return hash((self.isConstant, self.vbeName))
 
     def parse(self):
         pass
@@ -730,6 +766,9 @@ class TACValue(TAC):
             return self.constantValue
         else:
             return self.vbeName
+        
+    def isStatic(self) -> bool:
+        return not self.isConstant and self.vbeName in TACStaticVariable.staticVariables
         
 class TACExpressionResult(TAC):
     def __init__(self, value: TACValue, processedType: DeclaratorType, insts: list[TACInstruction], 
@@ -929,8 +968,8 @@ class TACFunction(TACTopLevel):
         
         # Always add a "return 0" at the end of functions. If the function already has a return it
         # will be pruned on the optimization stage.
-        ret0 = ReturnStatement([], None, None, 0)
-        self.createChild(TACReturn, ret0, self.instructions)
+        self.createChild(TACReturn, 
+                         TACValue(True, TypeSpecifier.INT.toBaseType(), "0"), self.instructions)
 
     def print(self) -> str:
         ret = f"--- {self.identifier} ---\n"
@@ -951,6 +990,10 @@ class TACInstruction(TAC):
         # Add this instruction to the list once the inner instructions have been parsed.
         self.insts.append(self)
 
+        # Used on the optimizer stage.
+        self.reachingCopies: set[TACCopy] = set()
+        self.liveVariables: set[TACValue] = set()
+
     @abstractmethod
     def parse(self)-> TACValue:
         pass
@@ -960,16 +1003,14 @@ class TACInstruction(TAC):
         pass
 
 class TACReturn(TACInstruction):
-    def __init__(self, returnAST: ReturnStatement, 
+    def __init__(self, retValue: TACValue, 
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
-        self.returnAST = returnAST
+        
+        self.returnValue = retValue
         super().__init__(instructionsList, parentTAC)
 
     def parse(self)-> TACValue:
-        if self.returnAST.exp is not None:
-            return self.parseTACExpression(self.returnAST.exp, self.insts).convert()
-        
-        return TACValue(False, TypeSpecifier.VOID.toBaseType())
+        return self.returnValue
 
     def print(self) -> str:
         return f"Return({self.result})\n"
@@ -1120,10 +1161,12 @@ class TACBinary(TACInstruction):
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
         if len(args) == 1:
             # ast: Binary.
+            self.ASTAsArgument = True
             self.binaryAST: Binary = args[0]
             self.operator = self.binaryAST.binaryOperator
         else:
             # operation, value1, value2
+            self.ASTAsArgument = False
             self.operator: BinaryOperator = args[0]
             self.exp1: TACValue = args[1]
             self.exp2: TACValue = args[2]
@@ -1135,7 +1178,7 @@ class TACBinary(TACInstruction):
             self.insts.pop()
 
     def parse(self)-> TACValue:
-        if hasattr(self, "binaryAST"):
+        if self.ASTAsArgument:
             return self.parseFromASTExpressions()
         else:
             return TACValue(False, self.exp1.valueType)
@@ -1168,13 +1211,13 @@ class TACBinary(TACInstruction):
                 self.createChild(TACJumpIfZero, self.exp2, falseLabel, self.insts)
 
                 self.createChild(TACCopy, 
-                                 TACValue(True, BaseDeclaratorType(TypeSpecifier.INT), "1", self),
+                                 TACValue(True, TypeSpecifier.INT.toBaseType(), "1", self),
                                  dest, self.insts)
                 self.createChild(TACJump, endLabel, self.insts)
 
                 self.createChild(TACLabel, falseLabel, self.insts)
                 self.createChild(TACCopy, 
-                                 TACValue(True, BaseDeclaratorType(TypeSpecifier.INT), "0", self), 
+                                 TACValue(True, TypeSpecifier.INT.toBaseType(), "0", self), 
                                  dest, self.insts)
                 
                 self.createChild(TACLabel, endLabel, self.insts)
@@ -1199,13 +1242,13 @@ class TACBinary(TACInstruction):
                 self.createChild(TACJumpIfNotZero, self.exp2, trueLabel, self.insts)
 
                 self.createChild(TACCopy, 
-                                 TACValue(True, BaseDeclaratorType(TypeSpecifier.INT), "0", self), 
+                                 TACValue(True, TypeSpecifier.INT.toBaseType(), "0", self), 
                                  dest, self.insts)
                 self.createChild(TACJump, endLabel, self.insts)
 
                 self.createChild(TACLabel, trueLabel, self.insts)
                 self.createChild(TACCopy, 
-                                 TACValue(True, BaseDeclaratorType(TypeSpecifier.INT), "1", self), 
+                                 TACValue(True, TypeSpecifier.INT.toBaseType(), "1", self), 
                                  dest, self.insts)
                 
                 self.createChild(TACLabel, endLabel, self.insts)
@@ -1270,7 +1313,7 @@ class TACBinary(TACInstruction):
                     div = TACBinary( 
                             BinaryOperator.DIVISION, 
                             diff.result, 
-                            TACValue(True, BaseDeclaratorType(TypeSpecifier.ULONG), str(pointer1Size), self),
+                            TACValue(True, TypeSpecifier.ULONG.toBaseType(), str(pointer1Size), self),
                             instructionsList=self.insts,
                             parentTAC=self
                     )
@@ -1302,6 +1345,14 @@ class TACCopy(TACInstruction):
         self.src = src
         self.dst = dst
         super().__init__(instructionsList, parentTAC)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, TACCopy):
+            return False
+        return self.src == other.src and self.dst == other.dst
+    
+    def __hash__(self) -> int:
+        return hash((self.src, self.dst))
 
     def parse(self)-> TACValue:
         return self.dst

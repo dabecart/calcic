@@ -1,3 +1,12 @@
+"""
+lexer.py
+
+Receives the input file with preprocessed C code and splits it into tokens that the compiler can 
+understand.
+
+calcic. Written by @dabecart, 2026.
+"""
+
 import re
 
 keywordPatterns = [
