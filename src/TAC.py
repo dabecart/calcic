@@ -743,9 +743,8 @@ class TACValue(TAC):
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, TACValue):
             return False
-        ret = self.isConstant == other.isConstant and \
-               self.valueType == other.valueType
-        if not ret:
+        # Do not check the type, it may interfere with structs/unions.
+        if self.isConstant != other.isConstant:
             return False
         if self.isConstant:
             return self.constantValue == other.constantValue
@@ -753,10 +752,11 @@ class TACValue(TAC):
             return self.vbeName == other.vbeName
 
     def __hash__(self) -> int:
+        # Is important to not hash the type, it would mess the optimizer step with structs.
         if self.isConstant:
-            return hash((self.isConstant, self.valueType, self.constantValue))
+            return hash((self.isConstant, self.constantValue))
         else:
-            return hash((self.isConstant, self.valueType, self.vbeName))
+            return hash((self.isConstant, self.vbeName))
 
     def parse(self):
         pass

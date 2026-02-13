@@ -74,7 +74,9 @@ def main() -> None:
                            action="store_true")
     argParser.add_argument("-O", "--optimize",
                            help="Enables all optimizations. You can specify the number of steps in the optimization algorithm.",
-                           type=int, choices=range(1, 13), nargs='?', const=12, default=0)
+                           type=int, 
+                           choices=range(1, optimizer.MAX_ITERATION_STEPS + 1), 
+                           nargs='?', const=optimizer.MAX_ITERATION_STEPS, default=0)
     argParser.add_argument("-c",
                            help="Compile and assemble, but do not link. Generates a .o file.",
                            action="store_true",
@@ -152,7 +154,7 @@ def main() -> None:
         args.fold_constants or args.eliminate_unreachable_code or \
         args.propagate_copies or args.eliminate_dead_stores):
         # For the case when only the flags are used, but not the -O flag.
-        iterationSteps = 12
+        iterationSteps = optimizer.MAX_ITERATION_STEPS
     else:
         iterationSteps = args.optimize
 

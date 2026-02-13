@@ -125,12 +125,6 @@ class TypeSpecifier:
             ret = self.identifier == other.identifier
         return ret
     
-    def __hash__(self) -> int:
-        if self.name in ("STRUCT", "UNION"):
-            return hash((self.name, self.value, self.identifier))
-        else:
-            return hash((self.name, self.value))
-    
     def __str__(self) -> str:
         return self.value
     
@@ -254,10 +248,6 @@ class DeclaratorType(ABC):
         pass
 
     @abstractmethod
-    def __hash__(self) -> int:
-        pass
-
-    @abstractmethod
     def __str__(self) -> str:
         return super().__str__()
     
@@ -368,9 +358,6 @@ class BaseDeclaratorType(DeclaratorType):
             return False
         return self.baseType == other.baseType and self.qualifiers == other.qualifiers
     
-    def __hash__(self) -> int:
-        return hash((self.baseType, self.qualifiers))
-    
     def copy(self) -> BaseDeclaratorType:
         return BaseDeclaratorType(self.baseType, self.qualifiers)
     
@@ -406,9 +393,6 @@ class PointerDeclaratorType(DeclaratorType):
             return False
         return self.declarator == other.declarator and self.qualifiers == other.qualifiers
 
-    def __hash__(self) -> int:
-        return hash((self.declarator, self.qualifiers))
-
     def unqualify(self) -> PointerDeclaratorType:
         ret = self.copy()
         ret.qualifiers = TypeQualifier()
@@ -443,9 +427,6 @@ class ArrayDeclaratorType(DeclaratorType):
             return False
         return self.declarator == other.declarator and self.size == other.size
 
-    def __hash__(self) -> int:
-        return hash((self.declarator, self.size))
-
     def unqualify(self) -> ArrayDeclaratorType:
         return ArrayDeclaratorType(self.declarator.unqualify(), self.size)
     
@@ -475,9 +456,6 @@ class FunctionDeclaratorType(DeclaratorType):
         if not isinstance(other, FunctionDeclaratorType):
             return False
         return self.returnDeclarator == other.returnDeclarator and all([p1 == p2 for p1, p2 in zip(self.params, other.params)])
-
-    def __hash__(self) -> int:
-        return hash((self.returnDeclarator, tuple(self.params)))
 
     def unqualify(self) -> FunctionDeclaratorType:
         raise ValueError()
@@ -579,7 +557,7 @@ class StaticEvaluation:
             elif t == TypeSpecifier.USHORT:
                 overflow = ret >= 0x10000
                 ret &= 0xFFFF
-            elif t == TypeSpecifier.INT:
+            elif (t == TypeSpecifier.INT) or (t.name == "ENUM"):
                 overflow = ret >= 0x80000000
                 ret &= 0xFFFFFFFF
                 if ret >= 0x80000000:
@@ -649,28 +627,44 @@ class StaticEvaluation:
                     evalStatus = StaticEvalMsg.ERROR("Division by zero")
 
                 if isinstance(v2, float):
-                    if abs(v1) == 0.0 and abs(v2) == 0.0:
+                    v1Zero    = v1 == 0.0
+                    v1Neg     = math.copysign(1, v1) == -1.0
+                    v2Zero    = v2 == 0.0
+                    v2Neg     = math.copysign(1, v2) == -1.0
+                    
+                    if v1Zero and v2Zero:
                         ret = math.nan
-                    elif v2 == 0.0:
-                        ret = math.inf
-                    elif v2 == -0.0:
-                        ret = -math.inf
+                    elif v1Zero and not v2Zero:
+                        if v1Neg:
+                            ret = -0.0 if v2 > 0 else 0.0
+                        else:
+                            ret = 0.0 if v2 > 0 else -0.0
+                    elif not v1Zero and v2Zero:
+                        if v2Neg:
+                            ret = -math.inf if v1 > 0 else math.inf
+                        else:
+                            ret = math.inf if v1 > 0 else -math.inf
                     else:
                         ret = v1 / v2
                 else:
                     if v2 == 0:
                         ret = 0xFFFFFFFFFFFFFFFF
                     else:
+                        # Python integer division // rounds towards negative infinity, so if we get
+                        # -1.8, this is rounded to -2, and not to -1 like in C.
                         ret = v1 // v2
+                        if ret < 0 and v1 % v2 != 0:
+                            ret += 1
             elif op == "%":
                 if v2 == 0:
                     ret = 0
                     evalStatus = StaticEvalMsg.ERROR("Division by zero")
                 else:
+                    # In C, % behave differently to Python.
                     ret = v1 % v2
-                    # In C, the remainder always takes the same sign as the divisor. 
-                    # E.g. 6 % -5 in Python is -4, but in C it's 1.
-                    if ret < 0:
+                    # If the signs are different and the remainder is non-zero,
+                    # adjust to match the sign of the dividend (a)
+                    if (v1 < 0) != (v2 < 0) and ret != 0:
                         ret -= v2
             elif op == "+":
                 ret = v1 + v2
@@ -730,7 +724,17 @@ class StaticEvaluation:
     def evalDecl(op: str, tinput: DeclaratorType, tresult: DeclaratorType,
                 v1: str|int|float, v2: str|int|float|None = None) -> tuple[int|float, StaticEvalMsg]:
         
-        if not isinstance(tinput, BaseDeclaratorType) or not isinstance(tresult, BaseDeclaratorType):
-            raise ValueError("Invalid declarators in static evaluation")
-    
-        return StaticEvaluation.eval(op, tinput.baseType, tresult.baseType, v1, v2)
+
+        if isinstance(tinput, BaseDeclaratorType):
+            inputBaseType = tinput.baseType
+        elif isinstance(tinput, PointerDeclaratorType) and int(v1) == 0:
+            # This is a null pointer, which can be constant folded.
+            # TODO: this is only for 64 bit systems.
+            inputBaseType = TypeSpecifier.ULONG
+        else:
+            raise ValueError(f"Invalid input declarator {tinput} in static evaluation")
+        
+        if not isinstance(tresult, BaseDeclaratorType):
+            raise ValueError(f"Invalid result declarator {tresult} in static evaluation")
+
+        return StaticEvaluation.eval(op, inputBaseType, tresult.baseType, v1, v2)

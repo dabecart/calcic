@@ -15,6 +15,8 @@ from .TAC import *
 from .types import *
 from dataclasses import dataclass
 
+MAX_ITERATION_STEPS: int = 30
+
 @dataclass
 class TACOptimizationFlags:
     constant_folding: bool
@@ -166,6 +168,19 @@ class TACOptimizer:
                         value, warning = StaticEvaluation.parseValue(toType, inst.exp.constantValue)
                         foldedConst = TACValue(True, inst.result.valueType, str(value))
                         TACCopy(foldedConst, inst.result, optInsts)
+
+                case TACCopy():
+                    # This TACCopy may seem out of place but it is used in casts.
+                    if foldable := inst.src.isConstant:
+                        if isinstance(inst.dst.valueType, BaseDeclaratorType):
+                            toType = inst.dst.valueType.baseType
+                        else:
+                            # TODO: This is only for 64-bit systems.
+                            toType = TypeSpecifier.ULONG
+
+                        value, warning = StaticEvaluation.parseValue(toType, inst.src.constantValue)
+                        foldedConst = TACValue(True, inst.dst.valueType, str(value))
+                        TACCopy(foldedConst, inst.dst, optInsts)
 
             if warning:
                 warning.rise(print, print)

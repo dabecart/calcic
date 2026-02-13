@@ -1623,10 +1623,11 @@ class MOV(AssemblerInstruction):
     def thirdPass(self) -> list[AssemblerInstruction]:
         if (isinstance(self.src, (Memory, Data)) and isinstance(self.dst, (Memory, Data))) \
             or \
-           (isinstance(self.src, Immediate) and self.src.isQuadImmediate()):
+           (isinstance(self.src, Immediate) and self.src.isQuadImmediate() and isinstance(self.dst, (Memory, Data))):
             # - MOV cannot have two memory addresses. Save the src into a temporary register and 
             # then pass it to the dst.
-            # - Cannot move a 64-bit immediate, instead move it to a register and then to memory.
+            # - Cannot move a 64-bit immediate to memory, instead move it to a register and then to 
+            # memory.
             if self.asmbType.isDecimal():
                 tempReg = REG.XMM14
             else:
@@ -1676,9 +1677,10 @@ class MOVS(AssemblerInstruction):
     def thirdPass(self) -> list[AssemblerInstruction]:
         if isinstance(self.dst, (Memory, Data)) \
             or \
-           (isinstance(self.src, Immediate) and self.src.assemblyType.isQuad()):
+           (isinstance(self.src, Immediate) and self.src.isQuadImmediate() and isinstance(self.dst, (Memory, Data))):
             # - MOVS cannot have a memory address as destination. 
-            # - Cannot move a 64-bit immediate, instead move it to a register and then to memory.
+            # - Cannot move a 64-bit immediate to memory, instead move it to a register and then to 
+            # memory.
             movToReg = self.createChild(MOV, 
                                         self.src.assemblyType, 
                                         self.src, 
@@ -1723,9 +1725,10 @@ class MOVZ(AssemblerInstruction):
     def thirdPass(self) -> list[AssemblerInstruction]:
         if isinstance(self.dst, (Memory, Data)) \
             or \
-           (isinstance(self.src, Immediate) and self.src.assemblyType.isQuad()):
+           (isinstance(self.src, Immediate) and self.src.isQuadImmediate() and isinstance(self.dst, (Memory, Data))):
             # - MOVZ cannot have a memory address as destination. 
-            # - Cannot move a 64-bit immediate, instead move it to a register and then to memory.
+            # - Cannot move a 64-bit immediate to memory, instead move it to a register and then to 
+            # memory.
             if self.src.assemblyType.isDecimal():
                 tempReg1 = REG.XMM14
             else:
@@ -2058,10 +2061,10 @@ class PUSH(AssemblerInstruction):
     def thirdPass(self) -> list[AssemblerInstruction]:
         if isinstance(self.operand, (Memory, Data)) \
             or \
-           (isinstance(self.operand, Immediate) and self.operand.assemblyType.isQuad()):
+           (isinstance(self.operand, Immediate) and self.operand.isQuadImmediate()):
             # - Stack cannot have a memory address. Save the src into temporary register AX and then
             # push the 64 bit AX.
-            # - Cannot move a 64-bit immediate, instead move it to a register and then to memory.
+            # - Cannot push a 64-bit immediate, instead move it to a register and then push it.
             
             # A movsd (move double) operation cannot be done to REG.AX, but XMMx registers cannot be
             # pushed to the stack.
@@ -2134,7 +2137,7 @@ class BINARY(AssemblerInstruction):
                  BinaryOperator.BITWISE_OR | BinaryOperator.BITWISE_XOR:
                 
                 # Can't have immediate longs.
-                op1IsLong = isinstance(self.op1, Immediate) and self.op1.assemblyType.isQuad()
+                op1IsLong = isinstance(self.op1, Immediate) and self.op1.isQuadImmediate()
                 # IMUL instruction can't use a memory address as destination.
                 op2IsMemory = isinstance(self.op2, (Memory, Data))
 
@@ -2360,7 +2363,7 @@ class CMP(AssemblerInstruction):
         # operate.
         moveOp1ToReg =  (isinstance(self.op1, (Memory, Data)) and isinstance(self.op2, (Memory, Data))) \
                         or \
-                        (isinstance(self.op1, Immediate) and self.op1.assemblyType.isQuad())
+                        (isinstance(self.op1, Immediate) and self.op1.isQuadImmediate())
         # CMP cannot have a constant as its second argument.
         # For double operations, the second argument must always be a register.
         moveOp2ToReg = isinstance(self.op2, Immediate) or \
