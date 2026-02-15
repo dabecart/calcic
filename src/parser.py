@@ -892,9 +892,9 @@ class AST(ABC):
             idType = TypeSpecifier.UINT
         elif typeSet in ({"int"}, {"signed", "int"}, {"signed"}):
             idType = TypeSpecifier.INT
-        elif typeSet == {"unsigned", "short"}:
+        elif typeSet in ({"unsigned", "short"}, {"unsigned", "short", "int"}):
             idType = TypeSpecifier.USHORT
-        elif typeSet in ({"short"}, {"signed", "short"}):
+        elif typeSet in ({"short"}, {"signed", "short"}, {"short", "int"}, {"signed", "short", "int"}):
             idType = TypeSpecifier.SHORT
         elif typeSet == {"unsigned", "short"}:
             idType = TypeSpecifier.USHORT
