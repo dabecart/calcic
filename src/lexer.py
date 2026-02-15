@@ -38,6 +38,7 @@ keywordPatterns = [
     ("union",               re.compile(r"union\b")),
     ("enum",                re.compile(r"enum\b")),
     ("const",               re.compile(r"const\b")),
+    ("typedef",             re.compile(r"typedef\b")),
 ]
 
 tokenPatterns = [
@@ -122,8 +123,12 @@ lineMarkings = re.compile(
 class Token:
     TYPE_SPECIFIER: list[str] = ["struct", "union", "enum", "void", "char", "short", "int", "long", 
                                  "unsigned", "signed", "double", "float"]
-    CAST_SPECIFIER: list[str] = ["const"] + TYPE_SPECIFIER
-    SPECIFIER: list[str] = ["static", "extern", "const"] + TYPE_SPECIFIER
+    TYPE_QUALIFIER: list[str] = ["const"]
+    CAST_SPECIFIER: list[str] = TYPE_QUALIFIER + TYPE_SPECIFIER
+
+    # I prefer to not add typedef here as it messes with some of the logic inside the parser.
+    STORAGE_QUALIFIER: list[str] = ["static", "extern", "const"] 
+    SPECIFIER: list[str] = STORAGE_QUALIFIER + TYPE_SPECIFIER
     
     def __init__(self, id: str, value: str, file: str = "", line: int = 0, col: int = 0) -> None:
         self.id = id

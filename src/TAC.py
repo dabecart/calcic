@@ -687,19 +687,8 @@ class TAC(ABC):
                     else:
                         raise ValueError(f"Cannot initialize {blockItem.typeId} with the current initialization")
 
-            case StructDeclaration():
-                # Nothing to generate with struct declarations.
-                return
-
-            case UnionDeclaration():
-                # Nothing to generate with union declarations.
-                return
-
-            case EnumDeclaration():
-                # Nothing to generate with enum declarations.
-                return
-
-            case FunctionDeclaration():
+            case StructDeclaration() | UnionDeclaration() | EnumDeclaration() | FunctionDeclaration() | TypedefDeclaration():
+                # Nothing to generate with struct, union, enum or typedef declarations.
                 # Function declarations can only be defined from an ASTProgram. These declarations 
                 # are just function declarations, without their definitions.
                 return
@@ -871,6 +860,7 @@ class TACProgram(TAC):
                     
                     topLevelDecl = self.createChild(TACFunction, fun)
                 case _:
+                    # Skip variable and typedef declarations. 
                     continue
 
             self.topLevel.append(topLevelDecl)

@@ -37,16 +37,27 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 """
 
 # Context information for each identifier.
+class IdentifierType(enum.Enum):
+    VARIABLE            = enum.auto()
+    FUNCTION            = enum.auto()
+    STATIC_VARIABLE     = enum.auto()
+    CONSTANT_VARIABLE   = enum.auto()
+    TYPEDEF             = enum.auto()
+
 @dataclass
 class IdentifierContext:
+    identifierType: IdentifierType
     originalName: str
     mangledName: str
-    idType: DeclaratorType
     alreadyDeclared: bool = True
+
+@dataclass
+class VariableIdentifier:
+    idType: DeclaratorType
     constValue: Constant|None = None
 
 @dataclass
-class FunctionContext:
+class FunctionIdentifier:
     name: str
     arguments: list[ParameterInformation]
     returnType: DeclaratorType
@@ -54,21 +65,11 @@ class FunctionContext:
     isGlobal: bool
     alreadyDefined: bool = False
 
-# Used to manage structs, unions and enums.
-@dataclass(order=True)
-class TagContext:
-    creationOrder: int
-    originalName: str
-    mangledName: str
-    idType: TypeSpecifier
-    alreadyDeclared: bool = True
-
 @dataclass
 class StaticVariableContext:
-    name: str
-    mangledName: str
-    idType: DeclaratorType
     storageClass: StorageClass|None
+    idType: DeclaratorType
+    mangledName: str
     # True if it has external linkage.
     isGlobal: bool
     tentative: bool
@@ -79,6 +80,25 @@ class ConstantVariableContext:
     name: str
     idType: DeclaratorType
     initialization: list[Constant]
+
+@dataclass
+class TypedefContext:
+    originalName: str
+    idType: DeclaratorType
+
+# Used to manage structs, unions, enums and typedefs.
+class TaggableType(enum.Enum):
+    STRUCT  = "struct"
+    UNION   = "union"
+    ENUM    = "enum"
+
+@dataclass(order=True)
+class TagContext:
+    tagType: TaggableType
+    creationOrder: int
+    originalName: str
+    mangledName: str
+    alreadyDeclared: bool = True
 
 @dataclass
 class SwitchContext:
@@ -98,18 +118,33 @@ class LabelContext:
 
 @dataclass
 class Context:
-    # Only used to map the identifiers. To get the properties of the objects, use functionMap or 
-    # variableMap. Key is the original name of the variable.
+    # --- IDENTIFIERS ---
+    # Stores the information about ordinary identifiers used by variables, functions and typedefs. 
+    # Key is the original name.
     identifierMap: dict[str, IdentifierContext]              = field(default_factory=dict)
-    # Stores the attributes of functions.
-    functionMap: dict[str, FunctionContext]                  = field(default_factory=dict)
-    # Stores the attributes of structs, unions and enums. Key is the mangled name.
-    tagsMap: dict[str, TagContext]                           = field(default_factory=dict)
-    # Stores the attributes of variables which are stored on the .data section.
+    # Stores the attributes of functions. Key is the mangled name.
+    variablesMap: dict[str, VariableIdentifier]              = field(default_factory=dict)
+    # Stores the attributes of functions. Key is the original name (function names aren't mangled).
+    functionMap: dict[str, FunctionIdentifier]               = field(default_factory=dict)
+    # Stores the attributes of variables which are stored on the .data section. Key is the original 
+    # name.
     staticVariablesMap: dict[str, StaticVariableContext]     = field(default_factory=dict)
     # Stores the attributes of variables which are stored on the .rodata section.
     constantVariablesMap: dict[str, ConstantVariableContext] = field(default_factory=dict)
-    
+    # Contains the declarators of the typedef, keyed by the mangled identifier.
+    typedefMap: dict[str, TypedefContext]                    = field(default_factory=dict)
+
+    # --- TAGS ---
+    # Stores the information about the tags used by structs, unions and enums. Key is the mangled 
+    # name.
+    tagsMap: dict[str, TagContext]                           = field(default_factory=dict)
+    # Contains the type of the struct, keyed by the mangled identifier. 
+    structMap: dict[str, TypeSpecifier]                      = field(default_factory=dict)
+    # Contains the type of the union, keyed by the mangled identifier. 
+    unionMap: dict[str, TypeSpecifier]                       = field(default_factory=dict)
+    # Contains the type of the enum, keyed by the mangled identifier. 
+    enumMap: dict[str, TypeSpecifier]                        = field(default_factory=dict)
+
     loopTracking: list[str]                     = field(default_factory=list)
     switchTracking: list[SwitchContext]         = field(default_factory=list)
     labelTracking: dict[str,LabelContext]       = field(default_factory=dict)
@@ -151,23 +186,45 @@ class Context:
         Context.IDENTIFIER_COUNTER += 1
         return mangledName
     
-    def addVariableIdentifier(self, var: VariableDeclaration):
+    def addVariableIdentifier(self, 
+                              originalIdentifier: str, mangledIdentifier: str, 
+                              varType: DeclaratorType, constantValue: Constant|None = None):
         idContext = IdentifierContext(
-            originalName=var.originalIdentifier,
-            mangledName=var.identifier,
-            idType=var.typeId
+            identifierType=IdentifierType.VARIABLE,
+            originalName=originalIdentifier,
+            mangledName=mangledIdentifier
         )
         # Add variable to context.
-        self.identifierMap[var.originalIdentifier] = idContext
+        self.identifierMap[originalIdentifier] = idContext
+        # Add variable to the variables map.
+        self.variablesMap[mangledIdentifier] = VariableIdentifier(
+            idType=varType,
+            constValue=constantValue
+        )
 
     def addFunctionIdentifier(self, func: FunctionDeclaration):
         idContext = IdentifierContext(
+            identifierType=IdentifierType.FUNCTION,
             originalName=func.identifier,
-            mangledName=func.identifier,
-            idType=func.typeId
+            mangledName=func.identifier
         )
         # Add the function identifier to the current scope.
         self.identifierMap[func.identifier] = idContext
+        # Do not add the function information yet, as the function may not be defined.
+
+    def addTypedefIdentifier(self, originalIdentifier: str, mangledIdentifier: str, varType: DeclaratorType):
+        idContext = IdentifierContext(
+            identifierType=IdentifierType.TYPEDEF,
+            originalName=originalIdentifier,
+            mangledName=mangledIdentifier
+        )
+        # Add the function identifier to the current scope.
+        self.identifierMap[originalIdentifier] = idContext
+        # Add the typedef information to the map.
+        self.typedefMap[mangledIdentifier] = TypedefContext(
+            originalName=originalIdentifier,
+            idType=varType
+        )
     
     LOOP_COUNTER: ClassVar[int] = 0
     @contextmanager
@@ -245,52 +302,55 @@ class Context:
     STRUCT_ORDER: int = 0
     UNION_ORDER: int = 0
     ENUM_ORDER: int = 0
+    TYPEDEF_ORDER: int = 0
     def addStruct(self, structure: StructDeclaration):
-        # Add the struct.
         structContext = TagContext(
+            tagType=TaggableType.STRUCT,
             creationOrder=Context.STRUCT_ORDER,
             originalName=structure.originalIdentifier,
-            mangledName=structure.identifier,
-            idType=structure.typeId
+            mangledName=structure.identifier
         )
         Context.STRUCT_ORDER += 1
 
-        # Add struct to context using the original identifier.
+        # Add struct to context using the mangled identifier.
         self.tagsMap[structure.identifier] = structContext
+        # Add type to the structure map.
+        self.structMap[structure.identifier] = structure.typeId
 
     # Use it to return the most recent union.
     def addUnion(self, union: UnionDeclaration):
-        # Add the union.
         unionContext = TagContext(
+            tagType=TaggableType.UNION,
             creationOrder=Context.UNION_ORDER,
             originalName=union.originalIdentifier,
             mangledName=union.identifier,
-            idType=union.typeId
         )
         Context.UNION_ORDER += 1
 
-        # Add union to context using the original identifier.
+        # Add union to context using the mangled identifier.
         self.tagsMap[union.identifier] = unionContext
+        # Add type to the union map.
+        self.unionMap[union.identifier] = union.typeId
 
     def addEnum(self, enum: EnumDeclaration):
-        # Add the enum.
         enumContext = TagContext(
+            tagType=TaggableType.ENUM,
             creationOrder=Context.ENUM_ORDER,
             originalName=enum.originalIdentifier,
             mangledName=enum.identifier,
-            idType=enum.typeId
         )
         Context.ENUM_ORDER += 1
 
-        # Add enum to context using the original identifier.
+        # Add enum to context using the mangled identifier.
         self.tagsMap[enum.identifier] = enumContext
+        # Add type to the enum map.
+        self.enumMap[enum.identifier] = enum.typeId
 
     # Finds an object named "originalName" of type "objectType" in the tags map.
-    # Object type must be "STRUCT", "UNION" or "ENUM".
-    def getTagObjectFromOriginalName(self, objectType: str, originalName: str) -> TagContext|None:
+    def getTagObjectFromOriginalName(self, tagType: TaggableType, originalName: str) -> TagContext|None:
         ret: list[TagContext] = []
         for cntx in self.tagsMap.values():
-            if cntx.idType.name == objectType and cntx.originalName == originalName:
+            if cntx.tagType == tagType and cntx.originalName == originalName:
                 ret.append(cntx)
 
         if len(ret) > 0:
@@ -300,13 +360,29 @@ class Context:
         return None
     
     def getStructFromOriginalName(self, originalName: str) -> TagContext|None:
-        return self.getTagObjectFromOriginalName("STRUCT", originalName)
+        return self.getTagObjectFromOriginalName(TaggableType.STRUCT, originalName)
 
     def getUnionFromOriginalName(self, originalName: str) -> TagContext|None:
-        return self.getTagObjectFromOriginalName("UNION", originalName)
+        return self.getTagObjectFromOriginalName(TaggableType.UNION, originalName)
 
     def getEnumFromOriginalName(self, originalName: str) -> TagContext|None:
-        return self.getTagObjectFromOriginalName("ENUM", originalName)
+        return self.getTagObjectFromOriginalName(TaggableType.ENUM, originalName)
+
+    # Returns the conflicting type with the same tag name.
+    def getConflictsForTaggableType(self, tagType: TaggableType, tagName: str) -> TypeSpecifier|None:
+        toCheckTypes: set[TaggableType] = set([t for t in TaggableType]) - {tagType}
+        for t in toCheckTypes:
+            matched = self.getTagObjectFromOriginalName(t, tagName)
+            if matched and matched.alreadyDeclared:
+                if matched.tagType == TaggableType.STRUCT:
+                    return self.structMap[matched.mangledName]
+                elif matched.tagType == TaggableType.UNION:
+                    return self.unionMap[matched.mangledName]
+                elif matched.tagType == TaggableType.ENUM:
+                    return self.enumMap[matched.mangledName]
+                else:
+                    raise ValueError()
+        return None
 
     def completeStruct(self, structure: StructDeclaration):
         # Modify the parameters inside the context.
@@ -314,9 +390,11 @@ class Context:
         if ctx is None:
             raise ValueError(f"Could not find the struct {structure.originalIdentifier} in the current context")
 
-        ctx.idType.byteSize = structure.byteSize
-        ctx.idType.alignment = structure.alignment
-        ctx.idType.members = structure.membersToParamInfo()
+        # Get the type from the map and update the values.
+        typeCtx = self.structMap[ctx.mangledName]
+        typeCtx.byteSize = structure.byteSize
+        typeCtx.alignment = structure.alignment
+        typeCtx.members = structure.membersToParamInfo()
 
     def completeUnion(self, union: UnionDeclaration):
         # Modify the parameters inside the context.
@@ -324,9 +402,11 @@ class Context:
         if ctx is None:
             raise ValueError(f"Could not find the union {union.originalIdentifier} in the current context")
 
-        ctx.idType.byteSize = union.byteSize
-        ctx.idType.alignment = union.alignment
-        ctx.idType.members = union.membersToParamInfo()
+        # Get the type from the map and update the values.
+        typeCtx = self.unionMap[ctx.mangledName]
+        typeCtx.byteSize = union.byteSize
+        typeCtx.alignment = union.alignment
+        typeCtx.members = union.membersToParamInfo()
 
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -518,7 +598,7 @@ class AST(ABC):
     def _parseFactor(self) -> Exp:
         tok = self.peek()
 
-        if tok.id == "(" and self.peek(1).id in Token.CAST_SPECIFIER:
+        if tok.id == "(" and self.isTokenACastIdentifierType(self.peek(1)):
             return self.createChild(Cast)
         
         return self._parseUnaryExpression()
@@ -551,7 +631,7 @@ class AST(ABC):
                     return unaryChild
 
         if tok.id == "sizeof":
-            if self.peek(1).id == "(" and self.peek(2).id in Token.TYPE_SPECIFIER:
+            if self.peek(1).id == "(" and self.isTokenAnIdentifierType(self.peek(2)):
                 return self.createChild(SizeOfType)
             else:
                 return self.createChild(SizeOf)
@@ -637,9 +717,10 @@ class AST(ABC):
                     self.pop()
                     
                     ctx = self.context.identifierMap[tok.value]
-                    if ctx.constValue is not None:
+                    if ctx.identifierType == IdentifierType.VARIABLE and \
+                       (constVal := self.context.variablesMap[ctx.mangledName].constValue) is not None:
                         # If it's a constant value, return it directly.
-                        ret = ctx.constValue
+                        ret = constVal
                     else:
                         ret = self.createChild(Variable, tok.value)
 
@@ -653,24 +734,42 @@ class AST(ABC):
 
         return ret
 
+    def isTokenAnIdentifierType(self, tok: Token) -> bool:
+        basicSpecifier = tok.id in Token.SPECIFIER
+        typedefSpecifier = tok.id == "identifier" and \
+                           tok.value in self.context.identifierMap and \
+                           self.context.identifierMap[tok.value].identifierType == IdentifierType.TYPEDEF
+        return basicSpecifier or typedefSpecifier
+
+    def isTokenACastIdentifierType(self, tok: Token) -> bool:
+        basicSpecifier = tok.id in Token.CAST_SPECIFIER
+        typedefSpecifier = tok.id == "identifier" and \
+                           tok.value in self.context.identifierMap and \
+                           self.context.identifierMap[tok.value].identifierType == IdentifierType.TYPEDEF
+        return basicSpecifier or typedefSpecifier
+
     def _parseBlockItem(self) -> BlockItem:
         # A block can either be a declaration or a statement.
-        if self.peek().id in Token.SPECIFIER:
+        peekToken = self.peek()
+        if self.isTokenAnIdentifierType(peekToken) or peekToken.id == "typedef":
             return self.createChild(Declaration)
         else:
             return self.createChild(Statement)
 
     def _parseDeclaration(self) -> Declaration:
-        if self.peek().id == "struct" and self.peek(2).id in (";", "{"):
+        peekId = self.peek().id
+        if peekId == "struct" and self.peek(2).id in (";", "{"):
             return self.createChild(StructDeclaration)
-        elif self.peek().id == "union" and self.peek(2).id in (";", "{"):
+        elif peekId == "union" and self.peek(2).id in (";", "{"):
             return self.createChild(UnionDeclaration)
-        elif self.peek().id == "enum" and self.peek(2).id in (";", "{"):
+        elif peekId == "enum" and self.peek(2).id in (";", "{"):
             return self.createChild(EnumDeclaration)
+        elif peekId == "typedef":
+            return self.createChild(TypedefDeclaration)
         else:
-            storageClass, qualifierClass, baseType = self.getTypeAndStorageClass()
+            storageClass, declType = self.getStorageClassAndDeclaratorType()
             declarator = self.createChild(TopDeclarator)
-            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
+            info: DeclaratorInformation = declarator.process(declType)
 
             if isinstance(info.type, FunctionDeclaratorType):
                 return self.createChild(FunctionDeclaration, storageClass, info)
@@ -690,68 +789,98 @@ class AST(ABC):
         else:
             return self.createChild(SingleInitializer, *args)
 
-    # tagType must be one of "struct", "union" or "enum".
-    def _processTags(self, tagType: str) -> TypeSpecifier:
-        # The next token must be the identifier of the "tagType".
-        typeIdentifier = self.expect("identifier").value
-        objectType = self.context.getTagObjectFromOriginalName(tagType.upper(), typeIdentifier)        
-        if objectType is None:
-            self.raiseError(f"{tagType} {typeIdentifier} is not declared")
-
-        # Check that there's no conflict with a different struct, union or enum already defined.
-        oppositeTags = [t for t in ("struct", "union" or "enum") if t != tagType]
-        for tag in oppositeTags:
-            oppositeType = self.context.getTagObjectFromOriginalName(tag.upper(), typeIdentifier)
-            if oppositeType is not None and oppositeType.alreadyDeclared:
-                self.raiseError(f"Previous {oppositeType} conflicts with this type")
-
-        # Return the type stored in the context.
-        return objectType.idType
-
-    def getTypeAndStorageClass(self, expectsStorageClass = True) -> tuple[StorageClass|None, TypeQualifier, TypeSpecifier]:
+    def getStorageClassAndDeclaratorType(self, expectsStorageClass = True) -> tuple[StorageClass|None, DeclaratorType]:
         storageClass: StorageClass|None = None
-        qualifierClass: TypeQualifier = TypeQualifier()
+        typeQualifiers: TypeQualifier = TypeQualifier()
         idType: TypeSpecifier
 
         idTypeAlreadyDefined: bool = False
-
         typeSet: set[str] = set()
+
+        # Parse qualifiers and common types.
         while self.peek().id in Token.SPECIFIER:
             tok = self.pop()
             if tok.id in Token.TYPE_SPECIFIER:
+                # Type specifiers cannot be repeated (there's long long, but I haven't implemented 
+                # it).
                 if tok.id in typeSet:
                     self.raiseError(f"Variable was already defined as {tok.id}")
 
+                # Taggable types: TYPE{struct, union, enum} <identifier>
                 if tok.id in ("struct", "union", "enum"):
                     if idTypeAlreadyDefined:
                         self.raiseError("Conflicting types")
 
-                    idType = self._processTags(tok.id)
+                    # The next token must be the identifier of the struct, union or enum.
+                    typeIdentifier = self.expect("identifier").value
+                    
+                    tagType = TaggableType(tok.id)
+                    objectType = self.context.getTagObjectFromOriginalName(tagType, typeIdentifier)        
+                    if objectType is None:
+                        self.raiseError(f"{typeIdentifier} is not declared")
+
+                    # Check that there's no conflict with a different type already defined.
+                    conflict = self.context.getConflictsForTaggableType(tagType, typeIdentifier)
+                    if conflict:
+                        self.raiseError(f"Previous {conflict} conflicts with this type")
+
+                    # Now that we have checked that the type is valid and does not conflict, get the
+                    # reference type by looking at the maps with the mangled name.
+                    if tok.id == "struct":
+                        idType = self.context.structMap[objectType.mangledName]
+                    elif tok.id == "union":
+                        idType = self.context.unionMap[objectType.mangledName]
+                    elif tok.id == "enum":
+                        idType = self.context.enumMap[objectType.mangledName]
+                    else:
+                        raise ValueError()
+                    
                     idTypeAlreadyDefined = True
 
                 typeSet.add(tok.id)
-            else:
+                
+            elif tok.id in Token.TYPE_QUALIFIER:
                 match tok.id:
-                    case "static":
-                        if not expectsStorageClass:
-                            self.raiseError("Invalid storage class")
-                        if storageClass is not None:
-                            self.raiseError(f"Variable already defined as {storageClass.value}")
-                        storageClass = StorageClass.STATIC
-                    case "extern":
-                        if not expectsStorageClass:
-                            self.raiseError("Invalid storage class")
-                        if storageClass is not None:
-                            self.raiseError(f"Variable already defined as {storageClass.value}")
-                        storageClass = StorageClass.EXTERN
                     case "const":
                         # Duplicated const keywords are valid.
-                        qualifierClass.const = True
+                        typeQualifiers.const = True
                     case _:
                         self.raiseError(f"Invalid specifier: {tok.id}")
 
+            elif tok.id in Token.STORAGE_QUALIFIER:
+                if not expectsStorageClass:
+                    self.raiseError("Invalid storage class")
+                if storageClass is not None:
+                    self.raiseError(f"Variable already defined as {storageClass.value}")
+                match tok.id:
+                    case "static":
+                        storageClass = StorageClass.STATIC
+                    case "extern":
+                        storageClass = StorageClass.EXTERN
+            else:
+                self.raiseError(f"Unexpected qualifier: {tok.id}")
+
         if len(typeSet) == 0:
-            self.raiseError("Variable doesn't have a defined type")
+            # It could be that the next token is the identifier of a typedef type.
+            peekToken = self.peek()
+            if peekToken.id == "identifier" and \
+               peekToken.value in self.context.identifierMap and \
+               (ctx := self.context.identifierMap[peekToken.value]).identifierType == IdentifierType.TYPEDEF:
+                # Found a typedef alias, pop the alias.
+                self.pop()
+
+                # Return the original type and apply the qualifiers to the type.
+                aliasedType = self.context.typedefMap[ctx.mangledName].idType.copy()
+                if len(typeQualifiers.toSet()) > 0:
+                    if isinstance(aliasedType, (BaseDeclaratorType, PointerDeclaratorType)):
+                        aliasedType.qualifiers = typeQualifiers
+                    else:
+                        self.raiseError(f"Cannot use {typeQualifiers}with type {aliasedType}")
+                
+                return (storageClass, aliasedType)
+
+            self.raiseError("Expected a type")
+
         if {"signed", "unsigned"} <= typeSet:
             self.raiseError("Variable declared as signed and unsigned at the same time")
 
@@ -787,7 +916,7 @@ class AST(ABC):
         else:
             self.raiseError(f"Invalid combination of type specifiers: {', '.join(typeSet)}")
 
-        return (storageClass, qualifierClass, idType)
+        return (storageClass, idType.toBaseType(typeQualifiers))
     
     def parseConstantFromType(self, constantType: DeclaratorType, strict: bool = False) -> list[Constant]:
         if isinstance(constantType, BaseDeclaratorType):
@@ -1083,7 +1212,7 @@ class DirectDeclarator(DeclaratorAST):
             if isinstance(simpleDecl.type, (BaseDeclaratorType, PointerDeclaratorType)):
                 funcParams: list[ParameterInformation] = []
                 for param in self.paramDeclarators:
-                    paramInfo: DeclaratorInformation = param.process(param.type.toBaseType(param.qualifierClass))
+                    paramInfo: DeclaratorInformation = param.process(param.declType)
                     if isinstance(paramInfo.type, FunctionDeclaratorType):
                         self.raiseError("Function pointers aren't supported as parameters")
                     funcParams.append(ParameterInformation(paramInfo.type, paramInfo.name))
@@ -1107,8 +1236,7 @@ class DirectDeclarator(DeclaratorAST):
 
 class FunctionParameterDeclarator(DeclaratorAST):
     def parse(self, *args):
-        # TODO: What do we do with qualifierClass? 
-        _, self.qualifierClass, self.type = self.getTypeAndStorageClass(expectsStorageClass=False)
+        _, self.declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
         self.decl = self.createChild(TopDeclarator)
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
@@ -1465,7 +1593,7 @@ class ForStatement(Statement):
         # When parsing the header, enter a new context.
         with self.context.newContext():
             tok = self.peek()
-            if tok.id in Token.TYPE_SPECIFIER:
+            if self.isTokenAnIdentifierType(tok):
                 self.init = self.createChild(VariableDeclaration)
             elif tok.id == ";":
                 self.init = None
@@ -1666,9 +1794,9 @@ class FunctionDeclaration(Declaration):
             self.storageClass: StorageClass | None = args[0]
             info: DeclaratorInformation = args[1]
         else:
-            self.storageClass, qualifierClass, baseType = self.getTypeAndStorageClass()
+            self.storageClass, declType = self.getStorageClassAndDeclaratorType()
             declarator = self.createChild(TopDeclarator)
-            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
+            info: DeclaratorInformation = declarator.process(declType)
 
         if not isinstance(info.type, FunctionDeclaratorType):
             self.raiseError("Expected a function declaration")
@@ -1700,11 +1828,11 @@ class FunctionDeclaration(Declaration):
 
         if self.identifier in self.context.identifierMap:
             idCtx = self.context.identifierMap[self.identifier]
-            if idCtx.alreadyDeclared and not isinstance(idCtx.idType, FunctionDeclaratorType):
-                self.raiseError(f"{self.identifier} already defined as {idCtx.idType}")
+            if idCtx.alreadyDeclared and idCtx.identifierType != IdentifierType.FUNCTION:
+                self.raiseError(f"{self.identifier} already declared in this scope")
             
             if self.identifier in self.context.staticVariablesMap:
-                self.raiseError(f"{self.identifier} already defined as a variable")
+                self.raiseError(f"{self.identifier} already declared in this scope")
         
         # Functions can be declared (remember, defined is not the same as declared) more than once 
         # in the same scope. 
@@ -1726,14 +1854,15 @@ class FunctionDeclaration(Declaration):
             # Check the arguments of the function.
             ctxArgs = self.context.functionMap[self.identifier].arguments
             if len(ctxArgs) != len(self.argumentList):
-                self.raiseError(f"Function {self.identifier} was already declared with different arguments")
+                self.raiseError(f"Function {self.identifier} already declared with different arguments")
 
             # Check the types of the arguments. The names and qualifiers do not need to be the same. 
             for ctxVar, var in zip(ctxArgs, self.argumentList):
                 if ctxVar.type.unqualify() != var.type.unqualify():
                     self.raiseError(f"{var.name} should be {ctxVar.type}, not {var.type}")
         else:
-            self.context.functionMap[self.identifier] = FunctionContext(
+            # Add the function information to the current context.
+            self.context.functionMap[self.identifier] = FunctionIdentifier(
                 name=self.identifier,
                 arguments=self.argumentList,
                 returnType=self.returnType,
@@ -1775,13 +1904,7 @@ class FunctionDeclaration(Declaration):
                     mangledName = self.context.mangleIdentifier(funcArg.name)
                     mangledParam = ParameterInformation(funcArg.type, mangledName)
                     self.definedArgumentList.append(mangledParam)
-                    
-                    varContext = IdentifierContext(
-                        originalName=funcArg.name,
-                        mangledName=mangledName,
-                        idType=funcArg.type
-                    )
-                    self.context.identifierMap[varContext.originalName] = varContext
+                    self.context.addVariableIdentifier(funcArg.name, mangledName, funcArg.type)
 
                 self.body = []
                 while self.peek().id != "}":
@@ -1816,9 +1939,9 @@ class VariableDeclaration(Declaration):
             self.storageClass: StorageClass | None = args[0]
             info: DeclaratorInformation = args[1]
         else:
-            self.storageClass, qualifierClass, baseType = self.getTypeAndStorageClass()
+            self.storageClass, declType = self.getStorageClassAndDeclaratorType()
             declarator = self.createChild(TopDeclarator)
-            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
+            info: DeclaratorInformation = declarator.process(declType)
 
         if isinstance(info.type, FunctionDeclaratorType):
             self.raiseError("Expected a variable declaration")
@@ -1832,24 +1955,29 @@ class VariableDeclaration(Declaration):
         tentative: bool = False
         self.isGlobal: bool = True
 
-        if info.name in self.context.identifierMap:
-           idCtx = self.context.identifierMap[info.name]
-           if idCtx.alreadyDeclared and idCtx.idType != self.typeId:
-                self.raiseError(f"{self.originalIdentifier} already defined as {idCtx.idType}, not {self.typeId}")
+        # Check if there's a variable already declared but with different type.
+        if self.originalIdentifier in self.context.identifierMap:
+            idCtx = self.context.identifierMap[self.originalIdentifier]
+            if idCtx.identifierType != IdentifierType.VARIABLE and idCtx.alreadyDeclared:
+               self.raiseError(f"{self.originalIdentifier} was already defined in this scope")
+           
+            if idCtx.alreadyDeclared and \
+               (ctxType := self.context.variablesMap[idCtx.mangledName].idType) != self.typeId:
+                self.raiseError(f"{self.originalIdentifier} already defined as {ctxType}, not {self.typeId}")
 
         if self.context.insideAFunction:
             # This declaration is a Block Scope Variable Declaration.
-            if info.name in self.context.identifierMap:
-                idCtx = self.context.identifierMap[info.name]
+            if self.originalIdentifier in self.context.identifierMap:
+                idCtx = self.context.identifierMap[self.originalIdentifier]
                 
-                if info.name in self.context.staticVariablesMap:
-                    varCtx = self.context.staticVariablesMap[info.name]
+                if self.originalIdentifier in self.context.staticVariablesMap:
+                    varCtx = self.context.staticVariablesMap[self.originalIdentifier]
                     # You can declare a variable with external linkage multiple times in the same block.
                     if idCtx.alreadyDeclared and not (varCtx.isGlobal and self.storageClass == StorageClass.EXTERN):
-                        self.raiseError(f"{info.name} has already been declared in this scope")
+                        self.raiseError(f"{self.originalIdentifier} has already been declared in this scope")
                 
                 elif idCtx.alreadyDeclared:
-                    self.raiseError(f"{info.name} has already been declared in this scope")
+                    self.raiseError(f"{self.originalIdentifier} has already been declared in this scope")
 
             if self.storageClass == StorageClass.EXTERN:
                 if self.originalIdentifier in self.context.functionMap:
@@ -1861,7 +1989,7 @@ class VariableDeclaration(Declaration):
                 if self.originalIdentifier in self.context.staticVariablesMap:
                     varCtx = self.context.staticVariablesMap[self.originalIdentifier]
                     if varCtx.idType != self.typeId:
-                        self.raiseError(f"{self.originalIdentifier} already defined as {idCtx.idType}, not {self.typeId}")
+                        self.raiseError(f"{self.originalIdentifier} already defined as {varCtx.idType}, not {self.typeId}")
 
                     self.identifier = varCtx.mangledName
                 else:
@@ -1869,11 +1997,12 @@ class VariableDeclaration(Declaration):
                     self.identifier = self.originalIdentifier
                 
                 # Add the variable to the identifiers context.
-                self.context.addVariableIdentifier(self)
+                self.context.addVariableIdentifier(self.originalIdentifier, self.identifier, self.typeId)
 
+                # This is a global static variable (accessible from other compilation units). Add it
+                # to the context.
                 if self.originalIdentifier not in self.context.staticVariablesMap:
                     self.context.staticVariablesMap[self.originalIdentifier] = StaticVariableContext(
-                        name=self.originalIdentifier,
                         mangledName=self.identifier,
                         idType=self.typeId,
                         storageClass=self.storageClass,
@@ -1893,10 +2022,11 @@ class VariableDeclaration(Declaration):
                 self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
                 self.isGlobal = False
                 # Add the variable to the identifiers context.
-                self.context.addVariableIdentifier(self)
+                self.context.addVariableIdentifier(self.originalIdentifier, self.identifier, self.typeId)
 
+                # This is a local static variable (accessible only from this compilation unit). Add 
+                # it to the context.
                 self.context.staticVariablesMap[self.identifier] = StaticVariableContext(
-                    name=self.originalIdentifier,
                     mangledName=self.identifier,
                     idType=self.typeId,
                     storageClass=self.storageClass,
@@ -1909,7 +2039,7 @@ class VariableDeclaration(Declaration):
                 self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
                 self.isGlobal = False
                 # Add the variable to the identifiers context.
-                self.context.addVariableIdentifier(self)
+                self.context.addVariableIdentifier(self.originalIdentifier, self.identifier, self.typeId)
 
                 if self.peek().id == "=":
                     self.pop()
@@ -1964,7 +2094,6 @@ class VariableDeclaration(Declaration):
                     self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
 
             self.context.staticVariablesMap[self.originalIdentifier] = StaticVariableContext(
-                name=self.originalIdentifier,
                 mangledName=self.identifier,
                 idType=self.typeId,
                 storageClass=self.storageClass,
@@ -1974,7 +2103,7 @@ class VariableDeclaration(Declaration):
             )
 
             # Add the variable to the identifiers context.
-            self.context.addVariableIdentifier(self)
+            self.context.addVariableIdentifier(self.originalIdentifier, self.identifier, self.typeId)
 
         self.expect(";")
 
@@ -1994,9 +2123,9 @@ class VariableDeclaration(Declaration):
 
 class StructMemberDeclaration(AST):
     def parse(self, *args):
-        _, qualifierClass, baseType = self.getTypeAndStorageClass(expectsStorageClass=False)
+        _, declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
         declarator = self.createChild(TopDeclarator)
-        info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
+        info: DeclaratorInformation = declarator.process(declType)
 
         self.typeId = info.type
         self.name = info.name
@@ -2021,15 +2150,11 @@ class StructDeclaration(Declaration):
         self.byteSize: int = -1
         self.alignment: int = -1
 
-        # Check that there's no union with this name already defined.
-        prevUnion = self.context.getUnionFromOriginalName(self.originalIdentifier)
-        if prevUnion is not None and prevUnion.alreadyDeclared:
-            self.raiseError(f"{prevUnion.idType} already declared in this scope")
-
-        # Check that there's no enum with this name already defined.
-        prevEnum = self.context.getEnumFromOriginalName(self.originalIdentifier)
-        if prevEnum is not None and prevEnum.alreadyDeclared:
-            self.raiseError(f"{prevEnum.idType} already declared in this scope")
+        # Check that there's no unions, enums or typedefs with this name already defined.
+        conflictingType = self.context.getConflictsForTaggableType(TaggableType.STRUCT, 
+                                                                   self.originalIdentifier)
+        if conflictingType is not None:
+            self.raiseError(f"{conflictingType} already declared in this scope")
 
         ctx = self.context.getStructFromOriginalName(self.originalIdentifier)
         if ctx is None or not ctx.alreadyDeclared:
@@ -2045,7 +2170,7 @@ class StructDeclaration(Declaration):
         else:
             # The struct is referring to a previously declared struct, get its type and identifier.
             self.identifier = ctx.mangledName
-            self.typeId = ctx.idType
+            self.typeId = self.context.structMap[ctx.mangledName]
 
         # Parse the members.
         if self.peek().id == "{":
@@ -2086,8 +2211,9 @@ class StructDeclaration(Declaration):
             self.raiseError("This should not be None")
         
         if ctx.alreadyDeclared and len(self.members) > 0:
-            if len(ctx.idType.getMembers()) > 0:
-                self.raiseError(f"{ctx.idType} already defined in this scope")
+            ctxType = self.context.structMap[ctx.mangledName]
+            if len(ctxType.getMembers()) > 0:
+                self.raiseError(f"{ctxType} already defined in this scope")
             else:
                 # Set the new members of the struct.
                 self.context.completeStruct(self)
@@ -2113,9 +2239,9 @@ class StructDeclaration(Declaration):
 
 class UnionMemberDeclaration(AST):
     def parse(self, *args):
-        _, qualifierClass, baseType = self.getTypeAndStorageClass(expectsStorageClass=False)
+        _, declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
         declarator = self.createChild(TopDeclarator)
-        info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
+        info: DeclaratorInformation = declarator.process(declType)
 
         self.typeId = info.type
         self.name = info.name
@@ -2138,15 +2264,11 @@ class UnionDeclaration(Declaration):
         self.byteSize: int = -1
         self.alignment: int = -1
 
-        # Check that there's no struct with this name already defined.
-        prevStruct = self.context.getStructFromOriginalName(self.originalIdentifier)
-        if prevStruct is not None and prevStruct.alreadyDeclared:
-            self.raiseError(f"{prevStruct.idType} already declared in this scope")
-
-        # Check that there's no enum with this name already defined.
-        prevEnum = self.context.getEnumFromOriginalName(self.originalIdentifier)
-        if prevEnum is not None and prevEnum.alreadyDeclared:
-            self.raiseError(f"{prevEnum.idType} already declared in this scope")
+        # Check that there's no struct, enums or typedefs with this name already defined.
+        conflictingType = self.context.getConflictsForTaggableType(TaggableType.UNION, 
+                                                                   self.originalIdentifier)
+        if conflictingType is not None:
+            self.raiseError(f"{conflictingType} already declared in this scope")
 
         ctx = self.context.getUnionFromOriginalName(self.originalIdentifier)
         if ctx is None or not ctx.alreadyDeclared:
@@ -2162,7 +2284,7 @@ class UnionDeclaration(Declaration):
         else:
             # The union is referring to a previously declared union, get its type and identifier.
             self.identifier = ctx.mangledName
-            self.typeId = ctx.idType
+            self.typeId = self.context.unionMap[ctx.mangledName]
 
         # Parse the members.
         if self.peek().id == "{":
@@ -2204,8 +2326,9 @@ class UnionDeclaration(Declaration):
             self.raiseError("This should not be None")
         
         if ctx.alreadyDeclared and len(self.members) > 0:
-            if len(ctx.idType.getMembers()) > 0:
-                self.raiseError(f"{ctx.idType} already defined in this scope")
+            ctxType = self.context.unionMap[ctx.mangledName]
+            if len(ctxType.getMembers()) > 0:
+                self.raiseError(f"{ctxType} already defined in this scope")
             else:
                 # Set the new members of the union.
                 self.context.completeUnion(self)
@@ -2260,21 +2383,17 @@ class EnumDeclaration(Declaration):
         # Create a new mangled name.
         self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
 
-        # Check that there's no struct with this name already defined.
-        prevStruct = self.context.getStructFromOriginalName(self.originalIdentifier)
-        if prevStruct is not None and prevStruct.alreadyDeclared:
-            self.raiseError(f"{prevStruct.idType} already declared in this scope")
-
-        # Check that there's no union with this name already defined.
-        prevUnion = self.context.getUnionFromOriginalName(self.originalIdentifier)
-        if prevUnion is not None and prevUnion.alreadyDeclared:
-            self.raiseError(f"{prevUnion.idType} already declared in this scope")
+        # Check that there's no struct, unions or typedefs with this name already defined.
+        conflictingType = self.context.getConflictsForTaggableType(TaggableType.ENUM, 
+                                                                   self.originalIdentifier)
+        if conflictingType is not None:
+            self.raiseError(f"{conflictingType} already declared in this scope")
 
         # Check that there's no enum with this name already defined. Contrary to structs and unions, 
         # enums cannot be declared first and defined later.
         prevEnum = self.context.getEnumFromOriginalName(self.originalIdentifier)
         if prevEnum is not None and prevEnum.alreadyDeclared:
-            self.raiseError(f"{prevEnum.idType} already declared in this scope")
+            self.raiseError(f"{self.context.enumMap[prevEnum.mangledName]} already declared in this scope")
 
         # If the enum is new, or it is being shadowed by another enum with the same name...
         # Create a new mangled identifier.
@@ -2313,14 +2432,8 @@ class EnumDeclaration(Declaration):
                 self.context.identifierMap[decl.name].alreadyDeclared:
                 self.raiseError(f"{decl.name} already declared in this scope")
 
-            # Add the enum member as a new variable to the context.
-            idContext = IdentifierContext(
-                originalName=decl.name,
-                mangledName=decl.mangledName,
-                idType=decl.typeId,
-                constValue=decl.value
-            )
-            self.context.identifierMap[decl.name] = idContext
+            # Add the enum member as a new "constant variable" to the context.
+            self.context.addVariableIdentifier(decl.name, decl.mangledName, decl.typeId, decl.value)
 
             # End of enum.
             if self.peek().id == "}":
@@ -2347,6 +2460,32 @@ class EnumDeclaration(Declaration):
         else:
             ret =f'{pad}Enum({self.typeId})\n'
         return ret
+    
+class TypedefDeclaration(Declaration):
+    def parse(self, *args):
+        self.expect("typedef")
+        _, declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+        declarator = self.createChild(TopDeclarator)
+        info: DeclaratorInformation = declarator.process(declType)
+
+        self.originalIdentifier = info.name
+        self.typeId = info.type
+        # Set the alias of the type.
+        self.typeId.setAlias(self.originalIdentifier)
+
+        # Check that there's no conflict with other identifiers in the same scope.
+        if self.originalIdentifier in self.context.identifierMap and \
+           self.context.identifierMap[self.originalIdentifier].alreadyDeclared:
+            self.raiseError(f"{self.originalIdentifier} already declared in this scope")
+
+        self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
+        self.context.addTypedefIdentifier(self.originalIdentifier, self.identifier, self.typeId)
+
+        self.expect(";")
+
+    def print(self, padding: int) -> str:
+        pad = " " * padding
+        return f"{pad}Typedef {self.originalIdentifier} ({self.typeId})"
 
 # A block is a list of BlockItems enclosed by {}.
 class Block(AST):
@@ -2451,7 +2590,7 @@ class Exp(AST):
 
         # When converting from lValue to rValue the qualifiers (const, volatile) of a variable get 
         # stripped. This does not happen for pointers!
-        if not isinstance(ret.typeId, PointerDeclaratorType):
+        if isinstance(ret.typeId, BaseDeclaratorType):
             newDecl = ret.typeId.copy()
             newDecl.qualifiers = TypeQualifier()
             ret.typeId = newDecl
@@ -2875,14 +3014,16 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 EXPRESSIONS
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 """
-
 class Variable(Exp):
     def parse(self, variableName: str):
         # This variable is inside the identifierMap, verified at _parsePrimaryExpression.
         ctxVar = self.context.identifierMap[variableName]
         
         # Get the type of variable from the identifier.
-        self.typeId = ctxVar.idType
+        if ctxVar.mangledName not in self.context.variablesMap:
+            self.raiseError("Internal error")
+
+        self.typeId = self.context.variablesMap[ctxVar.mangledName].idType
         self.originalIdentifier: str = variableName
         self.identifier: str = ctxVar.mangledName
 
@@ -2975,13 +3116,13 @@ class Cast(Exp):
         else:
             # Parse from tokens.
             self.expect("(")
-            _, qualifierClass, baseType = self.getTypeAndStorageClass(expectsStorageClass=False)
+            _, declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
             if self.peek().id != ")":
                 declarator = self.createChild(TopAbstractDeclarator)
-                info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
+                info: DeclaratorInformation = declarator.process(declType)
                 self.typeId = info.type
             else:
-                self.typeId = baseType.toBaseType()
+                self.typeId = declType
             self.expect(")")
 
             self.inner: Exp = self._parseFactor().preconvertExpression()
@@ -3691,7 +3832,7 @@ class FunctionCall(Exp):
             if self.funcIdentifier not in self.context.identifierMap:
                 self.raiseError(f"Identifier {self.funcIdentifier} is not declared")
 
-            if not isinstance(self.context.identifierMap[self.funcIdentifier].idType, FunctionDeclaratorType):
+            if self.context.identifierMap[self.funcIdentifier].identifierType != IdentifierType.FUNCTION:
                 self.raiseError(f"{self.funcIdentifier} is not a function")
 
         self.expect("(")
@@ -3960,13 +4101,13 @@ class SizeOfType(Exp):
 
         self.expect("sizeof")
         self.expect("(")
-        _, qualifierClass, baseType = self.getTypeAndStorageClass(expectsStorageClass=False)
+        _, declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
         if self.peek().id != ")":
             declarator = self.createChild(TopAbstractDeclarator)
-            info: DeclaratorInformation = declarator.process(baseType.toBaseType(qualifierClass))
+            info: DeclaratorInformation = declarator.process(declType)
             self.inner = info.type
         else:
-            self.inner = baseType.toBaseType()
+            self.inner = declType
         self.expect(")")
 
         if not self.inner.isComplete():
