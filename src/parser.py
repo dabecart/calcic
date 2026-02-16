@@ -822,47 +822,37 @@ class AST(ABC):
                         self.raiseError("Conflicting types")
                     idTypeAlreadyDefined = True
 
-                    # The next token can be the identifier of the struct, union or enum. If that's 
-                    # the case, it could be a new declaration or a reference to a previous 
-                    # declaration. If there's no identifier, it must be a new declaration.
-                    newDeclaration = self.peek(1).id != "identifier"
-
-                    if not newDeclaration:
-                        typeIdentifier = self.peek(1).value
-                        
+                    # Parse a declaration.
+                    if tok.id == "struct":
+                        typeDeclaration = self.createChild(StructDeclaration)
+                        # The type is the same as the declaration type.
+                        idType = typeDeclaration.typeId
+                    elif tok.id == "union":
+                        typeDeclaration = self.createChild(UnionDeclaration)
+                        # The type is the same as the declaration type.
+                        idType = typeDeclaration.typeId
+                    elif tok.id == "enum":
+                        # Enums are a bit more finicky to work with, as they cannot be redeclared 
+                        # without having its initializer list.
                         tagType = TaggableType(tok.id)
-                        objectType = self.context.getTagObjectFromOriginalName(tagType, typeIdentifier)        
-
-                        # If the tag does not exist, then this could be a new declaration.
-                        if not (newDeclaration := objectType is None):
-                            # Now that we have checked that the type is valid and does not conflict, 
-                            # get the reference type by looking at the maps with the mangled name.
-                            if tok.id == "struct":
-                                idType = self.context.structMap[objectType.mangledName]
-                            elif tok.id == "union":
-                                idType = self.context.unionMap[objectType.mangledName]
-                            elif tok.id == "enum":
-                                idType = self.context.enumMap[objectType.mangledName]
-                            else:
-                                raise ValueError()
-                            
+                        typeIdentifier = self.peek(1).value
+                        objectType = self.context.getTagObjectFromOriginalName(tagType, typeIdentifier)     
+                        newDeclaration = objectType is None or self.peek(2).id == "{"
+                        
+                        if newDeclaration:
+                            typeDeclaration = self.createChild(EnumDeclaration)
+                            # The type is the same as the declaration type.
+                            idType = typeDeclaration.typeId
+                        else:
+                            # To shut Pylance...
+                            if objectType is None: raise ValueError()
+                            idType = self.context.enumMap[objectType.mangledName]
                             # Pop the keyword and the identifier.
                             self.pop()
                             self.pop()
+                    else:
+                        raise ValueError()
                     
-                    if newDeclaration:
-                        # Parse a declaration.
-                        if tok.id == "struct":
-                            typeDeclaration = self.createChild(StructDeclaration)
-                        elif tok.id == "union":
-                            typeDeclaration = self.createChild(UnionDeclaration)
-                        elif tok.id == "enum":
-                            typeDeclaration = self.createChild(EnumDeclaration)
-                        else:
-                            raise ValueError()
-                        
-                        # The type is the same as the declaration type.
-                        idType = typeDeclaration.typeId
                 else:
                     # Pop the type when it's not a struct, union or enum.
                     self.pop()
@@ -2184,8 +2174,10 @@ class StructMemberDeclaration(AST):
 class StructDeclaration(Declaration):
     ANONYMOUS_STRUCT_COUNT: int = 0
 
-    def parse(self, basicDeclaration: bool = False):
-        self.isDefined = False
+    def parse(self):
+        self.members: list[StructMemberDeclaration] = []
+        self.byteSize: int = -1
+        self.alignment: int = -1
 
         self.expect("struct")
 
@@ -2196,28 +2188,30 @@ class StructDeclaration(Declaration):
         else:
             self.originalIdentifier = self.pop().value
 
-        self.members: list[StructMemberDeclaration] = []
-        self.byteSize: int = -1
-        self.alignment: int = -1
+        # If it's a declaration, it can shadow other tagged elements.  
+        canShadowOthers = self.peek().id in (";", "{")
 
         # Check that there's no unions, enums or typedefs with this name already defined.
         conflictCtx, conflictingType = self.context.getConflictsForTaggableType(TaggableType.STRUCT, 
                                                                    self.originalIdentifier)
         if conflictCtx is not None and conflictingType is not None:
-            if basicDeclaration:
-                # Doing a basic declaration, we can shadow the conflicting type if it is not yet 
-                # declared in the same scope.
-                if conflictCtx.alreadyDeclared:
-                    self.raiseError(f"{conflictingType} already declared in this scope")
-            else:
-                # If this type is inside a variable declaration, for example, we can only shadow it 
-                # if this type is complete (in other words, is defined).
-                if self.peek().id != "{":
+            # If there's a conflict with a type which is already declared in the scope, always raise
+            # an error.
+            if conflictCtx.alreadyDeclared:
+                self.raiseError(f"{conflictingType} already declared in this scope")
+
+            if not canShadowOthers:
+                # Check if the current type exists.
+                ctx = self.context.getStructFromOriginalName(self.originalIdentifier)
+                if ctx is None:
+                    # If the current type does not exist and you're not shadowing the previous type,
+                    # then there's a conflict. 
                     self.raiseError(f"This conflicts with previous type {conflictingType}")
+                # If it exists, then you're just creating a new variable with the current type.
 
         ctx = self.context.getStructFromOriginalName(self.originalIdentifier)
-        if ctx is None or not ctx.alreadyDeclared:
-            # If the struct is new, or it is being shadowed by another struct with the same name...
+        if ctx is None or (canShadowOthers and not ctx.alreadyDeclared):
+            # If the struct is new, or it is shadowing another struct with the same name...
             # Create a new mangled identifier.
             self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
             # Create the type.
@@ -2236,8 +2230,6 @@ class StructDeclaration(Declaration):
             self.raiseError("Anonymous struct needs to have a declaration list")
 
         if self.peek().id == "{":
-            self.isDefined = True
-
             self.pop()
 
             # The struct is going to be defined.
@@ -2320,8 +2312,10 @@ class UnionMemberDeclaration(AST):
 class UnionDeclaration(Declaration):
     ANONYMOUS_UNION_COUNT: int = 0
 
-    def parse(self, basicDeclaration: bool = False):
-        self.isDefined = False
+    def parse(self):
+        self.members: list[UnionMemberDeclaration] = []
+        self.byteSize: int = -1
+        self.alignment: int = -1
 
         self.expect("union")
 
@@ -2332,27 +2326,29 @@ class UnionDeclaration(Declaration):
         else:
             self.originalIdentifier = self.pop().value
         
-        self.members: list[UnionMemberDeclaration] = []
-        self.byteSize: int = -1
-        self.alignment: int = -1
+        # If it's a declaration, it can shadow other tagged elements.  
+        canShadowOthers = self.peek().id in (";", "{")
 
         # Check that there's no struct, enums or typedefs with this name already defined.
         conflictCtx, conflictingType = self.context.getConflictsForTaggableType(TaggableType.UNION, 
                                                                                 self.originalIdentifier)
         if conflictCtx is not None and conflictingType is not None:
-            if basicDeclaration:
-                # Doing a basic declaration, we can shadow the conflicting type if it is not yet 
-                # declared in the same scope.
-                if conflictCtx.alreadyDeclared:
-                    self.raiseError(f"{conflictingType} already declared in this scope")
-            else:
-                # If this type is inside a variable declaration, for example, we can only shadow it 
-                # if this type is complete (in other words, is defined).
-                if self.peek().id != "{":
+            # If there's a conflict with a type which is already declared in the scope, always raise
+            # an error.
+            if conflictCtx.alreadyDeclared:
+                self.raiseError(f"{conflictingType} already declared in this scope")
+
+            if not canShadowOthers:
+                # Check if the current type exists.
+                ctx = self.context.getUnionFromOriginalName(self.originalIdentifier)
+                if ctx is None:
+                    # If the current type does not exist and you're not shadowing the previous type,
+                    # then there's a conflict. 
                     self.raiseError(f"This conflicts with previous type {conflictingType}")
+                # If it exists, then you're just creating a new variable with the current type.
 
         ctx = self.context.getUnionFromOriginalName(self.originalIdentifier)
-        if ctx is None or not ctx.alreadyDeclared:
+        if ctx is None or (canShadowOthers and not ctx.alreadyDeclared):
             # If the union is new, or it is being shadowed by another union with the same name...
             # Create a new mangled identifier.
             self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
@@ -2372,8 +2368,6 @@ class UnionDeclaration(Declaration):
             self.raiseError("Anonymous union needs to have a declaration list")
 
         if self.peek().id == "{":
-            self.isDefined = True
-
             self.pop()
 
             # The union is going to be defined. Its size is the size of the biggest element in the 
