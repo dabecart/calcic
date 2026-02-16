@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import enum
 import struct
 import math
+from typing import TypeVar
 
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -102,25 +103,27 @@ class TypeSpecifier:
                              byteSize, alignment, **kwargs)
 
     @staticmethod
-    def ENUM(originalIdentifier: str) -> TypeSpecifier:
+    def ENUM(originalIdentifier: str, mangledIdentifier: str) -> TypeSpecifier:
         # Enums are represented by an int (its size and alignment are 4).
-        return TypeSpecifier("ENUM", f"enum {originalIdentifier}", 4, 4)
-
+        kwargs = dict(identifier = mangledIdentifier)
+        return TypeSpecifier("ENUM", f"enum {originalIdentifier}", 4, 4, **kwargs)
+    
     def __init__(self, name: str, value: str, byteSize: int, alignment: int, **kwargs) -> None:
         self.name: str = name
         self.value: str = value
         self.byteSize: int = byteSize
         self.alignment: int = alignment
         
-        # Struct/union stuff.
+        # Struct/union/enum stuff.
         self.identifier: str = kwargs.get("identifier", "") # Mangled identifier.
         self.members: list[ParameterInformation] = kwargs.get("members", [])
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, TypeSpecifier):
             return False
-        ret = self.name == other.name and self.value == other.value
-        if ret and self.name in ("STRUCT", "UNION"):
+        # Use the names only. The value field will conflict with typedefs.
+        ret = self.name == other.name
+        if ret and self.name in ("STRUCT", "UNION", "ENUM"):
             # Check the struct and union's declaration, in particular, the mangled identifier.
             ret = self.identifier == other.identifier
         return ret
@@ -225,6 +228,8 @@ DECLARATORS
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 """
 
+DT = TypeVar("DT", bound="DeclaratorType")
+
 # When parsing the "type" of variable being declared, a DeclaratorType will be used. 
 # There are three types of declarators:
 # - Base types, which are normal types (int, long, float...).
@@ -235,7 +240,12 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # DeclaratorType is Array(Array(Pointer(Base(int)), 3), 4)
 class DeclaratorType(ABC):
     def __init__(self) -> None:
+        # Alias set with typedef.
+        self.alias = ""
         super().__init__()
+
+    def setAlias(self, alias: str):
+        self.alias = alias
 
     # Returns a new decayed declarator type (if the innermost type is an array, it is converted to
     # a pointer).
@@ -248,9 +258,15 @@ class DeclaratorType(ABC):
         pass
 
     @abstractmethod
-    def __str__(self) -> str:
+    def _internal_str(self) -> str:
         return super().__str__()
-    
+
+    def __str__(self) -> str:
+        ret = self._internal_str()
+        if self.alias == "": 
+            return ret
+        return f"{self.alias} ({ret})"
+
     @abstractmethod
     def unqualify(self) -> BaseDeclaratorType:
         pass
@@ -264,8 +280,13 @@ class DeclaratorType(ABC):
         pass
 
     @abstractmethod
-    def copy(self) -> PointerDeclaratorType:
+    def _internal_copy(self: DT) -> DT:
         pass
+
+    def copy(self: DT) -> DT:
+        ret = self._internal_copy()
+        ret.alias = self.alias
+        return ret
 
     def __repr__(self) -> str:
         return self.__str__()
@@ -350,15 +371,15 @@ class BaseDeclaratorType(DeclaratorType):
         # Base types do not decay.
         return BaseDeclaratorType(self.baseType, self.qualifiers)
 
-    def __str__(self) -> str:
-            return f"{self.qualifiers}{self.baseType}"
+    def _internal_str(self) -> str:
+        return f"{self.qualifiers}{self.baseType}"
     
     def __eq__(self, other):
         if not isinstance(other, BaseDeclaratorType):
             return False
         return self.baseType == other.baseType and self.qualifiers == other.qualifiers
     
-    def copy(self) -> BaseDeclaratorType:
+    def _internal_copy(self) -> BaseDeclaratorType:
         return BaseDeclaratorType(self.baseType, self.qualifiers)
     
     def unqualify(self) -> BaseDeclaratorType:
@@ -382,11 +403,11 @@ class PointerDeclaratorType(DeclaratorType):
         # Pointers do not decay.
         return PointerDeclaratorType(self.declarator, self.qualifiers)
     
-    def copy(self) -> PointerDeclaratorType:
+    def _internal_copy(self) -> PointerDeclaratorType:
         return PointerDeclaratorType(self.declarator, self.qualifiers)
         
-    def __str__(self) -> str:
-            return f"{self.qualifiers}pointer to {self.declarator}"
+    def _internal_str(self) -> str:
+        return f"{self.qualifiers}pointer to {self.declarator}"
     
     def __eq__(self, other):
         if not isinstance(other, PointerDeclaratorType):
@@ -416,10 +437,10 @@ class ArrayDeclaratorType(DeclaratorType):
         # Another example, *int[4] decays to int**.
         return PointerDeclaratorType(self.declarator, self.getTypeQualifiers())
     
-    def copy(self) -> ArrayDeclaratorType:
+    def _internal_copy(self) -> ArrayDeclaratorType:
         return ArrayDeclaratorType(self.declarator, self.size)
 
-    def __str__(self) -> str:
+    def _internal_str(self) -> str:
         return f"array[{self.size}] of {self.declarator}"
     
     def __eq__(self, other):
@@ -445,10 +466,10 @@ class FunctionDeclaratorType(DeclaratorType):
     def decay(self) -> DeclaratorType:
         raise ValueError()
 
-    def copy(self) -> FunctionDeclaratorType:
+    def _internal_copy(self) -> FunctionDeclaratorType:
         return FunctionDeclaratorType(self.params, self.returnDeclarator)
 
-    def __str__(self) -> str:
+    def _internal_str(self) -> str:
         paramStrings = [str(p) for p in self.params]
         return f"{self.returnDeclarator}({', '.join(paramStrings)})"
     
