@@ -98,6 +98,7 @@ class TagContext:
     creationOrder: int
     originalName: str
     mangledName: str
+    # To verify wether the tag element can be shadowed or not.
     alreadyDeclared: bool = True
 
 @dataclass
@@ -369,20 +370,20 @@ class Context:
         return self.getTagObjectFromOriginalName(TaggableType.ENUM, originalName)
 
     # Returns the conflicting type with the same tag name.
-    def getConflictsForTaggableType(self, tagType: TaggableType, tagName: str) -> TypeSpecifier|None:
+    def getConflictsForTaggableType(self, tagType: TaggableType, tagName: str) -> tuple[TagContext|None, TypeSpecifier|None]:
         toCheckTypes: set[TaggableType] = set([t for t in TaggableType]) - {tagType}
         for t in toCheckTypes:
             matched = self.getTagObjectFromOriginalName(t, tagName)
-            if matched and matched.alreadyDeclared:
+            if matched:
                 if matched.tagType == TaggableType.STRUCT:
-                    return self.structMap[matched.mangledName]
+                    return (matched, self.structMap[matched.mangledName])
                 elif matched.tagType == TaggableType.UNION:
-                    return self.unionMap[matched.mangledName]
+                    return (matched, self.unionMap[matched.mangledName])
                 elif matched.tagType == TaggableType.ENUM:
-                    return self.enumMap[matched.mangledName]
+                    return (matched, self.enumMap[matched.mangledName])
                 else:
                     raise ValueError()
-        return None
+        return (None, None)
 
     def completeStruct(self, structure: StructDeclaration):
         # Modify the parameters inside the context.
@@ -758,24 +759,30 @@ class AST(ABC):
 
     def _parseDeclaration(self) -> Declaration:
         peekId = self.peek().id
-        if peekId == "struct" and self.peek(2).id in (";", "{"):
-            return self.createChild(StructDeclaration)
-        elif peekId == "union" and self.peek(2).id in (";", "{"):
-            return self.createChild(UnionDeclaration)
-        elif peekId == "enum" and self.peek(2).id in (";", "{"):
-            return self.createChild(EnumDeclaration)
-        elif peekId == "typedef":
-            return self.createChild(TypedefDeclaration)
+        if peekId == "typedef":
+            ret = self.createChild(TypedefDeclaration)
+            self.expect(";")
         else:
-            storageClass, declType = self.getStorageClassAndDeclaratorType()
-            declarator = self.createChild(TopDeclarator)
-            info: DeclaratorInformation = declarator.process(declType)
+            storageClass, declType, typeDeclaration = self.getStorageClassAndDeclaratorType()
 
-            if isinstance(info.type, FunctionDeclaratorType):
-                return self.createChild(FunctionDeclaration, storageClass, info)
+            # If we find a semicolon, what we parsed was a simple type definition (struct, union or 
+            # enum).
+            if self.peek().id == ";":
+                self.pop()
+                if typeDeclaration is None:
+                    self.raiseError("Expected a type declaration")
+                ret = typeDeclaration
             else:
-                return self.createChild(VariableDeclaration, storageClass, info)
+                declarator = self.createChild(TopDeclarator)
+                info: DeclaratorInformation = declarator.process(declType)
+
+                if isinstance(info.type, FunctionDeclaratorType):
+                    ret = self.createChild(FunctionDeclaration, storageClass, info)
+                else:
+                    ret = self.createChild(VariableDeclaration, storageClass, info)
         
+        return ret
+
     def _parseInitializer(self, *args) -> Initializer:
         if isinstance(args[0], ArrayDeclaratorType):
             return self.createChild(CompoundInitializer, *args)
@@ -789,53 +796,76 @@ class AST(ABC):
         else:
             return self.createChild(SingleInitializer, *args)
 
-    def getStorageClassAndDeclaratorType(self, expectsStorageClass = True) -> tuple[StorageClass|None, DeclaratorType]:
+    # - expectsStorageClass: True when a storage class can be accepted.
+    # - creatingVariable: It is used to differentiate between struct/union/enum/typedef declarations 
+    # and variable declarations. This impacts the shadowing logic.
+    def getStorageClassAndDeclaratorType(self, expectsStorageClass = True) -> tuple[StorageClass|None, DeclaratorType, Declaration|None]:
         storageClass: StorageClass|None = None
         typeQualifiers: TypeQualifier = TypeQualifier()
+        typeDeclaration: Declaration|None = None
         idType: TypeSpecifier
 
         idTypeAlreadyDefined: bool = False
         typeSet: set[str] = set()
 
         # Parse qualifiers and common types.
-        while self.peek().id in Token.SPECIFIER:
-            tok = self.pop()
+        while (tok := self.peek()).id in Token.SPECIFIER:
             if tok.id in Token.TYPE_SPECIFIER:
                 # Type specifiers cannot be repeated (there's long long, but I haven't implemented 
                 # it).
                 if tok.id in typeSet:
-                    self.raiseError(f"Variable was already defined as {tok.id}")
+                    self.raiseError(f"Already defined as {tok.id}")
 
                 # Taggable types: TYPE{struct, union, enum} <identifier>
                 if tok.id in ("struct", "union", "enum"):
                     if idTypeAlreadyDefined:
                         self.raiseError("Conflicting types")
-
-                    # The next token must be the identifier of the struct, union or enum.
-                    typeIdentifier = self.expect("identifier").value
-                    
-                    tagType = TaggableType(tok.id)
-                    objectType = self.context.getTagObjectFromOriginalName(tagType, typeIdentifier)        
-                    if objectType is None:
-                        self.raiseError(f"{typeIdentifier} is not declared")
-
-                    # Check that there's no conflict with a different type already defined.
-                    conflict = self.context.getConflictsForTaggableType(tagType, typeIdentifier)
-                    if conflict:
-                        self.raiseError(f"Previous {conflict} conflicts with this type")
-
-                    # Now that we have checked that the type is valid and does not conflict, get the
-                    # reference type by looking at the maps with the mangled name.
-                    if tok.id == "struct":
-                        idType = self.context.structMap[objectType.mangledName]
-                    elif tok.id == "union":
-                        idType = self.context.unionMap[objectType.mangledName]
-                    elif tok.id == "enum":
-                        idType = self.context.enumMap[objectType.mangledName]
-                    else:
-                        raise ValueError()
-                    
                     idTypeAlreadyDefined = True
+
+                    # The next token can be the identifier of the struct, union or enum. If that's 
+                    # the case, it could be a new declaration or a reference to a previous 
+                    # declaration. If there's no identifier, it must be a new declaration.
+                    newDeclaration = self.peek(1).id != "identifier"
+
+                    if not newDeclaration:
+                        typeIdentifier = self.peek(1).value
+                        
+                        tagType = TaggableType(tok.id)
+                        objectType = self.context.getTagObjectFromOriginalName(tagType, typeIdentifier)        
+
+                        # If the tag does not exist, then this could be a new declaration.
+                        if not (newDeclaration := objectType is None):
+                            # Now that we have checked that the type is valid and does not conflict, 
+                            # get the reference type by looking at the maps with the mangled name.
+                            if tok.id == "struct":
+                                idType = self.context.structMap[objectType.mangledName]
+                            elif tok.id == "union":
+                                idType = self.context.unionMap[objectType.mangledName]
+                            elif tok.id == "enum":
+                                idType = self.context.enumMap[objectType.mangledName]
+                            else:
+                                raise ValueError()
+                            
+                            # Pop the keyword and the identifier.
+                            self.pop()
+                            self.pop()
+                    
+                    if newDeclaration:
+                        # Parse a declaration.
+                        if tok.id == "struct":
+                            typeDeclaration = self.createChild(StructDeclaration)
+                        elif tok.id == "union":
+                            typeDeclaration = self.createChild(UnionDeclaration)
+                        elif tok.id == "enum":
+                            typeDeclaration = self.createChild(EnumDeclaration)
+                        else:
+                            raise ValueError()
+                        
+                        # The type is the same as the declaration type.
+                        idType = typeDeclaration.typeId
+                else:
+                    # Pop the type when it's not a struct, union or enum.
+                    self.pop()
 
                 typeSet.add(tok.id)
                 
@@ -846,6 +876,8 @@ class AST(ABC):
                         typeQualifiers.const = True
                     case _:
                         self.raiseError(f"Invalid specifier: {tok.id}")
+                
+                self.pop()
 
             elif tok.id in Token.STORAGE_QUALIFIER:
                 if not expectsStorageClass:
@@ -857,6 +889,9 @@ class AST(ABC):
                         storageClass = StorageClass.STATIC
                     case "extern":
                         storageClass = StorageClass.EXTERN
+
+                self.pop()
+
             else:
                 self.raiseError(f"Unexpected qualifier: {tok.id}")
 
@@ -877,9 +912,11 @@ class AST(ABC):
                     else:
                         self.raiseError(f"Cannot use {typeQualifiers}with type {aliasedType}")
                 
-                return (storageClass, aliasedType)
+                return (storageClass, aliasedType, typeDeclaration)
 
-            self.raiseError("Expected a type")
+            # If it's none of that, raise an error.
+            tok = self.pop()
+            self.raiseError(f"Expected a type, not {tok.value}")
 
         if {"signed", "unsigned"} <= typeSet:
             self.raiseError("Variable declared as signed and unsigned at the same time")
@@ -916,7 +953,7 @@ class AST(ABC):
         else:
             self.raiseError(f"Invalid combination of type specifiers: {', '.join(typeSet)}")
 
-        return (storageClass, idType.toBaseType(typeQualifiers))
+        return (storageClass, idType.toBaseType(typeQualifiers), typeDeclaration)
     
     def parseConstantFromType(self, constantType: DeclaratorType, strict: bool = False) -> list[Constant]:
         if isinstance(constantType, BaseDeclaratorType):
@@ -1144,12 +1181,13 @@ class DeclaratorAST(AST):
 
 class SimpleDeclarator(DeclaratorAST):
     def parse(self, *args):
-        if self.peek().id == "identifier":
+        nextTok = self.expect("identifier", "(")
+
+        if nextTok.id == "identifier":
             self.isIdentifier = True
-            self.id = self.pop().value
+            self.id = nextTok.value
         else:
             self.isIdentifier = False
-            self.expect("(")
             self.declarator = self.createChild(TopDeclarator)
             self.expect(")")
 
@@ -1236,7 +1274,7 @@ class DirectDeclarator(DeclaratorAST):
 
 class FunctionParameterDeclarator(DeclaratorAST):
     def parse(self, *args):
-        _, self.declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+        _, self.declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
         self.decl = self.createChild(TopDeclarator)
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
@@ -1595,6 +1633,8 @@ class ForStatement(Statement):
             tok = self.peek()
             if self.isTokenAnIdentifierType(tok):
                 self.init = self.createChild(VariableDeclaration)
+                if self.init.storageClass is not None:
+                    self.raiseError(f"Cannot have storage class")
             elif tok.id == ";":
                 self.init = None
                 self.expect(";")
@@ -1794,7 +1834,7 @@ class FunctionDeclaration(Declaration):
             self.storageClass: StorageClass | None = args[0]
             info: DeclaratorInformation = args[1]
         else:
-            self.storageClass, declType = self.getStorageClassAndDeclaratorType()
+            self.storageClass, declType, _ = self.getStorageClassAndDeclaratorType()
             declarator = self.createChild(TopDeclarator)
             info: DeclaratorInformation = declarator.process(declType)
 
@@ -1912,7 +1952,7 @@ class FunctionDeclaration(Declaration):
             
             self.expect("}")
         else:
-            self.expect(";")        
+            self.expect(";")
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -1939,7 +1979,7 @@ class VariableDeclaration(Declaration):
             self.storageClass: StorageClass | None = args[0]
             info: DeclaratorInformation = args[1]
         else:
-            self.storageClass, declType = self.getStorageClassAndDeclaratorType()
+            self.storageClass, declType, _ = self.getStorageClassAndDeclaratorType()
             declarator = self.createChild(TopDeclarator)
             info: DeclaratorInformation = declarator.process(declType)
 
@@ -2110,9 +2150,9 @@ class VariableDeclaration(Declaration):
     def print(self, padding: int) -> str:
         pad = " " * padding
         if self.initialization is None:
-            return f"{pad}VariableDecl({self.typeId} {self.identifier})\n"
+            return f"{pad}VariableDecl: {self.typeId} {self.identifier}\n"
         else:
-            ret  = f"{pad}VariableDecl({self.typeId} {self.identifier} =\n"
+            ret  = f"{pad}VariableDecl: {self.typeId} {self.identifier} = (\n"
             if isinstance(self.initialization, AST):
                 ret += self.initialization.print(padding + PADDING_INCREMENT)
             else:
@@ -2123,7 +2163,7 @@ class VariableDeclaration(Declaration):
 
 class StructMemberDeclaration(AST):
     def parse(self, *args):
-        _, declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+        _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
         declarator = self.createChild(TopDeclarator)
         info: DeclaratorInformation = declarator.process(declType)
 
@@ -2142,19 +2182,38 @@ class StructMemberDeclaration(AST):
         return f'{pad}{self.typeId} {self.name}'
 
 class StructDeclaration(Declaration):
-    def parse(self, *args):
+    ANONYMOUS_STRUCT_COUNT: int = 0
+
+    def parse(self, basicDeclaration: bool = False):
+        self.isDefined = False
+
         self.expect("struct")
-        self.originalIdentifier = self.expect("identifier").value
-        
+
+        self.anonymous = self.peek().id != "identifier"
+        if self.anonymous:
+            self.originalIdentifier = f"struct.{StructDeclaration.ANONYMOUS_STRUCT_COUNT}"
+            StructDeclaration.ANONYMOUS_STRUCT_COUNT += 1
+        else:
+            self.originalIdentifier = self.pop().value
+
         self.members: list[StructMemberDeclaration] = []
         self.byteSize: int = -1
         self.alignment: int = -1
 
         # Check that there's no unions, enums or typedefs with this name already defined.
-        conflictingType = self.context.getConflictsForTaggableType(TaggableType.STRUCT, 
+        conflictCtx, conflictingType = self.context.getConflictsForTaggableType(TaggableType.STRUCT, 
                                                                    self.originalIdentifier)
-        if conflictingType is not None:
-            self.raiseError(f"{conflictingType} already declared in this scope")
+        if conflictCtx is not None and conflictingType is not None:
+            if basicDeclaration:
+                # Doing a basic declaration, we can shadow the conflicting type if it is not yet 
+                # declared in the same scope.
+                if conflictCtx.alreadyDeclared:
+                    self.raiseError(f"{conflictingType} already declared in this scope")
+            else:
+                # If this type is inside a variable declaration, for example, we can only shadow it 
+                # if this type is complete (in other words, is defined).
+                if self.peek().id != "{":
+                    self.raiseError(f"This conflicts with previous type {conflictingType}")
 
         ctx = self.context.getStructFromOriginalName(self.originalIdentifier)
         if ctx is None or not ctx.alreadyDeclared:
@@ -2173,7 +2232,12 @@ class StructDeclaration(Declaration):
             self.typeId = self.context.structMap[ctx.mangledName]
 
         # Parse the members.
+        if self.anonymous and self.peek().id != "{":
+            self.raiseError("Anonymous struct needs to have a declaration list")
+
         if self.peek().id == "{":
+            self.isDefined = True
+
             self.pop()
 
             # The struct is going to be defined.
@@ -2218,8 +2282,6 @@ class StructDeclaration(Declaration):
                 # Set the new members of the struct.
                 self.context.completeStruct(self)
 
-        self.expect(";")
-
     def membersToParamInfo(self) -> list[ParameterInformation]:
         return [
             ParameterInformation(member.typeId, member.name, member.offset)
@@ -2239,7 +2301,7 @@ class StructDeclaration(Declaration):
 
 class UnionMemberDeclaration(AST):
     def parse(self, *args):
-        _, declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+        _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
         declarator = self.createChild(TopDeclarator)
         info: DeclaratorInformation = declarator.process(declType)
 
@@ -2256,19 +2318,38 @@ class UnionMemberDeclaration(AST):
         return f'{pad}{self.typeId} {self.name}'
 
 class UnionDeclaration(Declaration):
-    def parse(self, *args):
+    ANONYMOUS_UNION_COUNT: int = 0
+
+    def parse(self, basicDeclaration: bool = False):
+        self.isDefined = False
+
         self.expect("union")
-        self.originalIdentifier = self.expect("identifier").value
+
+        self.anonymous = self.peek().id != "identifier"
+        if self.anonymous:
+            self.originalIdentifier = f"union.{UnionDeclaration.ANONYMOUS_UNION_COUNT}"
+            UnionDeclaration.ANONYMOUS_UNION_COUNT += 1
+        else:
+            self.originalIdentifier = self.pop().value
         
         self.members: list[UnionMemberDeclaration] = []
         self.byteSize: int = -1
         self.alignment: int = -1
 
         # Check that there's no struct, enums or typedefs with this name already defined.
-        conflictingType = self.context.getConflictsForTaggableType(TaggableType.UNION, 
-                                                                   self.originalIdentifier)
-        if conflictingType is not None:
-            self.raiseError(f"{conflictingType} already declared in this scope")
+        conflictCtx, conflictingType = self.context.getConflictsForTaggableType(TaggableType.UNION, 
+                                                                                self.originalIdentifier)
+        if conflictCtx is not None and conflictingType is not None:
+            if basicDeclaration:
+                # Doing a basic declaration, we can shadow the conflicting type if it is not yet 
+                # declared in the same scope.
+                if conflictCtx.alreadyDeclared:
+                    self.raiseError(f"{conflictingType} already declared in this scope")
+            else:
+                # If this type is inside a variable declaration, for example, we can only shadow it 
+                # if this type is complete (in other words, is defined).
+                if self.peek().id != "{":
+                    self.raiseError(f"This conflicts with previous type {conflictingType}")
 
         ctx = self.context.getUnionFromOriginalName(self.originalIdentifier)
         if ctx is None or not ctx.alreadyDeclared:
@@ -2287,7 +2368,12 @@ class UnionDeclaration(Declaration):
             self.typeId = self.context.unionMap[ctx.mangledName]
 
         # Parse the members.
+        if self.anonymous and self.peek().id != "{":
+            self.raiseError("Anonymous union needs to have a declaration list")
+
         if self.peek().id == "{":
+            self.isDefined = True
+
             self.pop()
 
             # The union is going to be defined. Its size is the size of the biggest element in the 
@@ -2333,8 +2419,6 @@ class UnionDeclaration(Declaration):
                 # Set the new members of the union.
                 self.context.completeUnion(self)
 
-        self.expect(";")
-
     def membersToParamInfo(self) -> list[ParameterInformation]:
         # Offsets in union are all 0.
         return [
@@ -2374,19 +2458,31 @@ class EnumMemberDeclaration(AST):
         return f'{pad}{self.typeId} {self.name}'
 
 class EnumDeclaration(Declaration):
-    def parse(self, *args):
+    ANONYMOUS_ENUM_COUNT: int = 0
+
+    def parse(self):
+        # An enum is always defined.
+        self.isDefined = True
+
         self.expect("enum")
-        self.originalIdentifier = self.expect("identifier").value
-        
+
+        if self.peek().id != "identifier":
+            # Anonymous enum.
+            self.originalIdentifier = f"enum.{EnumDeclaration.ANONYMOUS_ENUM_COUNT}"
+            EnumDeclaration.ANONYMOUS_ENUM_COUNT += 1
+        else:
+            self.originalIdentifier = self.pop().value
+
         self.members: list[EnumMemberDeclaration] = []
 
         # Create a new mangled name.
         self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
 
         # Check that there's no struct, unions or typedefs with this name already defined.
-        conflictingType = self.context.getConflictsForTaggableType(TaggableType.ENUM, 
-                                                                   self.originalIdentifier)
-        if conflictingType is not None:
+        conflictCtx, conflictingType = self.context.getConflictsForTaggableType(TaggableType.ENUM, 
+                                                                                self.originalIdentifier)
+        if conflictCtx is not None and conflictingType is not None and conflictCtx.alreadyDeclared:
+            # We can shadow the conflicting type if it is not yet declared in the same scope.
             self.raiseError(f"{conflictingType} already declared in this scope")
 
         # Check that there's no enum with this name already defined. Contrary to structs and unions, 
@@ -2399,7 +2495,7 @@ class EnumDeclaration(Declaration):
         # Create a new mangled identifier.
         self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
         # Create the type.
-        self.typeId = TypeSpecifier.ENUM(self.originalIdentifier)
+        self.typeId = TypeSpecifier.ENUM(self.originalIdentifier, self.identifier)
         # Add it to the context map only if it has not been declared in the current scope.
         self.context.addEnum(self)
 
@@ -2448,7 +2544,6 @@ class EnumDeclaration(Declaration):
             self.expect(",")
 
         self.expect("}")
-        self.expect(";")
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2464,7 +2559,7 @@ class EnumDeclaration(Declaration):
 class TypedefDeclaration(Declaration):
     def parse(self, *args):
         self.expect("typedef")
-        _, declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+        _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
         declarator = self.createChild(TopDeclarator)
         info: DeclaratorInformation = declarator.process(declType)
 
@@ -2480,8 +2575,6 @@ class TypedefDeclaration(Declaration):
 
         self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
         self.context.addTypedefIdentifier(self.originalIdentifier, self.identifier, self.typeId)
-
-        self.expect(";")
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -3116,7 +3209,7 @@ class Cast(Exp):
         else:
             # Parse from tokens.
             self.expect("(")
-            _, declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+            _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
             if self.peek().id != ")":
                 declarator = self.createChild(TopAbstractDeclarator)
                 info: DeclaratorInformation = declarator.process(declType)
@@ -4101,7 +4194,7 @@ class SizeOfType(Exp):
 
         self.expect("sizeof")
         self.expect("(")
-        _, declType = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+        _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
         if self.peek().id != ")":
             declarator = self.createChild(TopAbstractDeclarator)
             info: DeclaratorInformation = declarator.process(declType)

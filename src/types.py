@@ -103,9 +103,10 @@ class TypeSpecifier:
                              byteSize, alignment, **kwargs)
 
     @staticmethod
-    def ENUM(originalIdentifier: str) -> TypeSpecifier:
+    def ENUM(originalIdentifier: str, mangledIdentifier: str) -> TypeSpecifier:
         # Enums are represented by an int (its size and alignment are 4).
-        return TypeSpecifier("ENUM", f"enum {originalIdentifier}", 4, 4)
+        kwargs = dict(identifier = mangledIdentifier)
+        return TypeSpecifier("ENUM", f"enum {originalIdentifier}", 4, 4, **kwargs)
     
     def __init__(self, name: str, value: str, byteSize: int, alignment: int, **kwargs) -> None:
         self.name: str = name
@@ -113,7 +114,7 @@ class TypeSpecifier:
         self.byteSize: int = byteSize
         self.alignment: int = alignment
         
-        # Struct/union stuff.
+        # Struct/union/enum stuff.
         self.identifier: str = kwargs.get("identifier", "") # Mangled identifier.
         self.members: list[ParameterInformation] = kwargs.get("members", [])
 
@@ -122,7 +123,7 @@ class TypeSpecifier:
             return False
         # Use the names only. The value field will conflict with typedefs.
         ret = self.name == other.name
-        if ret and self.name in ("STRUCT", "UNION"):
+        if ret and self.name in ("STRUCT", "UNION", "ENUM"):
             # Check the struct and union's declaration, in particular, the mangled identifier.
             ret = self.identifier == other.identifier
         return ret
