@@ -559,6 +559,10 @@ class TAC(ABC):
             case GotoStatement():
                 self.createChild(TACJump, blockItem.labelName, insts)
 
+            case DeclarationList():
+                for decl in blockItem.declarations:
+                    self.parseTACBlockItem(decl, insts)
+
             case VariableDeclaration():
                 # Discard declarations of static variables (this was already taken care of in the 
                 # top level of the program).
@@ -850,19 +854,19 @@ class TACProgram(TAC):
             
             self.topLevel.append(topLevelDecl)
         
-        # Then generate the TAC for the functions.
-        for fun in self.program.topLevel: 
-            match fun:
-                case FunctionDeclaration():
-                    # Skip the declarations.
-                    if fun.body is None: 
-                        continue
-                    
-                    topLevelDecl = self.createChild(TACFunction, fun)
-                case _:
-                    # Skip variable and typedef declarations. 
-                    continue
+        # Expand the declaration lists, filter only for FunctionDeclaration objects.
+        def generateProcessList(declList: list[Declaration]) -> list[FunctionDeclaration]:
+            toProcess: list[FunctionDeclaration] = []
+            for ast in declList:
+                if isinstance(ast, FunctionDeclaration) and ast.body is not None:
+                    toProcess.append(ast)
+                elif isinstance(ast, DeclarationList):
+                    toProcess.extend(generateProcessList(ast.declarations))
+            return toProcess
 
+        # Then generate the TAC for the functions.
+        for fun in generateProcessList(self.program.topLevel):
+            topLevelDecl = self.createChild(TACFunction, fun)
             self.topLevel.append(topLevelDecl)
 
         # Finally, once all instructions have been processed, create the constants section. Push 

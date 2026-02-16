@@ -763,6 +763,8 @@ class AST(ABC):
             ret = self.createChild(TypedefDeclaration)
             self.expect(";")
         else:
+            ret = self.createChild(DeclarationList)
+            
             storageClass, declType, typeDeclaration = self.getStorageClassAndDeclaratorType()
 
             # If we find a semicolon, what we parsed was a simple type definition (struct, union or 
@@ -771,16 +773,25 @@ class AST(ABC):
                 self.pop()
                 if typeDeclaration is None:
                     self.raiseError("Expected a type declaration")
-                ret = typeDeclaration
+                ret.addDeclaration(typeDeclaration)
             else:
-                declarator = self.createChild(TopDeclarator)
-                info: DeclaratorInformation = declarator.process(declType)
+                while True:
+                    declarator = self.createChild(TopDeclarator)
+                    info: DeclaratorInformation = declarator.process(declType)
 
-                if isinstance(info.type, FunctionDeclaratorType):
-                    ret = self.createChild(FunctionDeclaration, storageClass, info)
-                else:
-                    ret = self.createChild(VariableDeclaration, storageClass, info)
-        
+                    if isinstance(info.type, FunctionDeclaratorType):
+                        ret.addDeclaration(self.createChild(FunctionDeclaration, storageClass, info)) 
+                        if self.lastToken is not None and self.lastToken.id == "}":
+                            # When a function is defined, the declaration list is closed.
+                            break
+                    else:
+                        ret.addDeclaration(self.createChild(VariableDeclaration, storageClass, info))
+                        
+                    # Parsing the declaration list.
+                    nextToken = self.expect(",", ";")
+                    if nextToken.id == ";":
+                        break
+
         return ret
 
     def _parseInitializer(self, *args) -> Initializer:
@@ -1627,10 +1638,10 @@ class ForStatement(Statement):
                     self.raiseError(f"Cannot have storage class")
             elif tok.id == ";":
                 self.init = None
-                self.expect(";")
             else:
                 self.init = self.createChild(Exp).preconvertExpression()
-                self.expect(";")
+            
+            self.expect(";")
 
             tok = self.peek()
             if tok.id == ";":
@@ -1818,6 +1829,19 @@ class Declaration(BlockItem):
     def print(self, padding: int) -> str:
         pass
 
+class DeclarationList(Declaration):
+    def parse(self, *args):
+        self.declarations: list[Declaration] = []
+
+    def print(self, padding: int) -> str:
+        ret = ""
+        for decl in self.declarations:
+            ret += decl.print(padding)
+        return ret
+
+    def addDeclaration(self, decl: Declaration):
+        self.declarations.append(decl)
+
 class FunctionDeclaration(Declaration):
     def parse(self, *args):
         if len(args) > 0:
@@ -1941,8 +1965,6 @@ class FunctionDeclaration(Declaration):
                     self.body.append(self._parseBlockItem())
             
             self.expect("}")
-        else:
-            self.expect(";")
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -2134,8 +2156,6 @@ class VariableDeclaration(Declaration):
 
             # Add the variable to the identifiers context.
             self.context.addVariableIdentifier(self.originalIdentifier, self.identifier, self.typeId)
-
-        self.expect(";")
 
     def print(self, padding: int) -> str:
         pad = " " * padding
