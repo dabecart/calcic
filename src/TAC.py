@@ -12,6 +12,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from .parser import *
 from .types import *
+from .global_context import globalContext
 
 from typing import Type, TypeVar
 T = TypeVar("T", bound="TAC")
@@ -94,6 +95,11 @@ class TAC(ABC):
                 raise ValueError("Invalid lvalue in the assignment")
 
     def parseTACExpression(self, exp: Exp, insts: list[TACInstruction]) -> TACExpressionResult:
+        # Verify if the expression is a built in function. If so, run the code in the 
+        # builtin_functions.py file
+        if globalContext.isBuiltInFunctionByClass(exp):
+            return globalContext.parseTACBuiltInFunction(exp, insts, self)
+
         match exp:
             case LongConstant():
                 val = self.createChild(TACValue, True, TypeSpecifier.LONG.toBaseType(), exp)
@@ -306,7 +312,7 @@ class TAC(ABC):
                 # Call the function.
                 funcCall = self.createChild(TACFunctionCall, exp.funcIdentifier, exp.typeId, argValues, insts)
                 return TACBaseOperand(funcCall.result, exp.typeId, insts)
-            
+
             case Cast():
                 if exp.inner.typeId == exp.typeId or exp.typeId == TypeSpecifier.VOID.toBaseType():
                     # No need to do any casting.
@@ -1527,4 +1533,4 @@ class TACFunctionCall(TACInstruction):
 
     def print(self) -> str:
         argList = ', '.join([arg.print() for arg in self.arguments])
-        return f"FunctionCall: {self.identifier}({argList})\n"
+        return f"FunctionCall: {self.identifier}({argList}) -> {self.result}\n"

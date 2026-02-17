@@ -16,9 +16,10 @@ import math
 import struct
 from dataclasses import dataclass, field
 from contextlib import contextmanager
-from typing import ClassVar, TypeVar, overload
+from typing import ClassVar, TypeVar, Callable, overload
 from .lexer import Token 
 from .types import *
+from .global_context import globalContext
 
 # Used to generate the verbose output.
 PADDING_INCREMENT: int = 2
@@ -148,7 +149,7 @@ class Context:
 
     loopTracking: list[str]                     = field(default_factory=list)
     switchTracking: list[SwitchContext]         = field(default_factory=list)
-    labelTracking: dict[str,LabelContext]       = field(default_factory=dict)
+    labelTracking: dict[str, LabelContext]      = field(default_factory=dict)
     insideAFunction: bool                       = False
     # The function the context is currently in.
     insideFunctionName: str                     = ""
@@ -304,34 +305,34 @@ class Context:
     UNION_ORDER: int = 0
     ENUM_ORDER: int = 0
     TYPEDEF_ORDER: int = 0
-    def addStruct(self, structure: StructDeclaration):
+    def addStruct(self, originalIdentifier: str, mangledIdentifier: str, typeId: TypeSpecifier):
         structContext = TagContext(
             tagType=TaggableType.STRUCT,
             creationOrder=Context.STRUCT_ORDER,
-            originalName=structure.originalIdentifier,
-            mangledName=structure.identifier
+            originalName=originalIdentifier,
+            mangledName=mangledIdentifier
         )
         Context.STRUCT_ORDER += 1
 
         # Add struct to context using the mangled identifier.
-        self.tagsMap[structure.identifier] = structContext
+        self.tagsMap[mangledIdentifier] = structContext
         # Add type to the structure map.
-        self.structMap[structure.identifier] = structure.typeId
+        self.structMap[mangledIdentifier] = typeId
 
     # Use it to return the most recent union.
-    def addUnion(self, union: UnionDeclaration):
+    def addUnion(self, originalIdentifier: str, mangledIdentifier: str, typeId: TypeSpecifier):
         unionContext = TagContext(
             tagType=TaggableType.UNION,
             creationOrder=Context.UNION_ORDER,
-            originalName=union.originalIdentifier,
-            mangledName=union.identifier,
+            originalName=originalIdentifier,
+            mangledName=mangledIdentifier,
         )
         Context.UNION_ORDER += 1
 
         # Add union to context using the mangled identifier.
-        self.tagsMap[union.identifier] = unionContext
+        self.tagsMap[mangledIdentifier] = unionContext
         # Add type to the union map.
-        self.unionMap[union.identifier] = union.typeId
+        self.unionMap[mangledIdentifier] = typeId
 
     def addEnum(self, enum: EnumDeclaration):
         enumContext = TagContext(
@@ -385,29 +386,29 @@ class Context:
                     raise ValueError()
         return (None, None)
 
-    def completeStruct(self, structure: StructDeclaration):
+    def completeStruct(self, originalIdentifier: str, byteSize: int, alignment: int, members: list[ParameterInformation]):
         # Modify the parameters inside the context.
-        ctx = self.getStructFromOriginalName(structure.originalIdentifier)
+        ctx = self.getStructFromOriginalName(originalIdentifier)
         if ctx is None:
-            raise ValueError(f"Could not find the struct {structure.originalIdentifier} in the current context")
+            raise ValueError(f"Could not find the struct {originalIdentifier} in the current context")
 
         # Get the type from the map and update the values.
         typeCtx = self.structMap[ctx.mangledName]
-        typeCtx.byteSize = structure.byteSize
-        typeCtx.alignment = structure.alignment
-        typeCtx.members = structure.membersToParamInfo()
+        typeCtx.byteSize = byteSize
+        typeCtx.alignment = alignment
+        typeCtx.members = members
 
-    def completeUnion(self, union: UnionDeclaration):
+    def completeUnion(self, originalIdentifier: str, byteSize: int, alignment: int, members: list[ParameterInformation]):
         # Modify the parameters inside the context.
-        ctx = self.getUnionFromOriginalName(union.originalIdentifier)
+        ctx = self.getUnionFromOriginalName(originalIdentifier)
         if ctx is None:
-            raise ValueError(f"Could not find the union {union.originalIdentifier} in the current context")
+            raise ValueError(f"Could not find the union {originalIdentifier} in the current context")
 
         # Get the type from the map and update the values.
         typeCtx = self.unionMap[ctx.mangledName]
-        typeCtx.byteSize = union.byteSize
-        typeCtx.alignment = union.alignment
-        typeCtx.members = union.membersToParamInfo()
+        typeCtx.byteSize = byteSize
+        typeCtx.alignment = alignment
+        typeCtx.members = members
 
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -712,7 +713,10 @@ class AST(ABC):
 
             case "identifier":
                 if self.peek(1).id == "(":
-                    ret = self.createChild(FunctionCall)
+                    if globalContext.isBuiltInFunctionByIdentifier(tok.value):
+                        ret = globalContext.createBuiltInFunction(self, tok.value)
+                    else:
+                        ret = self.createChild(FunctionCall)
                 elif tok.value in self.context.identifierMap is not None:
                     # Remove the token.
                     self.pop()
@@ -1115,7 +1119,7 @@ class AST(ABC):
                         self.raiseError("Cannot initialize a non char array with a string")
 
                     stringValue = self.createChild(String).value
-                    chConsts = [CharConstant([], None, None, str(ord(ch))) for ch in stringValue]
+                    chConsts = [CharConstant([], self.context, None, str(ord(ch))) for ch in stringValue]
                     currentLevel.extend(chConsts)
                     
                     currentLevelChildren = len(stringValue)
@@ -2239,7 +2243,7 @@ class StructDeclaration(Declaration):
                                                self.byteSize, self.alignment, 
                                                self.membersToParamInfo())
             # Add it to the context map only if it has not been declared in the current scope.
-            self.context.addStruct(self)
+            self.context.addStruct(self.originalIdentifier, self.identifier, self.typeId)
         else:
             # The struct is referring to a previously declared struct, get its type and identifier.
             self.identifier = ctx.mangledName
@@ -2292,7 +2296,9 @@ class StructDeclaration(Declaration):
                 self.raiseError(f"{ctxType} already defined in this scope")
             else:
                 # Set the new members of the struct.
-                self.context.completeStruct(self)
+                self.context.completeStruct(self.originalIdentifier, 
+                                            self.byteSize, self.alignment, 
+                                            self.membersToParamInfo())
 
     def membersToParamInfo(self) -> list[ParameterInformation]:
         return [
@@ -2377,7 +2383,7 @@ class UnionDeclaration(Declaration):
                                                self.byteSize, self.alignment, 
                                                self.membersToParamInfo())
             # Add it to the context map only if it has not been declared in the current scope.
-            self.context.addUnion(self)
+            self.context.addUnion(self.originalIdentifier, self.identifier, self.typeId)
         else:
             # The union is referring to a previously declared union, get its type and identifier.
             self.identifier = ctx.mangledName
@@ -2431,7 +2437,9 @@ class UnionDeclaration(Declaration):
                 self.raiseError(f"{ctxType} already defined in this scope")
             else:
                 # Set the new members of the union.
-                self.context.completeUnion(self)
+                self.context.completeUnion(self.originalIdentifier, 
+                                           self.byteSize, self.alignment, 
+                                           self.membersToParamInfo())
 
     def membersToParamInfo(self) -> list[ParameterInformation]:
         # Offsets in union are all 0.
@@ -2532,7 +2540,7 @@ class EnumDeclaration(Declaration):
             if decl.hasSetValue:
                 nextEnumValue = int(decl.value.constValue)
             else:
-                decl.value = IntConstant([], None, None, nextEnumValue)
+                decl.value = IntConstant([], self.context, None, nextEnumValue)
             # Increment for the next enum value.
             nextEnumValue += 1
 
@@ -3073,9 +3081,9 @@ class String(Exp):
         return f'{pad}String = "{self.value}"\n'
     
     def toConstantsList(self) -> list[Constant]:
-        chars: list[Constant] = [CharConstant([], None, None, str(ord(ch))) for ch in self.value]
+        chars: list[Constant] = [CharConstant([], self.context, None, str(ord(ch))) for ch in self.value]
         # Add the null terminator.
-        chars.append(CharConstant([], None, None, "0"))
+        chars.append(CharConstant([], self.context, None, "0"))
         return chars
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
@@ -4268,7 +4276,7 @@ class SingleInitializer(Initializer):
         return self.init.print(padding)
 
     @staticmethod
-    def createZeroInitializer(initializerType: DeclaratorType) -> Initializer:
+    def createZeroInitializer(initializerType: DeclaratorType, context: Context) -> Initializer:
         if isinstance(initializerType, BaseDeclaratorType):
             match initializerType.baseType:
                 case TypeSpecifier.VOID:
@@ -4298,10 +4306,10 @@ class SingleInitializer(Initializer):
                 case _:
                     raise ValueError(f"Cannot create zero initializer of type {initializerType}")
                 
-            return SingleInitializer([], None, None, initializerType.baseType.toBaseType(),  constRetType([], None, None, "0"))
+            return SingleInitializer([], context, None, initializerType.baseType.toBaseType(),  constRetType([], context, None, "0"))
 
         elif isinstance(initializerType, PointerDeclaratorType):
-            return SingleInitializer([], None, None, initializerType,  ULongConstant([], None, None, "0"))
+            return SingleInitializer([], context, None, initializerType, ULongConstant([], context, None, "0"))
         
         else:
             raise ValueError(f"Cannot create zero initializer of type {initializerType}")
@@ -4325,8 +4333,8 @@ class CompoundInitializer(Initializer):
 
                 stringAST = self.createChild(String)
                 for ch in stringAST.value:
-                    single = SingleInitializer([], None, None, TypeSpecifier.CHAR.toBaseType(),   
-                                            CharConstant([], None, None, str(ord(ch))))
+                    single = SingleInitializer([], self.context, None, TypeSpecifier.CHAR.toBaseType(),   
+                                               CharConstant([], self.context, None, str(ord(ch))))
                     self.init.append(single)
             else:
                 self.expect("{")
@@ -4353,7 +4361,7 @@ class CompoundInitializer(Initializer):
                 remainingItems = expectedType.size - len(self.init)
                 # Create individual constants.
                 for _ in range(remainingItems):
-                    self.init.append(CompoundInitializer.createZeroInitializer(expectedType.declarator))
+                    self.init.append(CompoundInitializer.createZeroInitializer(expectedType.declarator, self.context))
 
         elif isinstance(expectedType, BaseDeclaratorType) and expectedType.baseType.name == "STRUCT":
             # Initializing a struct.
@@ -4382,7 +4390,7 @@ class CompoundInitializer(Initializer):
             if len(self.init) < len(members):
                 # Pad the initialized members with zeros.
                 for undefinedMember in members[len(self.init):]:
-                    self.init.append(CompoundInitializer.createZeroInitializer(undefinedMember.type))
+                    self.init.append(CompoundInitializer.createZeroInitializer(undefinedMember.type, self.context))
 
         elif isinstance(expectedType, BaseDeclaratorType) and expectedType.baseType.name == "UNION":
             # Initializing an union.
@@ -4403,29 +4411,29 @@ class CompoundInitializer(Initializer):
         return evalList
 
     @staticmethod
-    def createZeroInitializer(initializerType: DeclaratorType) -> Initializer:
+    def createZeroInitializer(initializerType: DeclaratorType, context: Context) -> Initializer:
         # Arrays.
         if isinstance(initializerType, ArrayDeclaratorType):
             initializerList: list[Initializer] = []
             for _ in range(initializerType.size):
-                initializerList.append(CompoundInitializer.createZeroInitializer(initializerType.declarator))
-            return CompoundInitializer([], None, None, initializerType, initializerList)
+                initializerList.append(CompoundInitializer.createZeroInitializer(initializerType.declarator, context))
+            return CompoundInitializer([], context, None, initializerType, initializerList)
 
         # Structs.
         elif isinstance(initializerType, BaseDeclaratorType) and initializerType.baseType.name == "STRUCT":
             initializerList: list[Initializer] = []
             for structMember in initializerType.baseType.getMembers():
-                initializerList.append(CompoundInitializer.createZeroInitializer(structMember.type))
-            return CompoundInitializer([], None, None, initializerType, initializerList)
+                initializerList.append(CompoundInitializer.createZeroInitializer(structMember.type, context))
+            return CompoundInitializer([], context, None, initializerType, initializerList)
 
         # Unions.
         elif isinstance(initializerType, BaseDeclaratorType) and initializerType.baseType.name == "UNION":
             firstUnionMember = initializerType.baseType.getMembers()[0]
-            return CompoundInitializer([], None, None, initializerType, [CompoundInitializer.createZeroInitializer(firstUnionMember.type)])
+            return CompoundInitializer([], context, None, initializerType, [CompoundInitializer.createZeroInitializer(firstUnionMember.type, context)])
 
         # Simple types.
         else:
-            return SingleInitializer.createZeroInitializer(initializerType)
+            return SingleInitializer.createZeroInitializer(initializerType, context)
 
     def print(self, padding: int) -> str:
         pad = ' ' * padding

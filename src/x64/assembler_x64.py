@@ -10,11 +10,12 @@ calcic. Written by @dabecart, 2026.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from .TAC import *
-from .types import *
+from ..TAC import *
+from ..types import *
 from typing import Type, TypeVar
 import math
 import enum
+from ..global_context import globalContext
 
 AssemblyT = TypeVar("AssemblyT", bound="AssemblyAST")
 
@@ -888,6 +889,10 @@ class AssemblerFunction(AssemblyAST):
             # is doing. Skip labels.
             if not isinstance(inst, TACLabel):
                 self.createInst(COMMENT, inst.print())
+
+            # TODO: Temporary
+            if globalContext.isBuiltInTACFunction(inst):
+                continue
 
             match inst:
                 case TACReturn():
