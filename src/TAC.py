@@ -10,11 +10,12 @@ calcic. Written by @dabecart, 2026.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from .parser import *
-from .types import *
-from .global_context import globalContext
-
 from typing import Type, TypeVar
+
+from src.parser import *
+from src.calcic_types import *
+from src.global_context import globalContext
+
 T = TypeVar("T", bound="TAC")
 
 class TAC(ABC):

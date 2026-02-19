@@ -7,7 +7,8 @@ calcic. Written by @dabecart, 2026.
 """
 
 from __future__ import annotations
-from ..parser import *
+
+from src.parser import *
 
 class BuiltInFunctionCall(Exp):
     # To override.

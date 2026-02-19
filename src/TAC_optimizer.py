@@ -11,9 +11,11 @@ calcic. Written by @dabecart, 2026.
 """
 
 from __future__ import annotations
-from .TAC import *
-from .types import *
+
 from dataclasses import dataclass
+
+from src.TAC import *
+from src.calcic_types import *
 
 MAX_ITERATION_STEPS: int = 30
 

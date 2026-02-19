@@ -14,14 +14,13 @@ import traceback
 import enum
 import sys
 
+from src import lexer, parser, TAC
+from src import TAC_optimizer as optimizer
+from src.builtin.builtin_functions import BuiltInFunctions
+from src.global_context import globalContext
 
-from . import lexer, parser, TAC
-from . import TAC_optimizer as optimizer
-from .builtin.builtin_functions import BuiltInFunctions
-from .global_context import globalContext
-
-from .x64 import builtin_types_x64
-from .x64 import assembler_x64
+from src.x64 import builtin_types_x64
+from src.x64 import assembler_x64
 
 class TargetArchitectures(enum.Enum):
     x64 = "x64"

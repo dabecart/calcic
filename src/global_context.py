@@ -8,8 +8,9 @@ calcic. Written by @dabecart, 2026.
 
 from dataclasses import dataclass, field
 from typing import Callable
-from .types import *
-from .builtin.builtin_types import BuiltInTypes
+
+from src.calcic_types import *
+from src.builtin.builtin_types import BuiltInTypes
 
 @dataclass
 class GlobalContext:

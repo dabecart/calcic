@@ -77,6 +77,7 @@ tokenPatterns = [
     (",",                       re.compile(r",")),
 
     (".",                       re.compile(r"\.(?!\d)")), # The next character should NOT be a digit.
+    ("...",                     re.compile(r"\.\.\.")),
     ("->",                      re.compile(r"->")),
 
     ("+",                       re.compile(r"\+")),

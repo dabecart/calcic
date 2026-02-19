@@ -8,13 +8,10 @@ calcic. Written by @dabecart, 2026.
 
 from __future__ import annotations
 
-from ..TAC import *
+from src.TAC import *
+from src.builtin.builtin_functions_parser import *
 
 class TACBuiltInFunction(TACInstruction):
-    def __init__(self, arguments: list[TACValue], instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
-        self.arguments = arguments
-        super().__init__(instructionsList, parentTAC)
-    
     @abstractmethod
     def parse(self) -> TACValue:
         pass
@@ -32,6 +29,12 @@ class TACBuiltInFunction(TACInstruction):
         return f"Built-in FunctionCall: {self.printBuiltIn()}"
 
 class TACBuiltIn_va_start(TACBuiltInFunction):
+    def __init__(self, param_ap: TACValue, param_parmN: TACValue, 
+                 instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
+        self.param_ap = param_ap
+        self.param_parmN = param_parmN
+        super().__init__(instructionsList, parentTAC)
+
     def parse(self) -> TACValue:
         return TACValue(False, TypeSpecifier.VOID.toBaseType())
 
@@ -39,27 +42,42 @@ class TACBuiltIn_va_start(TACBuiltInFunction):
         return f"va_start\n"
 
     @staticmethod
-    def fromAST(ast: AST, insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
-        parent.createChild(TACBuiltIn_va_start, None, insts)
+    def fromAST(ast: BuiltIn_va_start, insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
+        param_ap = parent.parseTACExpression(ast.param_ap, insts).convert()
+        param_parmN = parent.parseTACExpression(ast.param_parmN, insts).convert()
 
-        val = TACValue(False, TypeSpecifier.VOID.toBaseType())
-        return TACBaseOperand(val, TypeSpecifier.VOID.toBaseType(), insts)
+        func = parent.createChild(TACBuiltIn_va_start, param_ap, param_parmN, insts)
+
+        return TACBaseOperand(func.result, ast.typeId, insts)
     
 class TACBuiltIn_va_arg(TACBuiltInFunction):
+    def __init__(self, param_ap: TACValue, param_type: DeclaratorType, 
+                 instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
+        self.param_ap = param_ap
+        self.param_type = param_type
+        super().__init__(instructionsList, parentTAC)
+
     def parse(self) -> TACValue:
-        return TACValue(False, TypeSpecifier.VOID.toBaseType())
+        # This is where the popped argument from the vargs will be stored. 
+        return TACValue(False, self.param_type)
 
     def printBuiltIn(self) -> str:
         return f"va_arg\n"
 
     @staticmethod
-    def fromAST(ast: AST, insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
-        parent.createChild(TACBuiltIn_va_arg, None, insts)
+    def fromAST(ast: BuiltIn_va_arg, insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
+        param_ap = parent.parseTACExpression(ast.param_ap, insts).convert()
 
-        val = TACValue(False, TypeSpecifier.VOID.toBaseType())
-        return TACBaseOperand(val, TypeSpecifier.VOID.toBaseType(), insts)
+        func = parent.createChild(TACBuiltIn_va_arg, param_ap, ast.param_type, insts)
+
+        return TACBaseOperand(func.result, ast.typeId, insts)
 
 class TACBuiltIn_va_end(TACBuiltInFunction):
+    def __init__(self, param_ap: TACValue,
+                 instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
+        self.param_ap = param_ap
+        super().__init__(instructionsList, parentTAC)
+
     def parse(self) -> TACValue:
         return TACValue(False, TypeSpecifier.VOID.toBaseType())
 
@@ -67,9 +85,10 @@ class TACBuiltIn_va_end(TACBuiltInFunction):
         return f"va_end\n"
 
     @staticmethod
-    def fromAST(ast: AST, insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
-        parent.createChild(TACBuiltIn_va_end, None, insts)
+    def fromAST(ast: BuiltIn_va_end, insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
+        param_ap = parent.parseTACExpression(ast.param_ap, insts).convert()
 
-        val = TACValue(False, TypeSpecifier.VOID.toBaseType())
-        return TACBaseOperand(val, TypeSpecifier.VOID.toBaseType(), insts)
+        func = parent.createChild(TACBuiltIn_va_end, param_ap, insts)
+
+        return TACBaseOperand(func.result, ast.typeId, insts)
 

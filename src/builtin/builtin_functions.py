@@ -8,9 +8,9 @@ calcic. Written by @dabecart, 2026.
 
 from __future__ import annotations
 
-from ..global_context import GlobalContext
-from .builtin_functions_parser import *
-from .builtin_functions_TAC import *
+from src.global_context import GlobalContext
+from src.builtin.builtin_functions_parser import *
+from src.builtin.builtin_functions_TAC import *
 
 class BuiltInFunctions:
     FUNCS: list[str] = [

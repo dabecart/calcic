@@ -10,12 +10,13 @@ calcic. Written by @dabecart, 2026.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from ..TAC import *
-from ..types import *
-from typing import Type, TypeVar
 import math
 import enum
-from ..global_context import globalContext
+from typing import Type, TypeVar
+
+from src.TAC import *
+from src.calcic_types import *
+from src.global_context import globalContext
 
 AssemblyT = TypeVar("AssemblyT", bound="AssemblyAST")
 

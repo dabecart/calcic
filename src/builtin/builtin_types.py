@@ -8,8 +8,9 @@ calcic. Written by @dabecart, 2026.
 
 from __future__ import annotations
 
-from ..types import *
 from dataclasses import dataclass, field
+
+from src.calcic_types import *
 
 @dataclass
 class BuiltInTypes:

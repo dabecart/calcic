@@ -9,9 +9,9 @@ calcic. Written by @dabecart, 2026.
 
 from __future__ import annotations
 
-from ..types import *
-from ..parser import Context
-from ..global_context import globalContext
+from src.calcic_types import *
+from src.parser import Context
+from src.global_context import globalContext
 
 class BuiltInTypes_x64:
     def __init__(self, ctx: Context) -> None:
