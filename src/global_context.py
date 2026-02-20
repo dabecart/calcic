@@ -19,6 +19,5 @@ class GlobalContext:
     createBuiltInFunction: Callable                          = lambda *args, **kwargs: None
     isBuiltInFunctionByClass: Callable                       = lambda *args, **kwargs: None
     parseTACBuiltInFunction: Callable                        = lambda *args, **kwargs: None
-    isBuiltInTACFunction: Callable                           = lambda *args, **kwargs: None
 
 globalContext = GlobalContext()

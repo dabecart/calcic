@@ -3969,6 +3969,7 @@ class FunctionCall(Exp):
 
         funcCtx = self.context.functionMap[self.funcIdentifier]
         self.typeId = funcCtx.returnType
+        self.isFunctionVariadic = funcCtx.has_vargs
 
         self.argumentList: list[Exp] = []
         

@@ -25,7 +25,6 @@ class BuiltInFunctions:
         ctx.createBuiltInFunction = BuiltInFunctions.parseBuiltInASTFunctionCall
         ctx.isBuiltInFunctionByClass = BuiltInFunctions.isBuiltInFunctionByClass
         ctx.parseTACBuiltInFunction = BuiltInFunctions.parseBuiltInTACFunctionCall
-        ctx.isBuiltInTACFunction = BuiltInFunctions.isBuiltInTACFunction
 
     @staticmethod
     def isBuiltInFunctionByIdentifier(funcName: str) -> bool:
@@ -35,10 +34,6 @@ class BuiltInFunctions:
     def isBuiltInFunctionByClass(elem) -> bool:
         return isinstance(elem, BuiltInFunctionCall)
     
-    @staticmethod
-    def isBuiltInTACFunction(elem) -> bool:
-        return isinstance(elem, TACBuiltInFunction)
-
     @staticmethod
     def parseBuiltInASTFunctionCall(parentAST: AST, funcName: str) -> BuiltInFunctionCall:
         match funcName:

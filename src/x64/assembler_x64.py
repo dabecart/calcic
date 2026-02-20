@@ -16,273 +16,10 @@ from typing import Type, TypeVar
 
 from src.TAC import *
 from src.calcic_types import *
-from src.global_context import globalContext
+from src.builtin.builtin_functions_TAC import *
+from src.x64.types_x64 import *
 
 AssemblyT = TypeVar("AssemblyT", bound="AssemblyAST")
-
-class AssemblyBaseType(enum.Enum):
-    DOUBLE   = "sd"
-    FLOAT    = "ss"
-    QUADWORD = "q"
-    LONGWORD = "l"
-    WORD     = "w"
-    BYTE     = "b"
-
-    # Not a real type, but used to represent an unmapped region of memory.
-    BYTEARRAY = "?"
-
-class AssemblyClassType(enum.Enum):
-    # Written in order of decreasing priority.
-    MEMORY   = enum.auto()
-    INTEGER  = enum.auto()
-    SSE      = enum.auto()   # Float or double.
-    NO_CLASS = enum.auto()   # Unclassified/padding.
-
-# Used to classify eightbytes. Bytesize might be irregular.
-class AssemblyClass:
-    def __init__(self, classType: AssemblyClassType, byteSize: int) -> None:
-        self.classType = classType
-        self.byteSize = byteSize
-
-    # To enable sorting in the enum classifying algorithm. 
-    def __lt__(self, other):
-        if not isinstance(other, AssemblyClass):
-            raise ValueError()
-        return self.classType.value < other.classType.value
-
-    def toAssemblyType(self) -> AssemblyType:
-        if self.classType == AssemblyClassType.SSE:
-            match self.byteSize:
-                case 8: asmbType = AssemblyType.DOUBLE
-                case 4: asmbType = AssemblyType.FLOAT
-                case _: raise ValueError()
-
-        elif self.classType == AssemblyClassType.INTEGER:
-            match self.byteSize:
-                case 8: asmbType = AssemblyType.QUADWORD
-                case 4: asmbType = AssemblyType.LONGWORD
-                case 2: asmbType = AssemblyType.WORD
-                case 1: asmbType = AssemblyType.BYTE
-                # For non standard types (3, 5, 6 and 7 bytes)...
-                case _: asmbType = AssemblyType(AssemblyBaseType.BYTEARRAY, self.byteSize, 0)
-        else:
-            asmbType = AssemblyType(AssemblyBaseType.BYTEARRAY, self.byteSize, 0)
-
-        return asmbType
-
-class AssemblyType:
-    DOUBLE: AssemblyType
-    FLOAT: AssemblyType
-    QUADWORD: AssemblyType
-    LONGWORD: AssemblyType
-    WORD: AssemblyType
-    BYTE: AssemblyType
-
-    def __init__(self, baseType: AssemblyBaseType, size: int, alignment: int, sectionName: str = "",
-                 members: list[AssemblyClass] = []) -> None:
-        self.baseType = baseType
-        self.size = size
-        self.alignment = alignment
-        self.sectionName = sectionName
-        self.members = members
-
-    def __eq__(self, value: object) -> bool:
-        if not isinstance(value, AssemblyType):
-            return False
-        return (self.baseType == value.baseType) and (self.size == value.size) and (self.alignment == value.alignment)
-
-    def isQuad(self) -> bool:
-        return self.baseType in (AssemblyBaseType.DOUBLE, AssemblyBaseType.QUADWORD)
-    
-    def isDecimal(self) -> bool:
-        return self.baseType in (AssemblyBaseType.DOUBLE, AssemblyBaseType.FLOAT)
-    
-    def isScalar(self) -> bool:
-        return self.baseType in (AssemblyBaseType.QUADWORD, AssemblyBaseType.LONGWORD, AssemblyBaseType.WORD, AssemblyBaseType.BYTE)
-
-    def getDataSectionName(self) -> str:
-        if self.baseType == AssemblyBaseType.BYTEARRAY:
-            raise ValueError()
-        return self.sectionName
-    
-    def getTypeName(self) -> str:
-        return self.baseType.value
-
-    @staticmethod
-    def _classifyArray(arrayDeclarator: ArrayDeclaratorType) -> list[AssemblyClass]:
-        # TODO: Think if alignment is to be considered here.
-        arrayBaseType = AssemblyType.fromTAC(arrayDeclarator.getArrayBaseType())
-        return arrayBaseType.members * arrayDeclarator.size
-
-    @staticmethod
-    def _classifyStruct(structDeclarator: BaseDeclaratorType) -> list[AssemblyClass]:
-        # Classify the structure.
-        memberClass: list[AssemblyClass] = []
-        structSize = structDeclarator.getByteSize()
-        if structSize > 16:
-            fullEightBytes = structSize // 8
-            memberClass.extend([AssemblyClass(AssemblyClassType.MEMORY, 8)] * fullEightBytes)
-            finalEightByte = structSize % 8
-            if finalEightByte != 0:
-                memberClass.append(AssemblyClass(AssemblyClassType.MEMORY, finalEightByte))
-        else:
-            # Convert the struct into a flat array of fields.
-            flattenedMembers = structDeclarator.baseType.flattenStruct()
-            # Convert these fields into assembly classes.
-            asmbClasses: list[AssemblyClass] = []
-            for mem in flattenedMembers:
-                if mem == TypeSpecifier.VOID.toBaseType():
-                    # This is padding.
-                    asmbClasses.append(AssemblyClass(AssemblyClassType.NO_CLASS, 1))
-                else:
-                    asmbMembers = AssemblyType.fromTAC(mem).members
-                    # To make the next step easier, split all the members into single byte members.
-                    for subMember in asmbMembers:
-                        asmbClasses.extend([AssemblyClass(subMember.classType, 1)] * subMember.byteSize)
-            # Now group them into eightbytes.
-            byteCount: int = 0
-            currentClass: AssemblyClassType = AssemblyClassType.NO_CLASS
-            for cl in asmbClasses:
-                byteCount += 1
-
-                # Stick to the most strict class type.
-                if cl.classType.value < currentClass.value:
-                    currentClass = cl.classType
-
-                if byteCount == 8:
-                    # New eightbyte.
-                    memberClass.append(AssemblyClass(currentClass, 8))
-                    byteCount = 0
-                    currentClass = AssemblyClassType.NO_CLASS
-
-            # There may be an incomplete eightbyte at the end.
-            if byteCount != 0:
-                memberClass.append(AssemblyClass(currentClass, byteCount))
-        
-        return memberClass
-    
-    @staticmethod
-    def _classifyUnion(unionDeclarator: BaseDeclaratorType) -> list[AssemblyClass]:
-        memberClass: list[AssemblyClass] = []
-
-        unionSize = unionDeclarator.getByteSize()
-        if unionSize > 16:
-            fullEightBytes = unionSize // 8
-            memberClass.extend([AssemblyClass(AssemblyClassType.MEMORY, 8)] * fullEightBytes)
-            finalEightByte = unionSize % 8
-            if finalEightByte != 0:
-                memberClass.append(AssemblyClass(AssemblyClassType.MEMORY, finalEightByte))
-        else:
-            # Get the classes of each member but split them into 1 byte classes. This will make the 
-            # matching algorithm easier to follow.
-            classifiedMembers: list[list[AssemblyClass]] = []
-            greatestMemberListCount: int = 0
-            for member in unionDeclarator.baseType.getMembers():
-                # Get the assembly type of the union member, this will calculate its members.
-                asmbType = AssemblyType.fromTAC(member.type)
-                # Now, split them into 1 byte classes.
-                singleByteMemberList: list[AssemblyClass] = []
-                for innerMember in asmbType.members:
-                    singleByteMemberList.extend([AssemblyClass(innerMember.classType, 1)] * innerMember.byteSize)
-                # Add to the outer loop list.
-                classifiedMembers.append(singleByteMemberList)
-                # Monitor which list of assembly members is bigger for the next for loop.
-                if len(singleByteMemberList) > greatestMemberListCount:
-                    greatestMemberListCount = len(singleByteMemberList)
-            
-            # Compare each byte of the classified members and get the most restrictive.
-            byteClasses: list[AssemblyClass] = []
-            for byteIndex in range(greatestMemberListCount):
-                # Join all the classes at this byteIndex in an array and sort it.
-                currentByteClasses: list[AssemblyClass] = []
-                for memberIndex in range(len(classifiedMembers)):
-                    # Check limits.
-                    if byteIndex >= len(classifiedMembers[memberIndex]):
-                        continue
-                    
-                    currentByteClasses.append(classifiedMembers[memberIndex][byteIndex])
-                
-                currentByteClasses.sort()
-                # The first is the highest priority class of this eightbyte.
-                byteClasses.append(AssemblyClass(currentByteClasses[0].classType, 1))
-
-            # Finally, group the bytes into eightbytes.
-            byteCount: int = 0
-            currentClass: AssemblyClassType = AssemblyClassType.NO_CLASS
-            for cl in byteClasses:
-                byteCount += 1
-
-                # Stick to the most strict class type.
-                if cl.classType.value < currentClass.value:
-                    currentClass = cl.classType
-
-                if byteCount == 8:
-                    # New eightbyte.
-                    memberClass.append(AssemblyClass(currentClass, 8))
-                    byteCount = 0
-                    currentClass = AssemblyClassType.NO_CLASS
-
-            # There may be an incomplete eightbyte at the end.
-            if byteCount != 0:
-                memberClass.append(AssemblyClass(currentClass, byteCount))
-        
-        return memberClass
-
-    @staticmethod
-    def fromTAC(tac: DeclaratorType) -> AssemblyType:
-        if isinstance(tac, BaseDeclaratorType):
-            match tac.baseType.name:
-                case "CHAR" | "SIGNED_CHAR" | "UCHAR":   
-                    return AssemblyType.BYTE
-                case "SHORT" | "USHORT":  
-                    return AssemblyType.WORD
-                case "INT" | "UINT":    
-                    return AssemblyType.LONGWORD
-                case "LONG" | "ULONG":   
-                    return AssemblyType.QUADWORD
-                case "DOUBLE": 
-                    return AssemblyType.DOUBLE
-                case "FLOAT": 
-                    return AssemblyType.FLOAT
-                case "STRUCT":
-                    return AssemblyType(
-                            AssemblyBaseType.BYTEARRAY, 
-                            tac.getByteSize(), tac.getAlignment(),
-                            members=AssemblyType._classifyStruct(tac))
-                case "UNION":
-                    return AssemblyType(
-                            AssemblyBaseType.BYTEARRAY, 
-                            tac.getByteSize(), tac.getAlignment(),
-                            members=AssemblyType._classifyUnion(tac))
-                case "ENUM":
-                    return AssemblyType.LONGWORD
-                case _:
-                    raise ValueError(f"Cannot convert {tac} to AssemblyType")
-        elif isinstance(tac, ArrayDeclaratorType):
-            byteLen = tac.getByteSize()
-            # As the System V x64 ABI says...
-            if byteLen > 16:
-                # Alignment is always 16 when the size of the array is greater than 16.
-                alignment = 16
-            else:
-                # Alignment is the same as the array base type.
-                alignment = tac.getArrayBaseType().getByteSize()
-
-            return AssemblyType(
-                AssemblyBaseType.BYTEARRAY, 
-                byteLen, alignment, 
-                members=AssemblyType._classifyArray(tac))
-        else:
-            # Both pointers and functions are quad values in 64 bit systems.
-            return AssemblyType.QUADWORD
-
-# Common assembly types.
-AssemblyType.DOUBLE      = AssemblyType(AssemblyBaseType.DOUBLE,    8, 8, "double", [AssemblyClass(AssemblyClassType.SSE,     8)])
-AssemblyType.FLOAT       = AssemblyType(AssemblyBaseType.FLOAT,     4, 4, "float",  [AssemblyClass(AssemblyClassType.SSE,     4)])
-AssemblyType.QUADWORD    = AssemblyType(AssemblyBaseType.QUADWORD,  8, 8, "quad",   [AssemblyClass(AssemblyClassType.INTEGER, 8)])
-AssemblyType.LONGWORD    = AssemblyType(AssemblyBaseType.LONGWORD,  4, 4, "long",   [AssemblyClass(AssemblyClassType.INTEGER, 4)])
-AssemblyType.WORD        = AssemblyType(AssemblyBaseType.WORD,      2, 2, "word",   [AssemblyClass(AssemblyClassType.INTEGER, 2)])
-AssemblyType.BYTE        = AssemblyType(AssemblyBaseType.BYTE,      1, 1, "byte",   [AssemblyClass(AssemblyClassType.INTEGER, 1)])
 
 class AssemblyAST(ABC):
     def __init__(self, parentAST: AssemblyAST|None = None) -> None:
@@ -825,23 +562,49 @@ class AssemblerFunction(AssemblyAST):
         return (intRegisterArgs, doubleRegisterArgs, False)
 
     def firstPass(self):
+        INT_REG_ORDER = [REG.DI, REG.SI, REG.DX, REG.CX, REG.R8, REG.R9]
+        DOUBLE_REG_ORDER = [REG.XMM0, REG.XMM1, REG.XMM2, REG.XMM3, REG.XMM4, REG.XMM5, REG.XMM6, REG.XMM7]
+
         self.identifier: str = self.function.identifier
 
         # Is the return value passed from the stack?
-        returnInStack = self.function.funDecl.typeId.returnDeclarator != TypeSpecifier.VOID.toBaseType() and \
-                        AssemblyType.fromTAC(self.function.funDecl.typeId.returnDeclarator). \
-                        members[0].classType == AssemblyClassType.MEMORY
+        self.returnInStack = \
+            self.function.funDecl.typeId.returnDeclarator != TypeSpecifier.VOID.toBaseType() and \
+            AssemblyType.fromTAC(self.function.funDecl.typeId.returnDeclarator). \
+            members[0].classType == AssemblyClassType.MEMORY
 
-        # Restart the stack to calculate the right offset.
-        # If the return value is stored in the stack, its address will be the first stack variable.
-        # TODO: For 64 bit systems, this is an 8 byte variable.
-        Memory.restartStackVariables(-8 if returnInStack else 0)
+        # If the function is variadic, first, dump all registers into a "Register Save Area".
+        if self.function.isVariadic:
+            # 48 bytes for integer registers and 128 bytes for double registers.
+            registerSaveOffset = -184 if self.returnInStack else -176 
+            Memory.restartStackVariables(registerSaveOffset)
 
-        # Create the variables used as arguments. These are stored in registers or in the stack.
+            for intReg in INT_REG_ORDER:
+                self.createInst(MOV,
+                                AssemblyType.QUADWORD,
+                                Register(AssemblyType.QUADWORD, intReg),
+                                Memory(AssemblyType.QUADWORD, REG.BP, registerSaveOffset))
+                registerSaveOffset += 8
+
+            for doubleReg in DOUBLE_REG_ORDER:
+                self.createInst(MOV,
+                                AssemblyType.QUADWORD,
+                                Register(AssemblyType.QUADWORD, doubleReg),
+                                Memory(AssemblyType.QUADWORD, REG.BP, registerSaveOffset))
+                registerSaveOffset += 16
+
+        else:
+            # Restart the stack to calculate the right offset.
+            # If the return value is stored in the stack, its address will be the first stack variable.
+            Memory.restartStackVariables(-8 if self.returnInStack else 0)
+
+        # Create the variables used as arguments. The function receives these values from registers 
+        # or from the stack.
         tacArgs = [TACValue(False, arg.type, arg.name) for arg in self.function.arguments]
-        intRegArgs, doubleRegArgs, stackInputArgs = self.classifyArguments(tacArgs, returnInStack)
+        self.intRegArgs, self.doubleRegArgs, self.stackInputArgs = self.classifyArguments(tacArgs, 
+                                                                                          self.returnInStack)
 
-        if returnInStack:
+        if self.returnInStack:
             # Store the address of the return value, which is stored in DI to the stack.
             self.createInst(MOV, 
                             AssemblyType.QUADWORD,
@@ -851,8 +614,7 @@ class AssemblerFunction(AssemblyAST):
         # The order of arguments is: DI, SI, DX, CX, R8, R9 and then stack (pushed in reversed order).
         # In parallel, double arguments must be pushed to XMM0 to XMM7 and then to the stack.
         # Do not use DI if the return value is stored in the stack.
-        INT_REG_ORDER = [REG.DI, REG.SI, REG.DX, REG.CX, REG.R8, REG.R9]
-        for (value, movAsmbType), reg in zip(intRegArgs, INT_REG_ORDER[(1 if returnInStack else 0):]):
+        for (value, movAsmbType), reg in zip(self.intRegArgs, INT_REG_ORDER[(1 if self.returnInStack else 0):]):
             if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                 self.instructions.extend(self.copyBytesFromRegister(reg, value, movAsmbType.size))
             else:
@@ -861,8 +623,7 @@ class AssemblerFunction(AssemblyAST):
                                 Register(value.assemblyType, reg), 
                                 value)
 
-        DOUBLE_REG_ORDER = [REG.XMM0, REG.XMM1, REG.XMM2, REG.XMM3, REG.XMM4, REG.XMM5, REG.XMM6, REG.XMM7]
-        for (value, movAsmbType), reg in zip(doubleRegArgs, DOUBLE_REG_ORDER):
+        for (value, movAsmbType), reg in zip(self.doubleRegArgs, DOUBLE_REG_ORDER):
             self.createInst(MOV, 
                             movAsmbType, 
                             Register(value.assemblyType, reg), 
@@ -870,7 +631,7 @@ class AssemblerFunction(AssemblyAST):
 
         # The arguments in the stack start at Stack(16). From then on, add in groups of eight.
         stackOffset = 16
-        for (value, movAsmbType) in stackInputArgs:
+        for (value, movAsmbType) in self.stackInputArgs:
             if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                 self.instructions.extend(
                     self.copyBytes(Memory(AssemblyType.QUADWORD, REG.BP, stackOffset), value, movAsmbType)
@@ -891,15 +652,15 @@ class AssemblerFunction(AssemblyAST):
             if not isinstance(inst, TACLabel):
                 self.createInst(COMMENT, inst.print())
 
-            # TODO: Temporary
-            if globalContext.isBuiltInTACFunction(inst):
+            if isinstance(inst, TACBuiltInFunction):
+                self.convertBuiltInTAC(inst)
                 continue
 
             match inst:
                 case TACReturn():
                     if inst.result.valueType != TypeSpecifier.VOID.toBaseType():
-                        intRegArgs, doubleRegArgs, returnInStack = self.classifyReturnValue(inst.result)
-                        if returnInStack:
+                        self.intRegArgs, self.doubleRegArgs, self.returnInStack = self.classifyReturnValue(inst.result)
+                        if self.returnInStack:
                             # Get the address of where the return value should be stored.
                             self.createInst(MOV, 
                                             AssemblyType.QUADWORD,
@@ -914,7 +675,7 @@ class AssemblerFunction(AssemblyAST):
                             INT_RETURN_REGS = [REG.AX, REG.DX]
                             DOUBLE_RETURN_REGS = [REG.XMM0, REG.XMM1]
 
-                            for (value, movAsmbType), reg in zip(intRegArgs, INT_RETURN_REGS):
+                            for (value, movAsmbType), reg in zip(self.intRegArgs, INT_RETURN_REGS):
                                 if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                                     self.instructions.extend(self.copyBytesToRegister(value, reg, movAsmbType.size))
                                 else:
@@ -923,7 +684,7 @@ class AssemblerFunction(AssemblyAST):
                                                     value, 
                                                     Register(value.assemblyType, reg))
 
-                            for (value, movAsmbType), reg in zip(doubleRegArgs, DOUBLE_RETURN_REGS):
+                            for (value, movAsmbType), reg in zip(self.doubleRegArgs, DOUBLE_RETURN_REGS):
                                 self.createInst(MOV, 
                                                 movAsmbType, 
                                                 value, 
@@ -1228,13 +989,13 @@ class AssemblerFunction(AssemblyAST):
                 case TACFunctionCall():
                     returnIntRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
                     returnDoubleRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
-                    returnInStack: bool = False
+                    self.returnInStack: bool = False
 
                     # Classify the return value.
                     if inst.returnType != TypeSpecifier.VOID.toBaseType():
-                        returnIntRegs, returnDoubleRegs, returnInStack = self.classifyReturnValue(inst.result)
+                        returnIntRegs, returnDoubleRegs, self.returnInStack = self.classifyReturnValue(inst.result)
 
-                    if returnInStack:
+                    if self.returnInStack:
                         # When the value is returned in the stack, the return value's space is 
                         # reserved on the caller. It's address is stored in DI.
                         retAsmbVal = self.fromTACValue(inst.result)
@@ -1242,7 +1003,7 @@ class AssemblerFunction(AssemblyAST):
                         self.createInst(LEA, retAsmbVal, Register(AssemblyType.QUADWORD, REG.DI))
 
                     # Split between arguments stored in registers and arguments stored in the stack.
-                    intRegisterArgs, doubleRegisterArgs, stackArgs = self.classifyArguments(inst.arguments, returnInStack)
+                    intRegisterArgs, doubleRegisterArgs, stackArgs = self.classifyArguments(inst.arguments, self.returnInStack)
 
                     # The stack needs to be padded so that the function arguments start from a 
                     # multiple of 16. Each cell in the stack is 8 bytes long.
@@ -1264,7 +1025,7 @@ class AssemblerFunction(AssemblyAST):
                     # reversed order).
                     # Skip DI if the return value is saved in the stack, it contains the address of 
                     # the return value.
-                    for (value, movAsmbType), reg in zip(intRegisterArgs, INT_REG_ORDER[(1 if returnInStack else 0):]):
+                    for (value, movAsmbType), reg in zip(intRegisterArgs, INT_REG_ORDER[(1 if self.returnInStack else 0):]):
                         if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                             # There may be part of a struct/union returned in a register whose byte 
                             # size is not standard, i.e. 3, 5, 6 or 7 bytes.
@@ -1306,6 +1067,14 @@ class AssemblerFunction(AssemblyAST):
                             self.createInst(MOV, movAsmbType, value, Register(movAsmbType, REG.AX))
                             self.createInst(PUSH, Register(AssemblyType.QUADWORD, REG.AX))
                     
+                    # Store in AL (RAX) the number of double values passed as arguemnts if the 
+                    # function called accepts variadic arguments.
+                    if inst.isVariadic:
+                        self.createInst(MOV, 
+                                        AssemblyType.BYTE,
+                                        self.fromTACValue(TACValue(True, TypeSpecifier.CHAR.toBaseType(), str(len(doubleRegisterArgs)))),
+                                        Register(AssemblyType.BYTE, REG.AX))
+
                     # Emit the call instruction.
                     self.createInst(CALL, inst.identifier)
 
@@ -1320,7 +1089,7 @@ class AssemblerFunction(AssemblyAST):
                     
                     # Retrieve the return value if function is not void and the return value is not 
                     # stored in the stack.
-                    if inst.returnType != TypeSpecifier.VOID.toBaseType() and not returnInStack:
+                    if inst.returnType != TypeSpecifier.VOID.toBaseType() and not self.returnInStack:
                         INT_RETURN_REGS = [REG.AX, REG.DX]
                         DOUBLE_RETURN_REGS = [REG.XMM0, REG.XMM1]
 
@@ -1523,6 +1292,183 @@ class AssemblerFunction(AssemblyAST):
 
                 case _:
                     raise ValueError(f"Unexpected statement {inst} when parsing an AssemblerFunction")
+
+    def convertBuiltInTAC(self, tac: TACBuiltInFunction):
+        match tac:
+            case TACBuiltIn_va_start():
+                # Remember, param_ap is the address of the va_list.
+                param_ap = self.fromTACValue(tac.param_ap)
+
+                # Store this address in AX.
+                self.createInst(MOV, 
+                                AssemblyType.QUADWORD, 
+                                param_ap, 
+                                Register(AssemblyType.QUADWORD, REG.AX))
+
+                # Fills a va_list. Use memory addresses with (AX).
+                gp_offset = Memory(AssemblyType.QUADWORD, REG.AX, 0)
+                fp_offset = Memory(AssemblyType.QUADWORD, REG.AX, 4)
+                overflow_arg_area = Memory(AssemblyType.QUADWORD, REG.AX, 8)
+                reg_save_area = Memory(AssemblyType.QUADWORD, REG.AX, 16)
+
+                # - gp_offset: General Purpose Offset. Calculated from the number of integer 
+                # arguments that are passed.
+                gp_offset_value = self.fromTACValue(TACValue(
+                    True, TypeSpecifier.UINT.toBaseType(), str(len(self.intRegArgs) * 8)))
+                self.createInst(MOV, AssemblyType.LONGWORD, gp_offset_value, gp_offset)
+
+                # - fp_offset: Floating Point Offset. Calculated from the number of double arguments
+                # that are passed plus 48 (the base offset of double registers in the Register Save 
+                # Area).
+                fp_offset_value = self.fromTACValue(TACValue(
+                    True, TypeSpecifier.UINT.toBaseType(), str(48 + len(self.doubleRegArgs) * 16)))
+                self.createInst(MOV, AssemblyType.LONGWORD, fp_offset_value, fp_offset)
+
+                # - overflow_arg_area: Where stack arguments reside (rbp + 16).
+                self.createInst(LEA, 
+                                Memory(AssemblyType.QUADWORD, REG.BP, 16), 
+                                Register(AssemblyType.QUADWORD, REG.DX))
+                self.createInst(MOV, 
+                                AssemblyType.QUADWORD, 
+                                Register(AssemblyType.QUADWORD, REG.DX), 
+                                overflow_arg_area)
+
+                # - reg_save_area. If the return is not stored in the address, points to rbp - 176.
+                # If the return is passed as an address, points to rbp - 184.
+                save_area_offset = -184 if self.returnInStack else -176
+                self.createInst(LEA, 
+                                Memory(AssemblyType.QUADWORD, REG.BP, save_area_offset), 
+                                Register(AssemblyType.QUADWORD, REG.R11))
+                self.createInst(MOV, 
+                                AssemblyType.QUADWORD, 
+                                Register(AssemblyType.QUADWORD, REG.R11), 
+                                reg_save_area)
+
+
+            case TACBuiltIn_va_arg():
+                # Remember, param_ap is the address of the va_list.
+                param_ap = self.fromTACValue(tac.param_ap)
+
+                # Store this address in AX.
+                self.createInst(MOV, 
+                                AssemblyType.QUADWORD, 
+                                param_ap, 
+                                Register(AssemblyType.QUADWORD, REG.AX))
+
+                # Fills a va_list. Use memory addresses with (AX).
+                gp_offset = Memory(AssemblyType.QUADWORD, REG.AX, 0)
+                fp_offset = Memory(AssemblyType.QUADWORD, REG.AX, 4)
+                overflow_arg_area = Memory(AssemblyType.QUADWORD, REG.AX, 8)
+                reg_save_area = Memory(AssemblyType.QUADWORD, REG.AX, 16)
+
+                fromOverflowLabel = TACLabel.getNewLabelName()
+                endFunctionLabel = TACLabel.getNewLabelName()
+
+                # Check if the fetched type fits in registers (get the class of the type).
+                fetchedType = AssemblyType.fromTAC(tac.param_type)
+
+                if fetchedType.members[0].classType != AssemblyClassType.MEMORY:
+                    # The value can be initially fetched from the register save area.
+                    # - Calculate how many registers are needed to fetch the value.
+                    num_gp = 0
+                    num_fp = 0
+                    for member in fetchedType.members:
+                        if member.classType == AssemblyClassType.INTEGER:
+                            num_gp += 1
+                        elif member.classType == AssemblyClassType.SSE:
+                            num_fp += 1
+                        else:
+                            raise ValueError()
+                    # - Verify wether arguments fit into registers.
+                    if num_gp > 0:
+                        # gp_offset > 48 - num_gp * 8
+                        self.createInst(CMP, 
+                                        AssemblyType.LONGWORD, 
+                                        self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(48 - num_gp*8))),
+                                        gp_offset)
+                        self.createInst(JMPIF, ConditionCode.ABOVE, fromOverflowLabel)
+                    if num_fp > 0:
+                        # fp_offset > 176 - num_fp * 16
+                        self.createInst(CMP, 
+                                        AssemblyType.LONGWORD, 
+                                        self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(176 - num_fp*16))),
+                                        fp_offset)
+                        self.createInst(JMPIF, ConditionCode.ABOVE, fromOverflowLabel)
+
+                    # - If this point is reached, the value can be fetch from registers.
+                    # Get the address of the reg_save_area -> CX.
+                    self.createInst(MOV, 
+                                    AssemblyType.QUADWORD,
+                                    reg_save_area,
+                                    Register(AssemblyType.QUADWORD, REG.CX))
+                    
+                    memberOffset: int = 0
+                    for member in fetchedType.members:
+                        if member.classType == AssemblyClassType.INTEGER:
+                            offsetToUse = gp_offset
+                            finalIncrementToOffset = "8"
+                        elif member.classType == AssemblyClassType.SSE:
+                            offsetToUse = fp_offset
+                            finalIncrementToOffset = "16"
+                        else:
+                            raise ValueError()
+
+                        # Calculate where the data is: reg_save_area (CX) + gp_offset/fp_offset (DX) -> DX
+                        self.createInst(MOV, 
+                                        AssemblyType.LONGWORD,
+                                        offsetToUse,
+                                        Register(AssemblyType.LONGWORD, REG.DX))
+                        self.createInst(LEA, 
+                                        Indexed(
+                                            AssemblyType.QUADWORD, 
+                                            Register(AssemblyType.QUADWORD, REG.CX), 
+                                            Register(AssemblyType.QUADWORD, REG.DX), 
+                                            1
+                                        ), 
+                                        Register(AssemblyType.QUADWORD, REG.DX))
+                        
+                        # Copy the member data from (DX) to its place.
+                        copyInsts = self.copyBytes(Memory(AssemblyType.QUADWORD, REG.DX, 0), 
+                                                    self.fromTACValue(tac.result, memberOffset), 
+                                                    member.toAssemblyType())
+                        self.instructions.extend(copyInsts)
+                        # Increment gp_offset by 8 or fp_offset by 16.
+                        self.createInst(BINARY, AssemblyType.LONGWORD, 
+                                        BinaryOperator.SUM,
+                                        self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), finalIncrementToOffset)),
+                                        offsetToUse)
+                        # Calculate the next member offset.
+                        memberOffset += member.byteSize
+                    
+                    self.createInst(JMP, endFunctionLabel)
+                            
+                # - The value is fetched from the overflow argument area.
+                self.createInst(LABEL, fromOverflowLabel)
+
+                # Get the address of the overflow_arg_area -> CX.
+                self.createInst(MOV, 
+                                AssemblyType.QUADWORD,
+                                overflow_arg_area,
+                                Register(AssemblyType.QUADWORD, REG.CX))
+
+                # Fetch the content from the overflow_arg_area (CX).
+                copyInsts = self.copyBytes(Memory(AssemblyType.QUADWORD, REG.CX, 0), 
+                                            self.fromTACValue(tac.result), 
+                                            fetchedType)
+                self.instructions.extend(copyInsts)
+
+                # Increment overflow_arg_area by the size of the type. Maintain it always at a 
+                # multiple of eight.
+                alignedReadBytes = 8 * math.ceil(fetchedType.size / 8)
+                self.createInst(BINARY, AssemblyType.LONGWORD, 
+                                BinaryOperator.SUM,
+                                self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(alignedReadBytes))),
+                                overflow_arg_area)
+
+                self.createInst(LABEL, endFunctionLabel)
+                
+            case TACBuiltIn_va_end():
+                pass
 
     def secondPass(self):
         for inst in self.instructions:

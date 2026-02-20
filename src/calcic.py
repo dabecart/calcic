@@ -13,6 +13,7 @@ import os
 import traceback
 import enum
 import sys
+from pathlib import Path
 
 from src import lexer, parser, TAC
 from src import TAC_optimizer as optimizer
@@ -21,6 +22,8 @@ from src.global_context import globalContext
 
 from src.x64 import builtin_types_x64
 from src.x64 import assembler_x64
+
+USE_GCC_LIBRARIES: bool = False
 
 class TargetArchitectures(enum.Enum):
     x64 = "x64"
@@ -118,7 +121,15 @@ def main() -> None:
     PREPROCESSOR
     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     """
-    preprocessStatus = subprocess.run(["gcc", "-E", inputFile, "-o", f"{inputFileBasename}.i"])
+    # Use the calcic standard libraries and not the GCC's.
+    preprocessCommand = ["gcc", "-E", inputFile, "-o", f"{inputFileBasename}.i"]
+    if not USE_GCC_LIBRARIES:
+        # Set the lib folder as a system directory for the preprocessor.
+        calcicFolder = Path(__file__).parent.parent.resolve()
+        libPath = calcicFolder / "lib"
+        preprocessCommand += ["-nostdinc", "-isystem", str(libPath)]
+    
+    preprocessStatus = subprocess.run(preprocessCommand)
     retCode = preprocessStatus.returncode
 
     if retCode != 0:

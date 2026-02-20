@@ -310,8 +310,11 @@ class TAC(ABC):
                 for argExp in exp.argumentList:
                     argVal = self.parseTACExpression(argExp, insts).convert()
                     argValues.append(argVal)
+
                 # Call the function.
-                funcCall = self.createChild(TACFunctionCall, exp.funcIdentifier, exp.typeId, argValues, insts)
+                funcCall = self.createChild(TACFunctionCall, 
+                                            exp.funcIdentifier, exp.typeId, argValues, 
+                                            exp.isFunctionVariadic, insts)
                 return TACBaseOperand(funcCall.result, exp.typeId, insts)
 
             case Cast():
@@ -959,6 +962,7 @@ class TACFunction(TACTopLevel):
         self.arguments = self.funDecl.definedArgumentList
         self.instructions: list[TACInstruction] = []
         self.isGlobal = self.funDecl.isGlobal
+        self.isVariadic = self.funDecl.typeId.hasEllipsis
         
         # Convert the function's body into a list of instructions.
         if self.funDecl.body is None:
@@ -1521,11 +1525,12 @@ class TACLabel(TACInstruction):
         return identifier
     
 class TACFunctionCall(TACInstruction):
-    def __init__(self, identifier: str, returnType: DeclaratorType, arguments: list[TACValue],
+    def __init__(self, identifier: str, returnType: DeclaratorType, arguments: list[TACValue], isVariadic: bool,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
         self.identifier = identifier
         self.returnType = returnType
         self.arguments = arguments
+        self.isVariadic = isVariadic
         super().__init__(instructionsList, parentTAC)
 
     def parse(self) -> TACValue:
