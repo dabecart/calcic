@@ -2193,31 +2193,45 @@ class VariableDeclaration(Declaration):
             ret += f"{pad})\n"
             return ret
 
-class StructMemberDeclaration(AST):
+@dataclass
+class MemberInformation:
+    typeId: DeclaratorType
+    name: str
+    # The offset gets written in StructDeclaration. It is not used by UnionDeclaration.
+    offset: int = -1
+
+class MemberDeclaration(AST):
     def parse(self, *args):
+        self.declarations: list[MemberInformation] = []
+
         _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
-        declarator = self.createChild(TopDeclarator)
-        info: DeclaratorInformation = declarator.process(declType)
+        
+        while True:
+            declarator = self.createChild(TopDeclarator)
+            info: DeclaratorInformation = declarator.process(declType)
 
-        self.typeId = info.type
-        self.name = info.name
-        # The offset gets written in StructDeclaration.
-        self.offset: int = -1
+            if not info.type.isComplete():
+                self.raiseError("Cannot use incomplete type inside a member declaration")
+            
+            decl = MemberInformation(info.type, info.name)
+            self.declarations.append(decl)
 
-        if not self.typeId.isComplete():
-            self.raiseError("Cannot use incomplete type inside a struct declaration")
-
-        self.expect(";")
+            nextToken = self.expect(",", ";")
+            if nextToken.id == ";":
+                break
 
     def print(self, padding: int) -> str:
         pad = " " * padding
-        return f'{pad}{self.typeId} {self.name}'
+        ret = ""
+        for decl in self.declarations:
+            ret += f'{pad}{decl.typeId} {decl.name}'
+        return ret
 
 class StructDeclaration(Declaration):
     ANONYMOUS_STRUCT_COUNT: int = 0
 
     def parse(self):
-        self.members: list[StructMemberDeclaration] = []
+        self.members: list[MemberInformation] = []
         self.byteSize: int = -1
         self.alignment: int = -1
 
@@ -2279,23 +2293,26 @@ class StructDeclaration(Declaration):
 
             # Must always have at least one member.
             while True:
-                decl = self.createChild(StructMemberDeclaration)
-                declAlignment = decl.typeId.getAlignment()
-                decl.offset = declAlignment * math.ceil(self.byteSize / declAlignment)
+                # This may contain multiple declarations of the same base type.
+                decls = self.createChild(MemberDeclaration).declarations
 
-                # The name of the declaration must not be repeated.
-                for mem in self.members:
-                    if mem.name == decl.name:
-                        self.raiseError(f"Duplicated member with name {decl.name}")
-                self.members.append(decl)
+                for decl in decls:
+                    declAlignment = decl.typeId.getAlignment()
+                    decl.offset = declAlignment * math.ceil(self.byteSize / declAlignment)
 
-                # The alignment of the structure must be the greatest alignment of it members.
-                if declAlignment > self.alignment:
-                    self.alignment = declAlignment
+                    # The name of the declaration must not be repeated.
+                    for mem in self.members:
+                        if mem.name == decl.name:
+                            self.raiseError(f"Duplicated member with name {decl.name}")
+                    self.members.append(decl)
 
-                # Add the size of the member plus the offset added between the current member and the
-                # previous one.
-                self.byteSize += decl.typeId.getByteSize() + (decl.offset - self.byteSize)
+                    # The alignment of the structure must be the greatest alignment of it members.
+                    if declAlignment > self.alignment:
+                        self.alignment = declAlignment
+
+                    # Add the size of the member plus the offset added between the current member and the
+                    # previous one.
+                    self.byteSize += decl.typeId.getByteSize() + (decl.offset - self.byteSize)
 
                 if self.peek().id == "}":
                     break
@@ -2335,29 +2352,11 @@ class StructDeclaration(Declaration):
             ret =f'{pad}Struct({self.typeId})\n'
         return ret
 
-class UnionMemberDeclaration(AST):
-    def parse(self, *args):
-        _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
-        declarator = self.createChild(TopDeclarator)
-        info: DeclaratorInformation = declarator.process(declType)
-
-        self.typeId = info.type
-        self.name = info.name
-
-        if not self.typeId.isComplete():
-            self.raiseError("Cannot use incomplete type inside an enum declaration")
-
-        self.expect(";")
-
-    def print(self, padding: int) -> str:
-        pad = " " * padding
-        return f'{pad}{self.typeId} {self.name}'
-
 class UnionDeclaration(Declaration):
     ANONYMOUS_UNION_COUNT: int = 0
 
     def parse(self):
-        self.members: list[UnionMemberDeclaration] = []
+        self.members: list[MemberInformation] = []
         self.byteSize: int = -1
         self.alignment: int = -1
 
@@ -2420,23 +2419,26 @@ class UnionDeclaration(Declaration):
 
             # Must always have at least one member.
             while True:
-                decl = self.createChild(UnionMemberDeclaration)
-                declAlignment = decl.typeId.getAlignment()
-                declSize = decl.typeId.getByteSize()
+                # This may contain multiple declarations of the same base type.
+                decls = self.createChild(MemberDeclaration).declarations
 
-                # The name of the declaration must not be repeated.
-                for mem in self.members:
-                    if mem.name == decl.name:
-                        self.raiseError(f"Duplicated member with name {decl.name}")
-                self.members.append(decl)
+                for decl in decls:
+                    declAlignment = decl.typeId.getAlignment()
+                    declSize = decl.typeId.getByteSize()
 
-                # The alignment of the union must be the greatest alignment of it members.
-                if declAlignment > self.alignment:
-                    self.alignment = declAlignment
+                    # The name of the declaration must not be repeated.
+                    for mem in self.members:
+                        if mem.name == decl.name:
+                            self.raiseError(f"Duplicated member with name {decl.name}")
+                    self.members.append(decl)
 
-                # The size of the union is the size of the biggest member.
-                if declSize > self.byteSize:
-                    self.byteSize = declSize
+                    # The alignment of the union must be the greatest alignment of it members.
+                    if declAlignment > self.alignment:
+                        self.alignment = declAlignment
+
+                    # The size of the union is the size of the biggest member.
+                    if declSize > self.byteSize:
+                        self.byteSize = declSize
 
                 if self.peek().id == "}":
                     break
