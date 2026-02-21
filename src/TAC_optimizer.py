@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.TAC import *
+from src.builtin.builtin_functions_TAC import *
 from src.calcic_types import *
 
 MAX_ITERATION_STEPS: int = 30
@@ -330,7 +331,7 @@ class ControlFlowNode:
     """
     # Iterates over each instruction and anotates each one with the TACCopy instructions that reach
     # it. This will be used to run the Copy Propagation algorithm. 
-    # - startingCopies receives the reaching copy instructions from a predecessor node.
+    # - startingCopies receives the reaching copy instructions from the predecessor nodes.
     # - aliased contains the variables whose address is calculated at some point in the code.
     # At the end, the block gets anotated with the reaching copies of the last instruction.
     # Note: This function is also called the transfer function in Data Flow Analysis.
@@ -350,10 +351,11 @@ class ControlFlowNode:
 
                     # Search for copies inside reachingCopies which get modified (or killed) by this 
                     # instruction.
-                    copiesToRemove: set[TACCopy] = set()
-                    for copy in reachingCopies:
-                        if inst.dst in (copy.src, copy.dst):
-                            copiesToRemove.add(copy)
+                    copiesToRemove: set[TACCopy] = set([
+                        c
+                        for c in reachingCopies
+                        if inst.dst in (c.src, c.dst)
+                    ])
                     reachingCopies -= copiesToRemove
 
                     # Add the current copy to the reachingCopies set only if its operands are the 
@@ -370,25 +372,26 @@ class ControlFlowNode:
                 
                 case TACFunctionCall():
                     # Instead of analyzing the behavior of the function being called and how it 
-                    # affects the reaching copies of static variables, whenever a function call is 
-                    # made, all reaching copies related with static variables will get killed.
+                    # affects the reaching copies of aliased variables, whenever a function call is 
+                    # made, all reaching copies related with aliased variables will get killed.
                     # Take also into account the returning value of the function call: if it is 
                     # modified, it also gets killed.
-                    copiesToRemove: set[TACCopy] = set()
-                    for copy in reachingCopies:
-                        if copy.src in aliased or copy.dst in aliased or \
-                           inst.result in (copy.src, copy.dst):
-                            copiesToRemove.add(copy)
+                    copiesToRemove: set[TACCopy] = set([
+                        c
+                        for c in reachingCopies
+                        if c.src in aliased or c.dst in aliased or inst.result in (c.src, c.dst)
+                    ])
                     reachingCopies -= copiesToRemove
 
                 case TACStore():
                     # We are going to suppose that a TACStore updates all aliased variables (this 
                     # is a very conservative approach). Therefore, all copies with aliased variables
                     # will get killed.
-                    copiesToRemove: set[TACCopy] = set()
-                    for copy in reachingCopies:
-                        if copy.src in aliased or copy.dst in aliased:
-                            copiesToRemove.add(copy)
+                    copiesToRemove: set[TACCopy] = set([
+                        c
+                        for c in reachingCopies
+                        if c.src in aliased or c.dst in aliased
+                    ])
                     reachingCopies -= copiesToRemove
 
                 case TACUnary() | TACBinary() | TACSignExtend() | TACZeroExtend() | \
@@ -398,34 +401,25 @@ class ControlFlowNode:
                      TACCopyToOffset() | TACCopyFromOffset():
                     # These instructions only kill copies if their result modify one either the 
                     # source or destination of a reaching copy.
-                    copiesToRemove: set[TACCopy] = set()
-                    for copy in reachingCopies:
-                        if inst.result in (copy.src, copy.dst):
-                            copiesToRemove.add(copy)
+                    copiesToRemove: set[TACCopy] = set([
+                        c
+                        for c in reachingCopies
+                        if inst.result in (c.src, c.dst)
+                    ])
                     reachingCopies -= copiesToRemove
 
                 case TACReturn() | TACLabel() | \
                      TACJump() | TACJumpIfZero() | TACJumpIfNotZero() | TACJumpIfValue():
                     continue
 
+                case TACBuiltInFunction():
+                    inst.anotateReachingCopies(reachingCopies, aliased)
+
                 case _:
                     raise ValueError(f"Cannot anotate reaching copies of a {type(inst)} instruction")
         
         self.reachingCopies = reachingCopies
 
-    def _replaceOperand(self, operand: TACValue, instReachingCopies: set[TACCopy]) -> tuple[bool, TACValue]:
-        if operand.isConstant:
-            return (False, operand)
-        
-        # E.g. if we reach z = y + 10, and before that we had y = x (Copy x to y), we can replace y 
-        # by x.
-        for copy in instReachingCopies:
-            # Don't substitute something with the same thing! It creates an infinite loop!
-            if copy.dst == operand and copy.src != operand:
-                return (True, copy.src)
-        
-        return (False, operand)
-    
     def _rewriteInstWithReachingCopies(self, inst: TACInstruction) -> TACInstruction|None:
         # If the instruction is not replaceable, the same instruction will be returned at the end of 
         # this function.
@@ -437,27 +431,27 @@ class ControlFlowNode:
                     if (copy == inst) or (copy.src == inst.dst and copy.dst == inst.src):
                         return None
                     
-                isReplaceable, newSrc = self._replaceOperand(inst.src, inst.reachingCopies)
+                isReplaceable, newSrc = inst.replaceOperand(inst.src)
                 if isReplaceable:
                     return TACCopy(newSrc, inst.dst, [])
             
             case TACUnary():
-                isReplaceable, newExp = self._replaceOperand(inst.exp, inst.reachingCopies)
+                isReplaceable, newExp = inst.replaceOperand(inst.exp)
                 if isReplaceable:
                     ret = TACUnary(inst.operator, newExp, [])
                     ret.result = inst.result
                     return ret
             
             case TACBinary():
-                isReplaceable1, newExp1 = self._replaceOperand(inst.exp1, inst.reachingCopies)
-                isReplaceable2, newExp2 = self._replaceOperand(inst.exp2, inst.reachingCopies)
+                isReplaceable1, newExp1 = inst.replaceOperand(inst.exp1)
+                isReplaceable2, newExp2 = inst.replaceOperand(inst.exp2)
                 if isReplaceable1 or isReplaceable2:
                     ret = TACBinary(inst.operator, newExp1, newExp2, instructionsList=[])
                     ret.result = inst.result
                     return ret
 
             case TACReturn():
-                isReplaceable, newResult = self._replaceOperand(inst.result, inst.reachingCopies)
+                isReplaceable, newResult = inst.replaceOperand(inst.result)
                 if isReplaceable:
                     ret = TACReturn(newResult, [])
                     return ret
@@ -466,25 +460,25 @@ class ControlFlowNode:
                 isReplaceable: bool = False
                 newArguments: list[TACValue] = []
                 for arg in inst.arguments:
-                    isArgumentReplaceable, newArgument = self._replaceOperand(arg, inst.reachingCopies)
+                    isArgumentReplaceable, newArgument = inst.replaceOperand(arg)
                     
                     isReplaceable = isReplaceable or isArgumentReplaceable
                     newArguments.append(newArgument)
                 
                 if isReplaceable:
-                    ret = TACFunctionCall(inst.identifier, inst.returnType, newArguments, [])
+                    ret = TACFunctionCall(inst.identifier, inst.returnType, newArguments, inst.isVariadic, [])
                     ret.result = inst.result
                     return ret
                 
             case TACJumpIfZero() | TACJumpIfNotZero():
-                isReplaceable, newCondition = self._replaceOperand(inst.condition, inst.reachingCopies)
+                isReplaceable, newCondition = inst.replaceOperand(inst.condition)
                 if isReplaceable:
                     ret = type(inst)(newCondition, inst.target, [])
                     return ret
 
             case TACJumpIfValue():
-                isConditionReplaceable, newCondition = self._replaceOperand(inst.condition, inst.reachingCopies)
-                isValueReplaceable, newValue = self._replaceOperand(inst.value, inst.reachingCopies)
+                isConditionReplaceable, newCondition = inst.replaceOperand(inst.condition)
+                isValueReplaceable, newValue = inst.replaceOperand(inst.value)
                 if isConditionReplaceable or isValueReplaceable:
                     ret = TACJumpIfValue(newCondition, newValue, inst.target, [])
                     return ret
@@ -492,30 +486,30 @@ class ControlFlowNode:
             case TACSignExtend() | TACZeroExtend() |  TACTruncate() | \
                  TACDecimalToDecimal() | TACDecimalToInt() | TACDecimalToUInt() | \
                  TACIntToDecimal() | TACUIntToDecimal():
-                isReplaceable, newExp = self._replaceOperand(inst.exp, inst.reachingCopies)
+                isReplaceable, newExp = inst.replaceOperand(inst.exp)
                 if isReplaceable:
                     ret = type(inst)(newExp, inst.castType, [])
                     ret.result = inst.result
                     return ret
             
             case TACLoad() | TACStore():
-                isReplaceable, newSrc = self._replaceOperand(inst.src, inst.reachingCopies)
+                isReplaceable, newSrc = inst.replaceOperand(inst.src)
                 if isReplaceable:
                     return type(inst)(newSrc, inst.dst, [])
                 
             case TACAddToPointer():
-                isPointerReplaceable, newPointer = self._replaceOperand(inst.pointer, inst.reachingCopies)
-                isIndexReplaceable, newIndex = self._replaceOperand(inst.index, inst.reachingCopies)
+                isPointerReplaceable, newPointer = inst.replaceOperand(inst.pointer)
+                isIndexReplaceable, newIndex = inst.replaceOperand(inst.index)
                 if isPointerReplaceable or isIndexReplaceable:
                     return TACAddToPointer(newPointer, newIndex, inst.scale, inst.dst, [])
 
             case TACCopyToOffset():
-                isReplaceable, newSrc = self._replaceOperand(inst.src, inst.reachingCopies)
+                isReplaceable, newSrc = inst.replaceOperand(inst.src)
                 if isReplaceable:
                     return TACCopyToOffset(newSrc, inst.dst, inst.byteOffset, [])
 
             case TACCopyFromOffset():
-                isReplaceable, newSrc = self._replaceOperand(inst.src, inst.reachingCopies)
+                isReplaceable, newSrc = inst.replaceOperand(inst.src)
                 if isReplaceable:
                     return TACCopyFromOffset(newSrc, inst.byteOffset, inst.dst, [])
 
@@ -524,8 +518,11 @@ class ControlFlowNode:
                 # source cannot be substituted.
                 pass
 
+            case TACBuiltInFunction():
+                return inst.rewriteWithReachingCopies()
+
             case _:
-                raise ValueError(f"Invalid instruction {type(inst)}")
+                raise ValueError(f"Cannot rewrite {type(inst)} with reaching copies")
 
         return inst
 
@@ -652,6 +649,9 @@ class ControlFlowNode:
                 case TACLabel() | TACJump():
                     continue
 
+                case TACBuiltInFunction():
+                    inst.anotateLiveVariables(liveVariables, aliasedVariables)
+
                 case _:
                     raise ValueError(f"Cannot anotate live variables of a {type(inst)} instruction")
         
@@ -659,7 +659,7 @@ class ControlFlowNode:
 
     def _isDeadStore(self, inst: TACInstruction) -> bool:
         match inst:
-            case TACFunctionCall():
+            case TACFunctionCall() | TACBuiltInFunction():
                 # We cannot eliminate function calls as they may affect other parts of the code.
                 return False
             

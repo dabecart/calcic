@@ -962,7 +962,7 @@ class TACFunction(TACTopLevel):
         self.arguments = self.funDecl.definedArgumentList
         self.instructions: list[TACInstruction] = []
         self.isGlobal = self.funDecl.isGlobal
-        self.isVariadic = self.funDecl.typeId.hasEllipsis
+        self.isVariadic = self.funDecl.typeId.variadic
         
         # Convert the function's body into a list of instructions.
         if self.funDecl.body is None:
@@ -1006,6 +1006,20 @@ class TACInstruction(TAC):
     @abstractmethod
     def print(self) -> str:
         pass
+
+    # Used on the optimizer stage.
+    def replaceOperand(self, operand: TACValue) -> tuple[bool, TACValue]:
+        if operand.isConstant:
+            return (False, operand)
+        
+        # E.g. if we reach z = y + 10, and before that we had y = x (Copy x to y), we can replace y 
+        # by x.
+        for copy in self.reachingCopies:
+            # Don't substitute something with the same thing! It creates an infinite loop!
+            if copy.dst == operand and copy.src != operand:
+                return (True, copy.src)
+        
+        return (False, operand)
 
 class TACReturn(TACInstruction):
     def __init__(self, retValue: TACValue, 

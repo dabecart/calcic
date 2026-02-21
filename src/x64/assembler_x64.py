@@ -72,12 +72,7 @@ class AssemblyAST(ABC):
         if tacValue.isConstant:
             # First, check if the constant is defined inside the AssemblerStaticConstant.CONSTANTS 
             # array.
-            found: AssemblerStaticConstant|None = None
-            for cnst in AssemblerStaticConstant.CONSTANTS:
-                if cnst.identifier == tacValue.constantValue:
-                    found = cnst
-                    break
-
+            found: AssemblerStaticConstant|None = AssemblerStaticConstant.CONSTANTS_MAP.get(tacValue.constantValue)
             if found is not None:
                 return Data(AssemblyType.fromTAC(tacValue.valueType), found.identifier, 0, self)
 
@@ -289,12 +284,19 @@ class AssemblerStaticVariable(AssemblyAST):
                     ret += f"\t.zero {const.byteCount}\n"
                 elif isinstance(const, PointerInitializer):
                     asmbType = AssemblyType.fromTAC(const.typeId)
-                    if const.offset > 0:
-                        ret += f"\t.{asmbType.getDataSectionName()} {const.constValue}+{const.offset}\n"
-                    elif const.offset == 0:
-                        ret += f"\t.{asmbType.getDataSectionName()} {const.constValue}\n"
+                    
+                    # Constant may be aliased with another name to avoid duplicated constants.
+                    if const.constValue in AssemblerStaticConstant.CONSTANTS_MAP:
+                        identifier = AssemblerStaticConstant.CONSTANTS_MAP[const.constValue].identifier
                     else:
-                        ret += f"\t.{asmbType.getDataSectionName()} {const.constValue}{const.offset}\n"
+                        identifier = const.constValue
+
+                    if const.offset > 0:
+                        ret += f"\t.{asmbType.getDataSectionName()} {identifier}+{const.offset}\n"
+                    elif const.offset == 0:
+                        ret += f"\t.{asmbType.getDataSectionName()} {identifier}\n"
+                    else:
+                        ret += f"\t.{asmbType.getDataSectionName()} {identifier}{const.offset}\n"
                 else:
                     asmbType = AssemblyType.fromTAC(const.typeId)
                     ret += f"\t.{asmbType.getDataSectionName()} {const.constValue}\n"
@@ -307,44 +309,63 @@ class AssemblerStaticVariable(AssemblyAST):
         return ret    
     
 class AssemblerStaticConstant(AssemblyAST):
+    # Stores the static constants of the program, without duplicates.
     CONSTANTS: list[AssemblerStaticConstant] = []
+    # Key: identifier of the TACValue. Value: corresponding constant in the assembler.
+    # Example: you may have str.0 = str.1 = "hi!". To save up space, both str.0 and str.1 will point
+    # to the same constant.
+    CONSTANTS_MAP: dict[str, AssemblerStaticConstant] = {}
 
     # Utility to generate constants during the assembly stage.
     @staticmethod
     def newSimpleConstant(valueType: DeclaratorType, initialization: str, alignment: int|None = None) -> AssemblerStaticConstant:
-        for prevConst in AssemblerStaticConstant.CONSTANTS:
-            if prevConst.valueType == valueType and prevConst.initialization == initialization:
-                return prevConst
+        asmbType = AssemblyType.fromTAC(valueType)
+        initializationList: list[tuple[str, str]] = [(asmbType.getDataSectionName(), initialization)]
+
+        for prevConst in AssemblerStaticConstant.CONSTANTS_MAP.values():
+            if prevConst.valueType == valueType and \
+               len(initializationList) == len(prevConst.initialization) and \
+               all(a == b for a,b in zip(initializationList, prevConst.initialization)):
+                return prevConst.copy()
         
         # Start with .L as it is hidden.
-        identifier: str = f".Lconst{len(AssemblerStaticConstant.CONSTANTS)}"
-        asmbType = AssemblyType.fromTAC(valueType)
+        identifier: str = f".Lconst{len(AssemblerStaticConstant.CONSTANTS_MAP)}"
         # By default the alignment is calculated from the type.
         if alignment is None:
             alignment = asmbType.alignment
 
-        return AssemblerStaticConstant(valueType, identifier, [(asmbType.getDataSectionName(), initialization)], alignment)
+        ret = AssemblerStaticConstant(valueType, identifier, initializationList, alignment)
+        AssemblerStaticConstant.CONSTANTS_MAP[identifier] = ret
+        AssemblerStaticConstant.CONSTANTS.append(ret)
+        return ret
 
     # Utility to generate assembly code for C constants.
     @staticmethod
     def newComplexConstant(valueType: DeclaratorType, identifier: str, 
                            initialization: list[Constant], alignment: int|None = None) -> AssemblerStaticConstant:
-        for prevConst in AssemblerStaticConstant.CONSTANTS:
-            # TODO: Fix the prevConst.initialization == initialization.
-            if prevConst.valueType == valueType and prevConst.initialization == initialization:
-                return prevConst
+        initializationList: list[tuple[str, str]] = []
+        for const in initialization:
+            initializationList.append(
+                (AssemblyType.fromTAC(const.typeId).getDataSectionName(), const.constValue)
+            )
+
+        for prevConst in AssemblerStaticConstant.CONSTANTS_MAP.values():
+            if prevConst.valueType == valueType and \
+               len(initializationList) == len(prevConst.initialization) and \
+               all(a == b for a,b in zip(initializationList, prevConst.initialization)):
+                # Add a new key to the constants dictionary.
+                prev = prevConst.copy()
+                AssemblerStaticConstant.CONSTANTS_MAP[identifier] = prev
+                return prev
         
         # By default the alignment is calculated from the type.
         if alignment is None:
             alignment = AssemblyType.fromTAC(valueType).alignment
 
-        resultInitializationList: list[tuple[str, str]] = []
-        for const in initialization:
-            resultInitializationList.append(
-                (AssemblyType.fromTAC(const.typeId).getDataSectionName(), const.constValue)
-            )
-
-        return AssemblerStaticConstant(valueType, identifier, resultInitializationList, alignment)
+        ret = AssemblerStaticConstant(valueType, identifier, initializationList, alignment)
+        AssemblerStaticConstant.CONSTANTS_MAP[identifier] = ret
+        AssemblerStaticConstant.CONSTANTS.append(ret)
+        return ret
 
     # "initialization" is a list of (data section name, value)
     def __init__(self, valueType: DeclaratorType, identifier: str, initialization: list[tuple[str, str]], 
@@ -354,8 +375,10 @@ class AssemblerStaticConstant(AssemblyAST):
         self.initialization = initialization
         self.alignment = alignment
     
-        AssemblerStaticConstant.CONSTANTS.append(self)
         super().__init__(parentAST)
+
+    def copy(self) -> AssemblerStaticConstant:
+        return AssemblerStaticConstant(self.valueType, self.identifier, self.initialization, self.alignment, self.parent)
 
     def firstPass(self):
         pass
@@ -366,7 +389,7 @@ class AssemblerStaticConstant(AssemblyAST):
     def thirdPass(self):
         pass
 
-    # Converts byte objects grouped together into ascii or asciz  
+    # Converts byte objects grouped together into ascii or asciz.
     def preprocessInitializations(self):
         newInit: list[tuple[str, str]] = []
         byteGrouping: str = ""
@@ -454,7 +477,11 @@ class AssemblerFunction(AssemblyAST):
     data (AssemblyType). This is needed for structs.
     """
     def classifyArguments(self, arguments: list[TACValue], returnStoredInStack: bool) -> \
-        tuple[list[tuple[AssemblerOperand, AssemblyType]], list[tuple[AssemblerOperand, AssemblyType]], list[tuple[AssemblerOperand, AssemblyType]]]:
+        tuple[
+            list[tuple[AssemblerOperand, AssemblyType]], 
+            list[tuple[AssemblerOperand, AssemblyType]], 
+            list[tuple[AssemblerOperand, AssemblyType]]
+        ]:
         
         intRegisterArgs: list[tuple[AssemblerOperand, AssemblyType]] = []
         doubleRegisterArgs: list[tuple[AssemblerOperand, AssemblyType]] = []
@@ -573,13 +600,19 @@ class AssemblerFunction(AssemblyAST):
             AssemblyType.fromTAC(self.function.funDecl.typeId.returnDeclarator). \
             members[0].classType == AssemblyClassType.MEMORY
 
-        # If the function is variadic, first, dump all registers into a "Register Save Area".
+        # If the function is variadic, dump all registers into a "Register Save Area".
         if self.function.isVariadic:
             # 48 bytes for integer registers and 128 bytes for double registers.
-            registerSaveOffset = -184 if self.returnInStack else -176 
+            registerSaveOffset = -184 if self.returnInStack else -176
             Memory.restartStackVariables(registerSaveOffset)
 
+            # Links the offset of each register in the Register Save Area.
+            INT_REG_SAVE_AREA_OFFSET: dict[REG, int] = {}
+            DOUBLE_REG_SAVE_AREA_OFFSET: dict[REG, int] = {}
+
             for intReg in INT_REG_ORDER:
+                INT_REG_SAVE_AREA_OFFSET[intReg] = registerSaveOffset
+
                 self.createInst(MOV,
                                 AssemblyType.QUADWORD,
                                 Register(AssemblyType.QUADWORD, intReg),
@@ -587,6 +620,8 @@ class AssemblerFunction(AssemblyAST):
                 registerSaveOffset += 8
 
             for doubleReg in DOUBLE_REG_ORDER:
+                DOUBLE_REG_SAVE_AREA_OFFSET[doubleReg] = registerSaveOffset
+
                 self.createInst(MOV,
                                 AssemblyType.QUADWORD,
                                 Register(AssemblyType.QUADWORD, doubleReg),
@@ -598,9 +633,10 @@ class AssemblerFunction(AssemblyAST):
             # If the return value is stored in the stack, its address will be the first stack variable.
             Memory.restartStackVariables(-8 if self.returnInStack else 0)
 
-        # Create the variables used as arguments. The function receives these values from registers 
-        # or from the stack.
+        # Create the variables used as arguments. These will be stored in the stack in the same 
+        # order they appear in the argument list.
         tacArgs = [TACValue(False, arg.type, arg.name) for arg in self.function.arguments]
+        # Classify them.
         self.intRegArgs, self.doubleRegArgs, self.stackInputArgs = self.classifyArguments(tacArgs, 
                                                                                           self.returnInStack)
 
@@ -615,6 +651,25 @@ class AssemblerFunction(AssemblyAST):
         # In parallel, double arguments must be pushed to XMM0 to XMM7 and then to the stack.
         # Do not use DI if the return value is stored in the stack.
         for (value, movAsmbType), reg in zip(self.intRegArgs, INT_REG_ORDER[(1 if self.returnInStack else 0):]):
+            if self.function.isVariadic:
+                # Arguments are pushed onto the stack as they appear in the argument list. When the
+                # function is variadic, all registers are already pushed onto the stack in the 
+                # Register Save Area, so there's no need to push them twice.
+                # Manually convert the TACValues to Memory objects pointing to the Register Save 
+                # Area.
+                regSaveAreaOffset = INT_REG_SAVE_AREA_OFFSET[reg]
+                if isinstance(value, Pseudo):
+                    newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
+                    Memory.stackVariables[value.name] = newMem
+                    value = newMem.createCopy()
+                elif isinstance(value, PseudoMemory):
+                    newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
+                    Memory.stackVariables[value.name] = newMem
+                    base = newMem.createCopy()
+                    value = Memory(value.assemblyType, REG.BP, base.offset + value.offset, value.parent)
+                else:
+                    raise ValueError()
+
             if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                 self.instructions.extend(self.copyBytesFromRegister(reg, value, movAsmbType.size))
             else:
@@ -624,6 +679,20 @@ class AssemblerFunction(AssemblyAST):
                                 value)
 
         for (value, movAsmbType), reg in zip(self.doubleRegArgs, DOUBLE_REG_ORDER):
+            if self.function.isVariadic:
+                regSaveAreaOffset = DOUBLE_REG_SAVE_AREA_OFFSET[reg]
+                if isinstance(value, Pseudo):
+                    newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
+                    Memory.stackVariables[value.name] = newMem
+                    value = newMem.createCopy()
+                elif isinstance(value, PseudoMemory):
+                    newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
+                    Memory.stackVariables[value.name] = newMem
+                    base = newMem.createCopy()
+                    value = Memory(value.assemblyType, REG.BP, base.offset + value.offset, value.parent)
+                else:
+                    raise ValueError()
+
             self.createInst(MOV, 
                             movAsmbType, 
                             Register(value.assemblyType, reg), 
@@ -1056,9 +1125,10 @@ class AssemblerFunction(AssemblyAST):
                             # This value can be directly pushed as it is 8 bytes.
                             self.createInst(PUSH, value)
                         else:
-                            # This value is under 8 bytes so it must be transferred to a register and
-                            # then pushed. As I will be using AX (XMM registers cannot be pushed), decimal
-                            # values must be converted to their integer counterparts.
+                            # This value is under 8 bytes so it must be transferred to a register 
+                            # and then pushed. As I will be using AX (XMM registers cannot be 
+                            # pushed), decimal values must be converted to their integer 
+                            # counterparts.
                             if movAsmbType == AssemblyType.DOUBLE:
                                 movAsmbType = AssemblyType.QUADWORD
                             elif movAsmbType == AssemblyType.FLOAT:
@@ -1069,6 +1139,7 @@ class AssemblerFunction(AssemblyAST):
                     
                     # Store in AL (RAX) the number of double values passed as arguemnts if the 
                     # function called accepts variadic arguments.
+                    # TODO: Use this value during the generation of the Register Copy Zone (?)
                     if inst.isVariadic:
                         self.createInst(MOV, 
                                         AssemblyType.BYTE,
@@ -1469,6 +1540,31 @@ class AssemblerFunction(AssemblyAST):
                 
             case TACBuiltIn_va_end():
                 pass
+
+            case TACBuiltIn_va_copy():
+                # Remember, these are the addresses of the va_list(s).
+                param_dest = self.fromTACValue(tac.param_dest)
+                param_src = self.fromTACValue(tac.param_src)
+
+                # Store the addresses in AX and DX.
+                self.createInst(MOV, 
+                                AssemblyType.QUADWORD, 
+                                param_dest, 
+                                Register(AssemblyType.QUADWORD, REG.AX))
+                self.createInst(MOV, 
+                                AssemblyType.QUADWORD, 
+                                param_src, 
+                                Register(AssemblyType.QUADWORD, REG.DX))
+
+                # Transfer the bytes from (DX) to (AX).
+                if not isinstance(tac.param_dest.valueType, PointerDeclaratorType):
+                    raise ValueError(f"va_list is {tac.param_dest.valueType}, expected a pointer")
+                
+                va_list_inner_struct = AssemblyType.fromTAC(tac.param_dest.valueType.declarator)
+                copyInst = self.copyBytes(Memory(va_list_inner_struct, REG.DX, 0),
+                                          Memory(va_list_inner_struct, REG.AX, 0),
+                                          va_list_inner_struct)
+                self.instructions.extend(copyInst)
 
     def secondPass(self):
         for inst in self.instructions:
@@ -2019,7 +2115,7 @@ class PUSH(AssemblerInstruction):
             # - Cannot push a 64-bit immediate, instead move it to a register and then push it.
             
             # A movsd (move double) operation cannot be done to REG.AX, but XMMx registers cannot be
-            # pushed to the stack.
+            # pushed onto the stack.
             if self.operand.assemblyType.isDecimal():
                 asmbType = AssemblyType.QUADWORD
             else:
@@ -2745,22 +2841,22 @@ class Memory(AssemblerOperand):
     def convertToStackVariable(pseudo: Pseudo) -> Memory:
         if pseudo.name in Memory.stackVariables:
             return Memory.stackVariables[pseudo.name].createCopy()
-        else:
-            pseudoByteLen = pseudo.assemblyType.size
-            alignment = pseudo.assemblyType.alignment
-            Memory.STACK_OFFSET -= pseudoByteLen
+        
+        pseudoByteLen = pseudo.assemblyType.size
+        alignment = pseudo.assemblyType.alignment
+        Memory.STACK_OFFSET -= pseudoByteLen
 
-            # ABI tells us to align 8 byte values to the next multiple of 8.
-            # The same goes for 4 byte values, to next multiple of 4...
-            # As an example, if I push an int and then a long:
-            # - The int would be located at -4(%rsp), which is aligned (4 % 4 = 0).
-            # - If the long is put at -12(%rsp) I would be failing the ABI (12 % 8 != 0). 
-            #   It should go at -16(%rsp) and leave the bytes from -5 to -8 as padding.
-            Memory.STACK_OFFSET = -(alignment * math.ceil((-Memory.STACK_OFFSET) / alignment))
+        # ABI tells us to align 8 byte values to the next multiple of 8.
+        # The same goes for 4 byte values, to next multiple of 4...
+        # As an example, if I push an int and then a long:
+        # - The int would be located at -4(%rsp), which is aligned (4 % 4 = 0).
+        # - If the long is put at -12(%rsp) I would be failing the ABI (12 % 8 != 0). 
+        #   It should go at -16(%rsp) and leave the bytes from -5 to -8 as padding.
+        Memory.STACK_OFFSET = -(alignment * math.ceil((-Memory.STACK_OFFSET) / alignment))
 
-            ret = Memory(pseudo.assemblyType, REG.BP, Memory.STACK_OFFSET, pseudo.parent)
-            Memory.stackVariables[pseudo.name] = ret
-            return ret
+        ret = Memory(pseudo.assemblyType, REG.BP, Memory.STACK_OFFSET, pseudo.parent)
+        Memory.stackVariables[pseudo.name] = ret
+        return ret
 
     @staticmethod
     def convertToStackMemory(pseudo: PseudoMemory) -> Memory:
@@ -2777,7 +2873,7 @@ class Memory(AssemblerOperand):
             base = Memory(pseudo.assemblyType, REG.BP, Memory.STACK_OFFSET, pseudo.parent)
             Memory.stackVariables[pseudo.name] = base
 
-        base = Memory.stackVariables[pseudo.name].createCopy()
+        base = Memory.stackVariables[pseudo.name]
         return Memory(pseudo.assemblyType, REG.BP, base.offset + pseudo.offset, pseudo.parent)
 
 # Static or extern variables.

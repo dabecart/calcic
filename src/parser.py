@@ -62,7 +62,7 @@ class VariableIdentifier:
 class FunctionIdentifier:
     name: str
     arguments: list[ParameterInformation]
-    has_vargs: bool
+    variadic: bool
     returnType: DeclaratorType
     storageClass: StorageClass|None
     isGlobal: bool
@@ -1204,6 +1204,23 @@ class SimpleDeclarator(DeclaratorAST):
         else:
             return self.declarator.process(baseType)
 
+class FunctionParameterDeclarator(DeclaratorAST):
+    def parse(self, *args):
+        if self.peek().id == "...":
+            self.pop()
+            self.isEllipsis = True
+        else:
+            self.isEllipsis = False
+            _, self.declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+            self.decl = self.createChild(TopDeclarator)
+
+    def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
+        info = self.decl.process(baseType)
+        info.type = info.type.decay()
+        if info.type == TypeSpecifier.VOID.toBaseType():
+            self.raiseError("A parameter must not have void type")
+        return info
+
 class DirectDeclarator(DeclaratorAST):
     def parse(self, *args):
         self.simple = self.createChild(SimpleDeclarator)
@@ -1228,6 +1245,9 @@ class DirectDeclarator(DeclaratorAST):
                     param = self.createChild(FunctionParameterDeclarator)
 
                     if param.isEllipsis:
+                        if len(self.paramDeclarators) < 1:
+                            self.raiseError("Variadic function requires a minimum of one named argument")
+
                         self.hasEllipsis = True
                         # No more parameters are expected after the ellipsis.
                         break
@@ -1285,23 +1305,6 @@ class DirectDeclarator(DeclaratorAST):
 
         else:
             return self.simple.process(baseType)
-
-class FunctionParameterDeclarator(DeclaratorAST):
-    def parse(self, *args):
-        if self.peek().id == "...":
-            self.pop()
-            self.isEllipsis = True
-        else:
-            self.isEllipsis = False
-            _, self.declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
-            self.decl = self.createChild(TopDeclarator)
-
-    def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
-        info = self.decl.process(baseType)
-        info.type = info.type.decay()
-        if info.type == TypeSpecifier.VOID.toBaseType():
-            self.raiseError("A parameter must not have void type")
-        return info
 
 class TopDeclarator(DeclaratorAST):
     def parse(self, *args):
@@ -1937,7 +1940,7 @@ class FunctionDeclaration(Declaration):
             self.context.functionMap[self.identifier] = FunctionIdentifier(
                 name=self.identifier,
                 arguments=self.argumentList,
-                has_vargs=info.type.hasEllipsis,
+                variadic=info.type.variadic,
                 returnType=self.returnType,
                 storageClass=self.storageClass,
                 isGlobal=self.isGlobal,
@@ -3969,7 +3972,7 @@ class FunctionCall(Exp):
 
         funcCtx = self.context.functionMap[self.funcIdentifier]
         self.typeId = funcCtx.returnType
-        self.isFunctionVariadic = funcCtx.has_vargs
+        self.isFunctionVariadic = funcCtx.variadic
 
         self.argumentList: list[Exp] = []
         
@@ -3981,9 +3984,23 @@ class FunctionCall(Exp):
                 if argumentIndex < len(funcCtx.arguments):
                     # See if this argument needs a cast before being passed to the function.
                     if argExp.typeId != funcCtx.arguments[argumentIndex].type:
-                        argExp = self.createChild(Cast, funcCtx.arguments[argumentIndex].type, argExp, True).preconvertExpression()
+                        argExp = self.createChild(Cast, 
+                                                  funcCtx.arguments[argumentIndex].type, 
+                                                  argExp, True
+                                                ).preconvertExpression()
                 else:
-                    if not funcCtx.has_vargs:
+                    if funcCtx.variadic:
+                        # Variadic arguments get promoted:
+                        # - integer types smaller than int, get promoted to int.
+                        # - float gets promoted to double.
+                        if argExp.typeId.isInteger():
+                            argExp = argExp.checkIntegerPromotion()
+                        elif argExp.typeId == TypeSpecifier.FLOAT.toBaseType():
+                            argExp = self.createChild(Cast, 
+                                                      TypeSpecifier.DOUBLE.toBaseType(), 
+                                                      argExp, True
+                                                    ).preconvertExpression()
+                    else:
                         self.raiseError(f"Too many arguments, expected {len(funcCtx.arguments)}")
 
                 self.argumentList.append(argExp)
@@ -3998,7 +4015,7 @@ class FunctionCall(Exp):
 
         passedArgsLen = len(self.argumentList)
         funcDeclLen = len(funcCtx.arguments)
-        if funcCtx.has_vargs:
+        if funcCtx.variadic:
             if passedArgsLen < funcDeclLen:
                 self.raiseError(f"Expected {funcDeclLen} arguments at least, received {passedArgsLen}")
         else:
