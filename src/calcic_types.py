@@ -458,16 +458,17 @@ class ArrayDeclaratorType(DeclaratorType):
         self.qualifiers = newQualifiers
 
 class FunctionDeclaratorType(DeclaratorType):
-    def __init__(self, params: list[ParameterInformation], declarator: DeclaratorType) -> None:
+    def __init__(self, params: list[ParameterInformation], declarator: DeclaratorType, variadic: bool) -> None:
         self.params = params
         self.returnDeclarator = declarator
+        self.variadic = variadic
         super().__init__()
 
     def decay(self) -> DeclaratorType:
         raise ValueError()
 
     def _internal_copy(self) -> FunctionDeclaratorType:
-        return FunctionDeclaratorType(self.params, self.returnDeclarator)
+        return FunctionDeclaratorType(self.params, self.returnDeclarator, self.variadic)
 
     def _internal_str(self) -> str:
         paramStrings = [str(p) for p in self.params]

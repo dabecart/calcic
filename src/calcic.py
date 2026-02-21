@@ -11,11 +11,22 @@ import argparse
 import subprocess
 import os
 import traceback
-
-from . import assembler_x64, lexer, parser, TAC
-from . import TAC_optimizer as optimizer
-
+import enum
 import sys
+from pathlib import Path
+
+from src import lexer, parser, TAC
+from src import TAC_optimizer as optimizer
+from src.builtin.builtin_functions import BuiltInFunctions
+from src.global_context import globalContext
+
+from src.x64 import builtin_types_x64
+from src.x64 import assembler_x64
+
+USE_GCC_LIBRARIES: bool = False
+
+class TargetArchitectures(enum.Enum):
+    x64 = "x64"
 
 def splitCombinedArguments(argv, initialValues: set):
     processedArgs = []
@@ -37,7 +48,7 @@ def splitCombinedArguments(argv, initialValues: set):
 def main() -> None:
     argParser = argparse.ArgumentParser(
                             prog='calcic',
-                            description='C compiler for the CALCI-16 chip.',
+                            description='A basic C99 compiler.',
                             epilog='Written by @dabecart, 2025.')
     argParser.add_argument('input_file',
                            type=str)
@@ -45,6 +56,34 @@ def main() -> None:
                            help="Place the output into <OUTPUT>.",
                            metavar="OUTPUT",
                            dest="output")
+    argParser.add_argument("-c",
+                           help="Compile and assemble, but do not link. Generates a .o file.",
+                           action="store_true",
+                           dest="generate_object")
+    argParser.add_argument("-S",
+                           help="Compile but don't assemble. Generates a .s file.",
+                           action="store_true",
+                           dest="generate_assembly")
+    argParser.add_argument("-l",
+                           type=str,
+                           help="Link a library.",
+                           dest="library")
+    argParser.add_argument("-v", "--verbose",
+                           help="Prints insightful information.",
+                           action="store_true")
+    argParser.add_argument("-O", "--optimize",
+                           help="Enables all optimizations. You can specify the number of iterations of the optimization algorithm.",
+                           type=int, 
+                           choices=range(1, optimizer.MAX_ITERATION_STEPS + 1), 
+                           metavar="ITERS",
+                           nargs='?', const=optimizer.MAX_ITERATION_STEPS, default=0)
+    argParser.add_argument("-march",
+                           help="Select the target architecture.",
+                           dest="architecture",
+                           choices=[e.value for e in TargetArchitectures],
+                           default=TargetArchitectures.x64.value)
+
+    # Test options.
     argParser.add_argument('--lex',
                            help="Only runs the lexer.",
                            action="store_true")
@@ -72,39 +111,35 @@ def main() -> None:
     argParser.add_argument("--eliminate-dead-stores",
                            help="Enables dead store elimination.",
                            action="store_true")
-    argParser.add_argument("-O", "--optimize",
-                           help="Enables all optimizations. You can specify the number of steps in the optimization algorithm.",
-                           type=int, 
-                           choices=range(1, optimizer.MAX_ITERATION_STEPS + 1), 
-                           nargs='?', const=optimizer.MAX_ITERATION_STEPS, default=0)
-    argParser.add_argument("-c",
-                           help="Compile and assemble, but do not link. Generates a .o file.",
-                           action="store_true",
-                           dest="generate_object")
-    argParser.add_argument("-S",
-                           help="Compile but don't assemble. Generates a .s file.",
-                           action="store_true",
-                           dest="generate_assembly")
-    argParser.add_argument("-l",
-                           type=str,
-                           help="Link a library.",
-                           dest="library")
-    argParser.add_argument("-v", "--verbose",
-                           help="Prints insightful information.",
-                           action="store_true")
     
     args = argParser.parse_args(splitCombinedArguments(sys.argv[1:], {'l'}))
     inputFile: str = args.input_file
     inputFileBasename: str = inputFile.rsplit(".", 1)[0]
 
-    # Preprocessing.
-    preprocessStatus = subprocess.run(["gcc", "-E", inputFile, "-o", f"{inputFileBasename}.i"])
+    """
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    PREPROCESSOR
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    """
+    # Use the calcic standard libraries and not the GCC's.
+    preprocessCommand = ["gcc", "-E", inputFile, "-o", f"{inputFileBasename}.i"]
+    if not USE_GCC_LIBRARIES:
+        # Set the lib folder as a system directory for the preprocessor.
+        calcicFolder = Path(__file__).parent.parent.resolve()
+        libPath = calcicFolder / "lib"
+        preprocessCommand += ["-nostdinc", "-isystem", str(libPath)]
+    
+    preprocessStatus = subprocess.run(preprocessCommand)
     retCode = preprocessStatus.returncode
 
     if retCode != 0:
         exit(retCode)
 
-    # Compilation.
+    """
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    LEXER
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    """
     try:
         tokens = lexer.lex(f"{inputFileBasename}.i")
         if args.verbose:
@@ -121,8 +156,26 @@ def main() -> None:
     if args.lex:
         exit(0)
 
+    # The global context stores variables used on all stages of the compiler.
+    # Add the built-in function handlers to the global context.
+    BuiltInFunctions.connectHandlersToContext(globalContext)
+
+    """
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    PARSER
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    """
     try:
-        program = parser.Program(tokens)
+        # Create the context.
+        context = parser.Context()
+        
+        # Add built-in types to the context before parsing.
+        match TargetArchitectures(args.architecture):
+            case TargetArchitectures.x64:
+                builtin_types_x64.BuiltInTypes_x64(context)
+        
+        # Parse the program.
+        program = parser.Program(tokens, context)
         if len(tokens) > 0:
             raise ValueError("Missing tokens out of the program")
         
@@ -137,6 +190,11 @@ def main() -> None:
     if args.parse or args.validate:
         exit(0)
 
+    """
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    Three Address Code (TAC)
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    """
     try:
         tacProgram = TAC.TACProgram(program)
         if args.verbose:
@@ -150,6 +208,11 @@ def main() -> None:
     if args.tac:
         exit(0)
 
+    """
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    OPTIMIZER
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    """
     if (args.optimize == 0) and (
         args.fold_constants or args.eliminate_unreachable_code or \
         args.propagate_copies or args.eliminate_dead_stores):
@@ -178,8 +241,16 @@ def main() -> None:
             print(traceback.format_exc(), file=sys.stderr)
         exit(1)
 
+    """
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    ASSEMBLY GENERATION
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    """
     try:
-        assemblyProgram = assembler_x64.AssemblerProgram(tacProgram)
+        match TargetArchitectures(args.architecture):
+            case TargetArchitectures.x64:
+                assemblyProgram = assembler_x64.AssemblerProgram(tacProgram)
+        
         # if args.verbose:
         #     print(f"Assembler:\n{assemblyProgram}")
     except Exception as e:
@@ -206,7 +277,11 @@ def main() -> None:
     if args.generate_assembly:
         exit(0)
 
-    # Assembly and link.
+    """
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    ASSEMBLER AND LINKER
+    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    """
     if args.output is None:
         if args.generate_object:
             exeOutput = f"{inputFileBasename}.o"

@@ -10,10 +10,12 @@ calcic. Written by @dabecart, 2026.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from .parser import *
-from .types import *
-
 from typing import Type, TypeVar
+
+from src.parser import *
+from src.calcic_types import *
+from src.global_context import globalContext
+
 T = TypeVar("T", bound="TAC")
 
 class TAC(ABC):
@@ -94,6 +96,11 @@ class TAC(ABC):
                 raise ValueError("Invalid lvalue in the assignment")
 
     def parseTACExpression(self, exp: Exp, insts: list[TACInstruction]) -> TACExpressionResult:
+        # Verify if the expression is a built in function. If so, run the code in the 
+        # builtin_functions.py file
+        if globalContext.isBuiltInFunctionByClass(exp):
+            return globalContext.parseTACBuiltInFunction(exp, insts, self)
+
         match exp:
             case LongConstant():
                 val = self.createChild(TACValue, True, TypeSpecifier.LONG.toBaseType(), exp)
@@ -303,10 +310,13 @@ class TAC(ABC):
                 for argExp in exp.argumentList:
                     argVal = self.parseTACExpression(argExp, insts).convert()
                     argValues.append(argVal)
+
                 # Call the function.
-                funcCall = self.createChild(TACFunctionCall, exp.funcIdentifier, exp.typeId, argValues, insts)
+                funcCall = self.createChild(TACFunctionCall, 
+                                            exp.funcIdentifier, exp.typeId, argValues, 
+                                            exp.isFunctionVariadic, insts)
                 return TACBaseOperand(funcCall.result, exp.typeId, insts)
-            
+
             case Cast():
                 if exp.inner.typeId == exp.typeId or exp.typeId == TypeSpecifier.VOID.toBaseType():
                     # No need to do any casting.
@@ -952,6 +962,7 @@ class TACFunction(TACTopLevel):
         self.arguments = self.funDecl.definedArgumentList
         self.instructions: list[TACInstruction] = []
         self.isGlobal = self.funDecl.isGlobal
+        self.isVariadic = self.funDecl.typeId.variadic
         
         # Convert the function's body into a list of instructions.
         if self.funDecl.body is None:
@@ -995,6 +1006,20 @@ class TACInstruction(TAC):
     @abstractmethod
     def print(self) -> str:
         pass
+
+    # Used on the optimizer stage.
+    def replaceOperand(self, operand: TACValue) -> tuple[bool, TACValue]:
+        if operand.isConstant:
+            return (False, operand)
+        
+        # E.g. if we reach z = y + 10, and before that we had y = x (Copy x to y), we can replace y 
+        # by x.
+        for copy in self.reachingCopies:
+            # Don't substitute something with the same thing! It creates an infinite loop!
+            if copy.dst == operand and copy.src != operand:
+                return (True, copy.src)
+        
+        return (False, operand)
 
 class TACReturn(TACInstruction):
     def __init__(self, retValue: TACValue, 
@@ -1514,11 +1539,12 @@ class TACLabel(TACInstruction):
         return identifier
     
 class TACFunctionCall(TACInstruction):
-    def __init__(self, identifier: str, returnType: DeclaratorType, arguments: list[TACValue],
+    def __init__(self, identifier: str, returnType: DeclaratorType, arguments: list[TACValue], isVariadic: bool,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
         self.identifier = identifier
         self.returnType = returnType
         self.arguments = arguments
+        self.isVariadic = isVariadic
         super().__init__(instructionsList, parentTAC)
 
     def parse(self) -> TACValue:
@@ -1527,4 +1553,4 @@ class TACFunctionCall(TACInstruction):
 
     def print(self) -> str:
         argList = ', '.join([arg.print() for arg in self.arguments])
-        return f"FunctionCall: {self.identifier}({argList})\n"
+        return f"FunctionCall: {self.identifier}({argList}) -> {self.result}\n"

@@ -2,7 +2,7 @@
 
 *Written by @dabecart, 2026*
 
-A basic C compiler written in Python. Compiles to x86-64 architecture, but this was written to 
+A basic C99 compiler written in Python. Compiles to x86-64 architecture, but this was written to 
 develop a custom processor called **CALCIC** with its own set of instructions (work still in progress).
 
 Based on the great book *Writing a C compiler* by [Nora Sandler](https://norasandler.com/).
