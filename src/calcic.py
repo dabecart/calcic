@@ -126,7 +126,7 @@ def main() -> None:
     if not USE_GCC_LIBRARIES:
         # Set the lib folder as a system directory for the preprocessor.
         calcicFolder = Path(__file__).parent.parent.resolve()
-        libPath = calcicFolder / "lib"
+        libPath = calcicFolder / "lib" / "headers"
         preprocessCommand += ["-nostdinc", "-isystem", str(libPath)]
     
     preprocessStatus = subprocess.run(preprocessCommand)

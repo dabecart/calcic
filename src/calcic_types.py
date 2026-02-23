@@ -27,6 +27,9 @@ class ParameterInformation:
     type: DeclaratorType
     name: str
 
+    # Used for anonymous parameters in function declarations.
+    isAnonymous: bool = False
+
     # Used for the parameters of structs.
     offset: int = 0
 
@@ -47,17 +50,19 @@ class StorageClass(enum.Enum):
 # Type qualifiers advise the compiler about how the variable will be used.
 @dataclass
 class TypeQualifier:
-    const: bool = False
-    # TODO: volatile, restrict
+    const: bool     = False
+    volatile: bool  = False
+    # TODO: restrict
 
     def toSet(self) -> set[str]:
         ret = set()
         if self.const: ret.add("const")
+        if self.volatile: ret.add("volatile")
         return ret
 
     @staticmethod
     def fromSet(inputSet: set[str]) -> TypeQualifier:
-        return TypeQualifier("const" in inputSet)
+        return TypeQualifier(const = "const" in inputSet, volatile = "volatile" in inputSet)
 
     def contains(self, other: TypeQualifier) -> bool:
         return other.toSet() <= self.toSet()
@@ -72,6 +77,7 @@ class TypeQualifier:
     def __str__(self) -> str:
         ret = ""
         if self.const: ret += "const "
+        if self.volatile: ret += "volatile "
         return ret
 
 class TypeSpecifier:
@@ -268,8 +274,13 @@ class DeclaratorType(ABC):
         return f"{self.alias} ({ret})"
 
     @abstractmethod
-    def unqualify(self) -> BaseDeclaratorType:
+    def _internal_copy(self: DT) -> DT:
         pass
+
+    def copy(self: DT) -> DT:
+        ret = self._internal_copy()
+        ret.alias = self.alias
+        return ret
 
     @abstractmethod
     def getTypeQualifiers(self) -> TypeQualifier:
@@ -279,13 +290,9 @@ class DeclaratorType(ABC):
     def setTypeQualifiers(self, newQualifiers: TypeQualifier):
         pass
 
-    @abstractmethod
-    def _internal_copy(self: DT) -> DT:
-        pass
-
-    def copy(self: DT) -> DT:
-        ret = self._internal_copy()
-        ret.alias = self.alias
+    def unqualified(self: DT) -> DT:
+        ret = self.copy()
+        ret.setTypeQualifiers(TypeQualifier())
         return ret
 
     def __repr__(self) -> str:
@@ -382,11 +389,6 @@ class BaseDeclaratorType(DeclaratorType):
     def _internal_copy(self) -> BaseDeclaratorType:
         return BaseDeclaratorType(self.baseType, self.qualifiers)
     
-    def unqualify(self) -> BaseDeclaratorType:
-        ret = self.copy()
-        ret.qualifiers = TypeQualifier()
-        return ret
-
     def getTypeQualifiers(self) -> TypeQualifier:
         return self.qualifiers
 
@@ -414,11 +416,6 @@ class PointerDeclaratorType(DeclaratorType):
             return False
         return self.declarator == other.declarator and self.qualifiers == other.qualifiers
 
-    def unqualify(self) -> PointerDeclaratorType:
-        ret = self.copy()
-        ret.qualifiers = TypeQualifier()
-        return ret
-    
     def getTypeQualifiers(self) -> TypeQualifier:
         return self.qualifiers
     
@@ -448,9 +445,6 @@ class ArrayDeclaratorType(DeclaratorType):
             return False
         return self.declarator == other.declarator and self.size == other.size
 
-    def unqualify(self) -> ArrayDeclaratorType:
-        return ArrayDeclaratorType(self.declarator.unqualify(), self.size)
-    
     def getTypeQualifiers(self) -> TypeQualifier:
         return self.declarator.getTypeQualifiers()
     
@@ -479,20 +473,24 @@ class FunctionDeclaratorType(DeclaratorType):
             return False
         return self.returnDeclarator == other.returnDeclarator and all([p1 == p2 for p1, p2 in zip(self.params, other.params)])
 
-    def unqualify(self) -> FunctionDeclaratorType:
-        raise ValueError()
-    
     def getTypeQualifiers(self) -> TypeQualifier:
         raise ValueError()
 
     def setTypeQualifiers(self, newQualifiers: TypeQualifier):
         raise ValueError()
-    
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DECLARATIONS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+
 @dataclass
 class DeclaratorInformation:
     name: str
     type: DeclaratorType
     params: list[ParameterInformation]
+    isAnonymous: bool = False
 
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

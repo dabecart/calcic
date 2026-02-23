@@ -50,6 +50,10 @@ class TACBuiltInFunction(TACInstruction):
     def anotateLiveVariables(self, liveVariables: set[TACValue], aliased: set[TACValue]):
         pass
 
+    def isDeadStore(self) -> bool:
+        # We cannot eliminate function calls as they may affect other parts of the code.
+        return False
+
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 <stdargs.h>

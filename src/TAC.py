@@ -1020,6 +1020,10 @@ class TACInstruction(TAC):
                 return (True, copy.src)
         
         return (False, operand)
+    
+    @abstractmethod
+    def isDeadStore(self) -> bool:
+        pass
 
 class TACReturn(TACInstruction):
     def __init__(self, retValue: TACValue, 
@@ -1033,6 +1037,9 @@ class TACReturn(TACInstruction):
 
     def print(self) -> str:
         return f"Return({self.result})\n"
+
+    def isDeadStore(self) -> bool:
+        return False
 
 # Converts from int to long.
 class TACSignExtend(TACInstruction):
@@ -1050,6 +1057,14 @@ class TACSignExtend(TACInstruction):
     def print(self) -> str:
         return f"SignExtend({self.exp}, {self.result})\n"
 
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACZeroExtend(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1064,6 +1079,14 @@ class TACZeroExtend(TACInstruction):
 
     def print(self) -> str:
         return f"ZeroExtend({self.exp}, {self.result})\n"
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
 
 class TACDecimalToDecimal(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
@@ -1084,6 +1107,14 @@ class TACDecimalToDecimal(TACInstruction):
     def print(self) -> str:
         return f"DecimalToDecimal({self.exp}, {self.result})\n"
 
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACDecimalToInt(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1098,7 +1129,15 @@ class TACDecimalToInt(TACInstruction):
 
     def print(self) -> str:
         return f"DecimalToInt({self.exp}, {self.result})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACDecimalToUInt(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1114,6 +1153,14 @@ class TACDecimalToUInt(TACInstruction):
     def print(self) -> str:
         return f"DecimalToUInt({self.exp}, {self.result})\n"
     
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACIntToDecimal(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1129,6 +1176,14 @@ class TACIntToDecimal(TACInstruction):
     def print(self) -> str:
         return f"IntToDecimal({self.exp}, {self.result})\n"
     
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACUIntToDecimal(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1143,6 +1198,15 @@ class TACUIntToDecimal(TACInstruction):
 
     def print(self) -> str:
         return f"UIntToDecimal({self.exp}, {self.result})\n"
+
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
 
 # Converts from long to int.
 class TACTruncate(TACInstruction):
@@ -1160,6 +1224,14 @@ class TACTruncate(TACInstruction):
     def print(self) -> str:
         return f"Truncate({self.exp}, {self.result})\n"
 
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACUnary(TACInstruction):
     def __init__(self, operator: UnaryOperator, value: TACValue,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1174,7 +1246,15 @@ class TACUnary(TACInstruction):
 
     def print(self) -> str:
         return f"Unary({self.operator.name}, {self.exp}, {self.result})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACBinary(TACInstruction):
     def __init__(self, *args, 
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1357,7 +1437,16 @@ class TACBinary(TACInstruction):
 
     def print(self) -> str:
         return f"Binary({self.operator.name}, {self.exp1}, {self.exp2}, {self.result})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp1.valueType.getTypeQualifiers().volatile and \
+               not self.exp2.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACCopy(TACInstruction):
     def __init__(self, src: TACValue, dst: TACValue,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1379,6 +1468,14 @@ class TACCopy(TACInstruction):
     def print(self) -> str:
         return f"Copy({self.src}, {self.dst})\n"
     
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.src.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACGetAddress(TACInstruction):
     def __init__(self, src: TACValue, dst: TACValue,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1392,6 +1489,14 @@ class TACGetAddress(TACInstruction):
     def print(self) -> str:
         return f"GetAddress({self.src}, {self.dst})\n"
 
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.src.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACLoad(TACInstruction):
     def __init__(self, srcPointer: TACValue, dst: TACValue,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1404,7 +1509,15 @@ class TACLoad(TACInstruction):
 
     def print(self) -> str:
         return f"Load({self.src}, {self.dst})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.src.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACStore(TACInstruction):
     def __init__(self, src: TACValue, dstPointer: TACValue,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1417,6 +1530,11 @@ class TACStore(TACInstruction):
 
     def print(self) -> str:
         return f"Store({self.src}, {self.dst})\n"
+
+    def isDeadStore(self) -> bool:
+        # We don't know if the destination of the store is dear or not, so we should never delete 
+        # TACStore instructions.
+        return False
 
 class TACAddToPointer(TACInstruction):
     def __init__(self, pointer: TACValue, index: TACValue, scale: int, dst: TACValue,
@@ -1436,7 +1554,15 @@ class TACAddToPointer(TACInstruction):
 
     def print(self) -> str:
         return f"AddToPointer({self.pointer} + {self.index}*{self.scale}, {self.dst})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.pointer.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACCopyToOffset(TACInstruction):
     def __init__(self, src: TACValue, dst: TACValue, byteOffset: int,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1450,7 +1576,15 @@ class TACCopyToOffset(TACInstruction):
 
     def print(self) -> str:
         return f"CopyToOffset({self.src}, {self.dst} + {self.byteOffset})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.src.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACCopyFromOffset(TACInstruction):
     def __init__(self, src: TACValue, byteOffset: int, dst: TACValue, 
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1465,6 +1599,14 @@ class TACCopyFromOffset(TACInstruction):
     def print(self) -> str:
         return f"CopyFromOffset({self.src} + {self.byteOffset}, {self.dst})\n"
 
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.src.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACJump(TACInstruction):
     def __init__(self, target: str,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1476,6 +1618,9 @@ class TACJump(TACInstruction):
 
     def print(self) -> str:
         return f"Jump({self.target})\n"
+
+    def isDeadStore(self) -> bool:
+        return False
 
 class TACJumpIfValue(TACInstruction):
     def __init__(self, condition: TACValue, value: TACValue, target: str,
@@ -1491,6 +1636,9 @@ class TACJumpIfValue(TACInstruction):
     def print(self) -> str:
         return f"JumpIfValue({self.condition}, {self.value}, {self.target})\n"    
 
+    def isDeadStore(self) -> bool:
+        return False
+
 class TACJumpIfZero(TACInstruction):
     def __init__(self, condition: TACValue, target: str,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1503,7 +1651,10 @@ class TACJumpIfZero(TACInstruction):
 
     def print(self) -> str:
         return f"JumpIfZero({self.condition}, {self.target})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        return False
+
 class TACJumpIfNotZero(TACInstruction):
     def __init__(self, condition: TACValue, target: str,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1516,6 +1667,9 @@ class TACJumpIfNotZero(TACInstruction):
 
     def print(self) -> str:
         return f"JumpIfNotZero({self.condition}, {self.target})\n"
+
+    def isDeadStore(self) -> bool:
+        return False
 
 class TACLabel(TACInstruction):
     LABEL_COUNT: int = 0
@@ -1537,7 +1691,10 @@ class TACLabel(TACInstruction):
         identifier: str = f"label{TACLabel.LABEL_COUNT}"
         TACLabel.LABEL_COUNT += 1
         return identifier
-    
+
+    def isDeadStore(self) -> bool:
+        return False
+
 class TACFunctionCall(TACInstruction):
     def __init__(self, identifier: str, returnType: DeclaratorType, arguments: list[TACValue], isVariadic: bool,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1554,3 +1711,7 @@ class TACFunctionCall(TACInstruction):
     def print(self) -> str:
         argList = ', '.join([arg.print() for arg in self.arguments])
         return f"FunctionCall: {self.identifier}({argList}) -> {self.result}\n"
+    
+    def isDeadStore(self) -> bool:
+        # We cannot eliminate function calls as they may affect other parts of the code.
+        return False

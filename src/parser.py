@@ -877,18 +877,20 @@ class AST(ABC):
                 typeSet.add(tok.id)
                 
             elif tok.id in Token.TYPE_QUALIFIER:
+                # Duplicated type qualifiers are valid.
                 match tok.id:
                     case "const":
-                        # Duplicated const keywords are valid.
                         typeQualifiers.const = True
+                    case "volatile":
+                        typeQualifiers.volatile = True
                     case _:
-                        self.raiseError(f"Invalid specifier: {tok.id}")
+                        self.raiseError(f"Invalid type qualifier: {tok.id}")
                 
                 self.pop()
 
             elif tok.id in Token.STORAGE_QUALIFIER:
                 if not expectsStorageClass:
-                    self.raiseError("Invalid storage class")
+                    self.raiseError("Invalid storage qualifier")
                 if storageClass is not None:
                     self.raiseError(f"Variable already defined as {storageClass.value}")
                 match tok.id:
@@ -1212,13 +1214,28 @@ class FunctionParameterDeclarator(DeclaratorAST):
         else:
             self.isEllipsis = False
             _, self.declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
-            self.decl = self.createChild(TopDeclarator)
+
+            self.decl: TopDeclarator|TopAbstractDeclarator|None = None
+            if self.peek().id not in (",", ")"):
+                # Function parameters can be anonymous during declaration. Try to parse a normal 
+                # declarator first, and if it fails, try with an anonymous declarator.
+                try:
+                    # Use a copy of the current tokens, in case it fails.
+                    tokensCopy = list(self.tokens)
+                    self.decl = TopDeclarator(tokensCopy, self.context, self)
+                    self.tokens.clear()
+                    self.tokens.extend(tokensCopy)
+                except:
+                    self.decl = self.createChild(TopAbstractDeclarator)
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
-        info = self.decl.process(baseType)
-        info.type = info.type.decay()
-        if info.type == TypeSpecifier.VOID.toBaseType():
-            self.raiseError("A parameter must not have void type")
+        if self.decl is None:
+            info = DeclaratorInformation(".anonymous.", baseType, [], isAnonymous=True)
+        else:
+            info = self.decl.process(baseType)
+            info.type = info.type.decay()
+            if info.type == TypeSpecifier.VOID.toBaseType():
+                self.raiseError("A parameter must not have void type")
         return info
 
 class DirectDeclarator(DeclaratorAST):
@@ -1238,7 +1255,8 @@ class DirectDeclarator(DeclaratorAST):
             if self.peek().id == "void" and self.peek(1).id == ")":
                 self.pop()
             elif self.peek().id == ")":
-                # C99 says that a function with no arguments needs 'void' as argument.
+                # C99 says that a function with no arguments needs 'void' as argument, but we'll 
+                # relax this rule and leave it as optional.
                 pass
             else:
                 while True:
@@ -1287,7 +1305,7 @@ class DirectDeclarator(DeclaratorAST):
                     paramInfo: DeclaratorInformation = param.process(param.declType)
                     if isinstance(paramInfo.type, FunctionDeclaratorType):
                         self.raiseError("Function pointers aren't supported as parameters")
-                    funcParams.append(ParameterInformation(paramInfo.type, paramInfo.name))
+                    funcParams.append(ParameterInformation(paramInfo.type, paramInfo.name, isAnonymous=paramInfo.isAnonymous))
                 
                 funcDecl = FunctionDeclaratorType(funcParams, simpleDecl.type, self.hasEllipsis)
                 return DeclaratorInformation(simpleDecl.name, funcDecl, funcDecl.params)
@@ -1312,10 +1330,15 @@ class TopDeclarator(DeclaratorAST):
             self.pop()
             self.isPointer = True
 
-            self.isConstantPointer = False
-            while self.peek().id == "const":
-                self.isConstantPointer = True
-                self.pop()
+            self.pointerQualifier = TypeQualifier()
+            while self.peek().id in Token.TYPE_QUALIFIER:
+                qualifier = self.pop().id
+                if qualifier == "const":
+                    self.pointerQualifier.const = True
+                elif qualifier == "volatile":
+                    self.pointerQualifier.volatile = True
+                else:
+                    raise ValueError()
 
             self.decl = self.createChild(TopDeclarator)
         else:
@@ -1324,7 +1347,7 @@ class TopDeclarator(DeclaratorAST):
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
         if self.isPointer:
-            baseType = PointerDeclaratorType(baseType, TypeQualifier(self.isConstantPointer))
+            baseType = PointerDeclaratorType(baseType, self.pointerQualifier)
         ret = self.decl.process(baseType)
         return ret 
 
@@ -1348,10 +1371,15 @@ class TopAbstractDeclarator(AbstractDeclaratorAST):
             self.pop()
 
             self.isPointer = True
-            self.isConstantPointer = False
-            while self.peek().id == "const":
-                self.isConstantPointer = True
-                self.pop()
+            self.pointerQualifier = TypeQualifier()
+            while self.peek().id in Token.TYPE_QUALIFIER:
+                qualifier = self.pop().id
+                if qualifier == "const":
+                    self.pointerQualifier.const = True
+                elif qualifier == "volatile":
+                    self.pointerQualifier.volatile = True
+                else:
+                    raise ValueError()
 
             try:
                 self.decl = self.createChild(TopAbstractDeclarator)
@@ -1363,7 +1391,7 @@ class TopAbstractDeclarator(AbstractDeclaratorAST):
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
         if self.isPointer:
-            baseType = PointerDeclaratorType(baseType, TypeQualifier(self.isConstantPointer))
+            baseType = PointerDeclaratorType(baseType, self.pointerQualifier)
             if self.decl is None:
                 return DeclaratorInformation("", baseType, [])
         
@@ -1484,8 +1512,11 @@ class ReturnStatement(Statement):
 
                 # Check if the return value needs a cast. It will depend on the return type of the 
                 # enclosing function.
-                if encFuncCtx.returnType != self.exp.typeId:
+                if encFuncCtx.returnType != self.exp.typeId.unqualified():
                     self.exp = self.createChild(Cast, encFuncCtx.returnType, self.exp, True).preconvertExpression()
+            else:
+                if self.peek().id != ";":
+                    self.raiseError("Return with a value in void function")
 
             self.expect(";")
 
@@ -1914,16 +1945,20 @@ class FunctionDeclaration(Declaration):
         self.context.addFunctionIdentifier(self)
 
         # Parse the function's argument list.
-        self.argumentList: list[ParameterInformation] = info.type.params
+        self.argumentList: list[ParameterInformation] = self.typeId.params
         # Names of the variables after being mangled.
         self.definedArgumentList : list[ParameterInformation] = []
         
         # Can't have two variables passed to a function with the same name.
-        argNames: list[str] = []
+        argNames: set[str] = set()
+        anonymousArgument: bool = False
         for arg in self.argumentList:
-            if arg.name in argNames:
-                self.raiseError(f"Redefinition of argument {arg.name}")
-            argNames.append(arg.name)
+            if arg.isAnonymous:
+                anonymousArgument = True
+            else:
+                if arg.name in argNames:
+                    self.raiseError(f"Redefinition of argument {arg.name}")
+                argNames.add(arg.name)
 
         if self.identifier in self.context.functionMap:
             # Check the arguments of the function.
@@ -1933,7 +1968,7 @@ class FunctionDeclaration(Declaration):
 
             # Check the types of the arguments. The names and qualifiers do not need to be the same. 
             for ctxVar, var in zip(ctxArgs, self.argumentList):
-                if ctxVar.type.unqualify() != var.type.unqualify():
+                if ctxVar.type.unqualified() != var.type.unqualified():
                     self.raiseError(f"{var.name} should be {ctxVar.type}, not {var.type}")
         else:
             # Add the function information to the current context.
@@ -1956,6 +1991,9 @@ class FunctionDeclaration(Declaration):
             if info.type.returnDeclarator != TypeSpecifier.VOID.toBaseType() and \
                not info.type.returnDeclarator.isComplete():
                 self.raiseError("Cannnot define a function with an incomplete return type")
+
+            if anonymousArgument:
+                self.raiseError("Cannot have anonymous arguments in a function definition")
 
             # Check if the function is already defined.
             if self.context.functionMap[self.identifier].alreadyDefined:
@@ -2337,7 +2375,7 @@ class StructDeclaration(Declaration):
 
     def membersToParamInfo(self) -> list[ParameterInformation]:
         return [
-            ParameterInformation(member.typeId, member.name, member.offset)
+            ParameterInformation(member.typeId, member.name, offset=member.offset)
             for member in self.members
         ]
 
@@ -2464,7 +2502,7 @@ class UnionDeclaration(Declaration):
     def membersToParamInfo(self) -> list[ParameterInformation]:
         # Offsets in union are all 0.
         return [
-            ParameterInformation(member.typeId, member.name, 0)
+            ParameterInformation(member.typeId, member.name, offset=0)
             for member in self.members
         ]
 
@@ -2707,10 +2745,9 @@ class Exp(AST):
         return False
     
     def preconvertExpression(self) -> Exp:
-        # If self is not an array, return it normally.
         ret = self
 
-        # If an array is inputted in an expression, add an AddressOf operation beforehand. 
+        # If an array is input in an expression, add an AddressOf operation beforehand. 
         if isinstance(self.typeId, ArrayDeclaratorType):
             # This will return pointer to array...
             ret = self.createChild(AddressOf, self)
@@ -2722,13 +2759,6 @@ class Exp(AST):
         # This expression is going to be evaluated, it cannot be an incomplete type (except void).
         if ret.typeId != TypeSpecifier.VOID.toBaseType() and not ret.typeId.isComplete():
             self.raiseError(f"Incomplete type {ret.typeId} is not allowed")
-
-        # When converting from lValue to rValue the qualifiers (const, volatile) of a variable get 
-        # stripped. This does not happen for pointers!
-        if isinstance(ret.typeId, BaseDeclaratorType):
-            newDecl = ret.typeId.copy()
-            newDecl.qualifiers = TypeQualifier()
-            ret.typeId = newDecl
 
         return ret
     
@@ -2761,11 +2791,11 @@ class Exp(AST):
             # Arrays can be converted to pointers.
             if isinstance(exp1.typeId, ArrayDeclaratorType) and isinstance(exp2.typeId, PointerDeclaratorType) and \
                exp1.typeId.decay() == exp2.typeId:
-                return exp2.typeId
+                return exp2.typeId.unqualified()
 
             if isinstance(exp2.typeId, ArrayDeclaratorType) and isinstance(exp1.typeId, PointerDeclaratorType) and \
                exp2.typeId.decay() == exp1.typeId:
-                return exp1.typeId
+                return exp1.typeId.unqualified()
 
             return None
         elif isinstance(exp1.typeId, BaseDeclaratorType) and isinstance(exp2.typeId, BaseDeclaratorType):
@@ -3187,8 +3217,8 @@ class Cast(Exp):
         isSourcePointer = isinstance(srcType, PointerDeclaratorType)
         isCastPointer = isinstance(castType, PointerDeclaratorType)
 
-        isSourceVoidPointer = isSourcePointer and srcType.declarator.unqualify() == TypeSpecifier.VOID.toBaseType()
-        isCastVoidPointer = isCastPointer and castType.declarator.unqualify() == TypeSpecifier.VOID.toBaseType()
+        isSourceVoidPointer = isSourcePointer and srcType.declarator.unqualified() == TypeSpecifier.VOID.toBaseType()
+        isCastVoidPointer = isCastPointer and castType.declarator.unqualified() == TypeSpecifier.VOID.toBaseType()
         hasAllQualifiers = isSourcePointer and isCastPointer and (castType.declarator.getTypeQualifiers().contains(srcType.declarator.getTypeQualifiers()))
 
         toVoidPointerType = isSourcePointer and not isSourceVoidPointer and isCastVoidPointer and hasAllQualifiers
@@ -3202,7 +3232,7 @@ class Cast(Exp):
         # the type pointed to by the cast type has all the qualifiers of the type pointed to by the
         # source type.
         validPointers = isSourcePointer and isCastPointer and \
-            (srcType.declarator.unqualify() == castType.declarator.unqualify()) and \
+            (srcType.declarator.unqualified() == castType.declarator.unqualified()) and \
             hasAllQualifiers
         
         ret = bothArith or voidPointerCheck or fromNullPointer or validPointers
@@ -3213,12 +3243,12 @@ class Cast(Exp):
             self.raiseError(f"Cannot implicitly cast from ({self.inner.typeId}) to ({self.typeId})")
 
         # ISO rule C99 6.5.4.2.
-        if not self.typeId.isScalar() and self.typeId.unqualify() != TypeSpecifier.VOID.toBaseType():
+        if not self.typeId.isScalar() and self.typeId.unqualified() != TypeSpecifier.VOID.toBaseType():
             self.raiseError(f"Cannot cast from {self.inner.typeId} to {self.typeId}")
 
         # Check if the types are the same but differ on their qualifiers. In this case, the cast is 
         # always permitted.
-        if self.inner.typeId.unqualify() == self.typeId.unqualify():
+        if self.inner.typeId.unqualified() == self.typeId.unqualified():
             return
 
         # Cannot cast a decimal to a pointer.
@@ -3654,10 +3684,10 @@ class Binary(Exp):
 
             if self.compoundBinary:
                 # The return type of a compound operation, is the lvalue's type.
-                self.typeId = self.exp1OriginalType
+                self.typeId = self.exp1OriginalType.unqualified()
             else:
                 # x << y has type of x.
-                self.typeId = self.exp1.typeId
+                self.typeId = self.exp1.typeId.unqualified()
 
         elif self.binaryOperator == BinaryOperator.SUM:
             isExp1Pointer = isinstance(exp1.typeId, (PointerDeclaratorType, ArrayDeclaratorType))
@@ -3671,33 +3701,33 @@ class Binary(Exp):
                     self.raiseError(f"No common type of {self.exp1.typeId} and {self.exp2.typeId}")
 
                 self.castType = commonType
-                if self.exp1.typeId != commonType:
+                if self.exp1.typeId.unqualified() != commonType:
                     self.exp1 = self.createChild(Cast, commonType, self.exp1).preconvertExpression()
                     self.exp1IsCasted = True
-                if self.exp2.typeId != commonType:
+                if self.exp2.typeId.unqualified() != commonType:
                     self.exp2 = self.createChild(Cast, commonType, self.exp2).preconvertExpression()
 
                 if self.compoundBinary:
                     # The return type of a compound operation, is the lvalue's type.
-                    self.typeId = self.exp1OriginalType
+                    self.typeId = self.exp1OriginalType.unqualified()
                 else:
                     # Arithmetic expressions will return the common type.
                     self.typeId = commonType
 
             elif isExp1Pointer and not isExp2Pointer:
                 # Pointer sum: Convert exp2 to a long.
-                if self.exp2.typeId != TypeSpecifier.LONG.toBaseType():
+                if self.exp2.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
                     self.exp2 = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.exp2).preconvertExpression()
                 # The result is a pointer.
-                self.typeId = self.exp1.typeId
+                self.typeId = self.exp1.typeId.unqualified()
                 self.castType = self.typeId
                 
             elif isExp2Pointer and not isExp1Pointer:
                 # Pointer sum: Convert exp1 to a long.
-                if self.exp1.typeId != TypeSpecifier.LONG.toBaseType():
+                if self.exp1.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
                     self.exp1 = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.exp1).preconvertExpression()
                 # The result is a pointer.
-                self.typeId = self.exp2.typeId
+                self.typeId = self.exp2.typeId.unqualified()
                 self.castType = self.typeId
 
         elif self.binaryOperator == BinaryOperator.SUBTRACT:
@@ -3712,25 +3742,25 @@ class Binary(Exp):
                     self.raiseError(f"No common type of {self.exp1.typeId} and {self.exp2.typeId}")
 
                 self.castType = commonType
-                if self.exp1.typeId != commonType:
+                if self.exp1.typeId.unqualified() != commonType:
                     self.exp1 = self.createChild(Cast, commonType, self.exp1).preconvertExpression()
                     self.exp1IsCasted = True
-                if self.exp2.typeId != commonType:
+                if self.exp2.typeId.unqualified() != commonType:
                     self.exp2 = self.createChild(Cast, commonType, self.exp2).preconvertExpression()
 
                 if self.compoundBinary:
                     # The return type of a compound operation, is the lvalue's type.
-                    self.typeId = self.exp1OriginalType
+                    self.typeId = self.exp1OriginalType.unqualified()
                 else:
                     # Arithmetic expressions will return the common type.
                     self.typeId = commonType
 
             elif isExp1Pointer and not isExp2Pointer:
                 # Pointer subtraction: Convert exp2 to a long.
-                if self.exp2.typeId != TypeSpecifier.LONG.toBaseType():
+                if self.exp2.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
                     self.exp2 = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.exp2).preconvertExpression()
                 # The result is a pointer.
-                self.typeId = self.exp1.typeId
+                self.typeId = self.exp1.typeId.unqualified()
                 self.castType = self.typeId
 
             elif isExp2Pointer and isExp1Pointer:
@@ -3750,25 +3780,25 @@ class Binary(Exp):
 
             match commonType:
                 case BaseDeclaratorType():
-                    if self.exp1.typeId != commonType:
+                    if self.exp1.typeId.unqualified() != commonType:
                         self.exp1 = self.createChild(Cast, commonType, self.exp1).preconvertExpression()
                         self.exp1IsCasted = True
-                    if self.exp2.typeId != commonType:
+                    if self.exp2.typeId.unqualified() != commonType:
                         self.exp2 = self.createChild(Cast, commonType, self.exp2).preconvertExpression()
 
                 case PointerDeclaratorType() | ArrayDeclaratorType():
                     if self.binaryOperator in (BinaryOperator.EQUAL, BinaryOperator.NOT_EQUAL):
                         # Only == and != allows implicit castings of pointers.
-                        if self.exp1.typeId != commonType:
+                        if self.exp1.typeId.unqualified() != commonType:
                             self.exp1 = self.createChild(Cast, commonType, self.exp1).preconvertExpression()
                             self.exp1IsCasted = True
-                        if self.exp2.typeId != commonType:
+                        if self.exp2.typeId.unqualified() != commonType:
                             self.exp2 = self.createChild(Cast, commonType, self.exp2).preconvertExpression()
 
                 case _:
                     self.raiseError(f"Binary operation not supported for {commonType}")
 
-            if self.exp1.typeId != commonType or self.exp2.typeId != commonType:
+            if self.exp1.typeId.unqualified() != commonType or self.exp2.typeId.unqualified() != commonType:
                 self.raiseError(f"Invalid expression: {self.exp1.typeId} {self.binaryOperator.value} {self.exp2.typeId}")
 
             # Now, both expressions should have the same type.
@@ -3777,7 +3807,7 @@ class Binary(Exp):
                 self.typeId = BaseDeclaratorType(TypeSpecifier.INT)
             elif self.compoundBinary:
                 # The return type of a compound operation, is the lvalue's type.
-                self.typeId = self.exp1OriginalType
+                self.typeId = self.exp1OriginalType.unqualified()
             else:
                 # Arithmetic expressions will return the common type.
                 self.typeId = commonType
@@ -3897,13 +3927,13 @@ class Assignment(Exp):
 
         self.exp2 = exp2.preconvertExpression()
 
-        if self.exp2.typeId != self.exp1.typeId:
+        if self.exp2.typeId.unqualified() != self.exp1.typeId.unqualified():
             # If the types aren't the same, cast exp2 to exp1's type.
             # This is an implicit cast.
             self.exp2 = self.createChild(Cast, self.exp1.typeId, self.exp2, True).preconvertExpression()
         
-        # The return type of the assignment is exp1's type.
-        self.typeId = self.exp1.typeId
+        # The return type of the assignment is exp1's unqualified type.
+        self.typeId = self.exp1.typeId.unqualified()
 
     def staticEval(self) -> StaticEvalValue:
         raise ValueError()
@@ -3930,12 +3960,12 @@ class TernaryConditional(Exp):
         if commonType is None:
             self.raiseError(f"No common type of {self.thenExp.typeId} and {self.elseExp.typeId}")
 
-        if self.thenExp.typeId != commonType:
+        if self.thenExp.typeId.unqualified() != commonType:
             self.thenExp = self.createChild(Cast, commonType, self.thenExp).preconvertExpression()
-        if self.elseExp.typeId != commonType:
+        if self.elseExp.typeId.unqualified() != commonType:
             self.elseExp = self.createChild(Cast, commonType, self.elseExp).preconvertExpression()
         # The return value has the same common type.
-        self.typeId = commonType
+        self.typeId = commonType.unqualified()
 
     def staticEval(self) -> StaticEvalValue:
         conditionEval = self.condition.staticEval()
@@ -3985,7 +4015,7 @@ class FunctionCall(Exp):
                 
                 if argumentIndex < len(funcCtx.arguments):
                     # See if this argument needs a cast before being passed to the function.
-                    if argExp.typeId != funcCtx.arguments[argumentIndex].type:
+                    if argExp.typeId.unqualified() != funcCtx.arguments[argumentIndex].type:
                         argExp = self.createChild(Cast, 
                                                   funcCtx.arguments[argumentIndex].type, 
                                                   argExp, True
@@ -3997,7 +4027,7 @@ class FunctionCall(Exp):
                         # - float gets promoted to double.
                         if argExp.typeId.isInteger():
                             argExp = argExp.checkIntegerPromotion()
-                        elif argExp.typeId == TypeSpecifier.FLOAT.toBaseType():
+                        elif argExp.typeId.unqualified() == TypeSpecifier.FLOAT.toBaseType():
                             argExp = self.createChild(Cast, 
                                                       TypeSpecifier.DOUBLE.toBaseType(), 
                                                       argExp, True
@@ -4109,7 +4139,7 @@ class Subscript(Exp):
         if not self.index.typeId.isInteger():
             self.raiseError("Index must be an integer")
 
-        if self.index.typeId != TypeSpecifier.LONG.toBaseType():
+        if self.index.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
             self.index = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.index, True)
 
         # Get inner type.
@@ -4309,7 +4339,7 @@ class SingleInitializer(Initializer):
         
         # Store the original type. Needed for strict initializers.
         self.precastType = self.init.typeId
-        if self.init.typeId != expectedType:
+        if self.init.typeId.unqualified() != expectedType.unqualified():
             self.init = self.createChild(Cast, expectedType, self.init, True)
 
     def staticEval(self) -> list[StaticEvalValue]:

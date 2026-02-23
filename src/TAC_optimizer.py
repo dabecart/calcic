@@ -363,11 +363,13 @@ class ControlFlowNode:
                     # instruction is to transfer data between types and this would create two 
                     # separate variables.
                     # char and signed char are different types in the parser, but not here.
+                    # Do not pass reaching copies if any of the two operands are volatile.
                     sameTypes = inst.src.valueType == inst.dst.valueType
                     bothPointers = isinstance(inst.src.valueType, PointerDeclaratorType) and isinstance(inst.dst.valueType, PointerDeclaratorType)
                     charTuple = (TypeSpecifier.CHAR.toBaseType(), TypeSpecifier.SIGNED_CHAR.toBaseType())
                     bothChars = inst.src.valueType in charTuple and inst.dst.valueType in charTuple
-                    if sameTypes or bothPointers or bothChars:
+                    anyVolatile = inst.src.valueType.getTypeQualifiers().volatile or inst.dst.valueType.getTypeQualifiers().volatile
+                    if (sameTypes or bothPointers or bothChars) and not anyVolatile:
                         reachingCopies.add(inst)
                 
                 case TACFunctionCall():
@@ -657,37 +659,12 @@ class ControlFlowNode:
         
         self.liveVariables = liveVariables
 
-    def _isDeadStore(self, inst: TACInstruction) -> bool:
-        match inst:
-            case TACFunctionCall() | TACBuiltInFunction():
-                # We cannot eliminate function calls as they may affect other parts of the code.
-                return False
-            
-            case TACStore():
-                # We don't know if the destination of the store is dear or not, so we should never
-                # delete TACStore instructions.
-                return False
-            
-            case TACUnary() | TACBinary() | TACCopy() | \
-                 TACSignExtend() | TACZeroExtend() |  TACTruncate() | \
-                 TACDecimalToDecimal() | TACDecimalToInt() | TACDecimalToUInt() | \
-                 TACIntToDecimal() | TACUIntToDecimal() | TACGetAddress() | \
-                 TACLoad() | TACAddToPointer() | TACCopyToOffset() | TACCopyFromOffset():
-                # If the result is not in the live variables, it is a dead store and can be deleted.
-                return inst.result not in inst.liveVariables
-                
-            case TACJump() | TACJumpIfValue() | TACJumpIfZero() | TACJumpIfValue() | \
-                TACJumpIfNotZero() | TACLabel() | TACReturn():
-                return False
-
-        raise ValueError(f"Invalid check for dead store in instruction {type(inst)}")
-
     def applyLiveVariables(self):
         # If an instruction is a dead store, remove it.
         newInstructions = [
             inst
             for inst in self.instructions
-            if not self._isDeadStore(inst)
+            if not inst.isDeadStore()
         ]
         self.instructions = newInstructions
 

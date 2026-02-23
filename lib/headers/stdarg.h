@@ -11,10 +11,10 @@
 #ifndef _CALCIC_STDARG_h
 #define _CALCIC_STDARG_h
 
-#define va_start(a,b) __builtin_va_start(a,b)
-#define va_arg(a,b) __builtin_va_arg(a,b)
-#define va_end(a) __builtin_va_end(a)
-#define va_copy(a,b) __builtin_va_copy(a,b)
+#define va_start(a,b)   __builtin_va_start(a,b)
+#define va_arg(a,b)     __builtin_va_arg(a,b)
+#define va_end(a)       __builtin_va_end(a)
+#define va_copy(a,b)    __builtin_va_copy(a,b)
 
 typedef __builtin_va_list va_list;
 
