@@ -2772,8 +2772,14 @@ class Exp(AST):
     def getCommonType(self, exp1: Exp, exp2: Exp) -> DeclaratorType|None:
         if isinstance(exp1.typeId, (PointerDeclaratorType, ArrayDeclaratorType)) or \
            isinstance(exp2.typeId, (PointerDeclaratorType, ArrayDeclaratorType)):
-            if exp1.typeId == exp2.typeId:
-                return exp1.typeId
+            if isinstance(exp1.typeId, (PointerDeclaratorType, ArrayDeclaratorType)) and \
+               isinstance(exp2.typeId, (PointerDeclaratorType, ArrayDeclaratorType)) and \
+               exp1.typeId.declarator.unqualified() == exp2.typeId.declarator.unqualified():
+                # Join the declarators of both expressions.
+                declTypeQualifiers = exp1.typeId.declarator.getTypeQualifiers().union(exp2.typeId.declarator.getTypeQualifiers())
+                ret = exp1.typeId.declarator.copy()
+                ret.setTypeQualifiers(declTypeQualifiers)
+                return PointerDeclaratorType(ret)
             elif exp1.isNullPointer():
                 return exp2.typeId
             elif exp2.isNullPointer():
@@ -3773,27 +3779,49 @@ class Binary(Exp):
             commonType = self.getCommonType(self.exp1, self.exp2)
             if commonType is None:
                 self.raiseError(f"No common type of {self.exp1.typeId} and {self.exp2.typeId}")
-            
+
+            if self.binaryOperator in (BinaryOperator.EQUAL, BinaryOperator.NOT_EQUAL):
+                # Section 6.5.9: Equality operators, constraints.
+                # - Both operands have real type.
+                bothArith = self.exp1.typeId.isArithmetic() and self.exp2.typeId.isArithmetic()
+                # - Both operands are pointers to qualified or unqualified versions of compatible 
+                # types. 
+                bothPointers = isinstance(self.exp1.typeId, PointerDeclaratorType) and \
+                               isinstance(self.exp2.typeId, PointerDeclaratorType) and \
+                               commonType is not None
+                # - One operand is a pointer and the other is a null pointer.
+                exp2Null = isinstance(self.exp1.typeId, PointerDeclaratorType) and \
+                           self.exp2.isNullPointer()
+                exp1Null = isinstance(self.exp2.typeId, PointerDeclaratorType) and \
+                           self.exp1.isNullPointer()
+                if not bothArith and not bothPointers and not exp2Null and not exp1Null:
+                    self.raiseError(f"Invalid expression: {self.exp1.typeId} {self.binaryOperator.value} {self.exp2.typeId}")
+
+            elif self.binaryOperator.isComparison():
+                # Section 6.5.8: Relational operators, constraints.
+                # - Both operands have real type.
+                bothArith = self.exp1.typeId.isArithmetic() and self.exp2.typeId.isArithmetic()
+                # - Both operands are pointers to qualified or unqualified versions of compatible 
+                # types. 
+                bothPointers = isinstance(self.exp1.typeId, PointerDeclaratorType) and \
+                               isinstance(self.exp2.typeId, PointerDeclaratorType) and \
+                               commonType is not None and \
+                               not self.exp1.isNullPointer() and not self.exp2.isNullPointer() and \
+                               self.exp1.typeId.declarator.unqualified() == self.exp2.typeId.declarator.unqualified()
+                if not bothArith and not bothPointers:
+                    self.raiseError(f"Invalid expression: {self.exp1.typeId} {self.binaryOperator.value} {self.exp2.typeId}")
+
             # The resulting type used when operating both terms. 
             # This field is used on compound operations in the TAC section.
             self.castType = commonType
 
             match commonType:
-                case BaseDeclaratorType():
+                case BaseDeclaratorType() | PointerDeclaratorType():
                     if self.exp1.typeId.unqualified() != commonType:
                         self.exp1 = self.createChild(Cast, commonType, self.exp1).preconvertExpression()
                         self.exp1IsCasted = True
                     if self.exp2.typeId.unqualified() != commonType:
                         self.exp2 = self.createChild(Cast, commonType, self.exp2).preconvertExpression()
-
-                case PointerDeclaratorType() | ArrayDeclaratorType():
-                    if self.binaryOperator in (BinaryOperator.EQUAL, BinaryOperator.NOT_EQUAL):
-                        # Only == and != allows implicit castings of pointers.
-                        if self.exp1.typeId.unqualified() != commonType:
-                            self.exp1 = self.createChild(Cast, commonType, self.exp1).preconvertExpression()
-                            self.exp1IsCasted = True
-                        if self.exp2.typeId.unqualified() != commonType:
-                            self.exp2 = self.createChild(Cast, commonType, self.exp2).preconvertExpression()
 
                 case _:
                     self.raiseError(f"Binary operation not supported for {commonType}")
