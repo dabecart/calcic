@@ -9,7 +9,7 @@
 #include <string.h>
 
 size_t strlen(const char *s) {
-    const char *ps = 0;
+    const char *ps = s;
     
     while(*ps != 0) {
         ps++;

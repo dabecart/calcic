@@ -657,9 +657,11 @@ class AST(ABC):
                 ret = self.createChild(Subscript, ret)
             elif postTok.id == ".":
                 # Structure/union dot.
+                self.pop()
                 ret = self.createChild(Dot, ret)
             elif postTok.id == "->":
                 # Pointer structure/union arrow.
+                self.pop()
                 ret = self.createChild(Arrow, ret)
             else:
                 # No postfix.
@@ -3186,16 +3188,16 @@ EXPRESSIONS
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 """
 class Variable(Exp):
-    def parse(self, variableName: str):
+    def parse(self, originalName: str):
         # This variable is inside the identifierMap, verified at _parsePrimaryExpression.
-        ctxVar = self.context.identifierMap[variableName]
+        ctxVar = self.context.identifierMap[originalName]
         
         # Get the type of variable from the identifier.
         if ctxVar.mangledName not in self.context.variablesMap:
             self.raiseError("Internal error")
 
         self.typeId = self.context.variablesMap[ctxVar.mangledName].idType
-        self.originalIdentifier: str = variableName
+        self.originalIdentifier: str = originalName
         self.identifier: str = ctxVar.mangledName
 
     def staticEval(self) -> StaticEvalValue:
@@ -4212,7 +4214,6 @@ class Dot(Exp):
            self.leftExp.typeId.baseType.name not in ("STRUCT", "UNION"):
             self.raiseError(f"Expected an struct or union, received {self.leftExp.typeId}")
 
-        self.expect(".")
         self.member: str = self.expect("identifier").value
 
         self.memberInfo: ParameterInformation|None = self.leftExp.typeId.baseType.getMember(self.member)
@@ -4263,7 +4264,6 @@ class Arrow(Exp):
            self.leftExp.typeId.declarator.baseType.name not in ("STRUCT", "UNION"):
             self.raiseError(f"Expected a pointer to struct or union, received {self.leftExp.typeId}")
 
-        self.expect("->")
         self.member = self.expect("identifier").value
 
         # Check the type.

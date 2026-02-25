@@ -151,3 +151,79 @@ class BuiltIn_va_copy(BuiltInFunctionCall):
     def print(self, padding: int) -> str:
         pad = " " * padding
         return f'{pad}va_copy\n'
+    
+class BuiltIn_offsetof(BuiltInFunctionCall):
+    FUNC_NAME: str = "__builtin_offsetof"
+
+    def parseArguments(self, *args) -> DeclaratorType:
+        # offsetof(type, member)
+
+        # Parse the "type" argument. This is also the return type.
+        _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+        if self.peek().id != ",":
+            declarator = self.createChild(TopAbstractDeclarator)
+            info: DeclaratorInformation = declarator.process(declType)
+            self.param_type = info.type
+        else:
+            self.param_type = declType
+
+        if not isinstance(self.param_type, BaseDeclaratorType) or \
+           self.param_type.baseType.name != "STRUCT":
+            self.raiseError(f"Invalid type {self.param_type}, expected a struct type")
+
+        self.expect(",")
+
+        # Create a dummy variable of type 'param_type'.
+        name = ".dummy."
+        mangledName = self.context.mangleIdentifier(name)
+        self.context.addVariableIdentifier(name, mangledName, self.param_type)
+        var = self.createChild(Variable, name)
+
+        # Now, parse the subsequent terms until the '(' like we were operating on var. Keep adding 
+        # the offsets.
+        memberElement = self.createChild(Dot, var)
+        if memberElement.memberInfo is None:
+            raise ValueError()
+        self.memberOffset = memberElement.memberInfo.offset
+        
+        while True:
+            postTok = self.peek()
+            if postTok.id == "[":
+                # This is a subscript.
+                memberElement = self.createChild(Subscript, memberElement)
+                # Evaluate the array index.
+                arrayIndex = memberElement.index.staticEval().getIntegerValue(self)
+                # Multiply by the size of the returning object to get the offset.
+                self.memberOffset += arrayIndex * memberElement.typeId.getByteSize()
+
+            elif postTok.id == ".":
+                # Structure/union dot.
+                self.pop()
+                memberElement = self.createChild(Dot, memberElement)
+                if memberElement.memberInfo is None:
+                    raise ValueError()
+                self.memberOffset += memberElement.memberInfo.offset
+
+            elif postTok.id == "->":
+                # Pointer structure/union arrow.
+                self.pop()
+                memberElement = self.createChild(Arrow, memberElement)
+                if memberElement.memberInfo is None:
+                    raise ValueError()
+                self.memberOffset += memberElement.memberInfo.offset
+
+            else:
+                # No postfix.
+                break
+
+        # Remove the dummy variable.
+        del self.context.identifierMap[name]
+        del self.context.variablesMap[mangledName]
+
+        # Return type is size_t (long).
+        # TODO: This is in x64!
+        return TypeSpecifier.ULONG.toBaseType()
+
+    def print(self, padding: int) -> str:
+        pad = " " * padding
+        return f'{pad}offsetof\n'

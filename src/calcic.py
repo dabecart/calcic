@@ -300,7 +300,7 @@ def main() -> None:
 
     if not args.nostdlib:
         # Include the calcic standard libraries.
-        libBuildObject: str = str(libPath / "lib.o")
+        libBuildObject: str = str(libPath / "calcic_libc.o")
         if not os.path.exists(libBuildObject):
             raise ValueError(f"Expected file: {libBuildObject}. Please, build the calcic libraries.")
         assemblyCommand.insert(1, libBuildObject)

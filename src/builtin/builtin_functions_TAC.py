@@ -231,3 +231,16 @@ class TACBuiltIn_va_copy(TACBuiltInFunction):
     def anotateLiveVariables(self, liveVariables: set[TACValue], aliased: set[TACValue]):
         # Both dest and src are alive before the call to va_start.
         liveVariables |= {self.param_dest, self.param_src}
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+<stddef.h>
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+class TACBuiltIn_offsetof(TACBuiltInFunction):
+    @staticmethod
+    def fromAST(ast: BuiltIn_offsetof, insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
+        # Replace offsetof by a constant.
+        offset = TACValue(True, ast.typeId, str(ast.memberOffset))
+        return TACBaseOperand(offset, offset.valueType, insts)
+    

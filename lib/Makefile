@@ -8,11 +8,11 @@
 # Variables
 CC       := ../calcic
 LD       := ld
-CFLAGS   := -O --nostdlib # Enable optimizations, do not use the previously compiled libraries.
-LDFLAGS  := -r  # Relocatable flag to join objects without making a binary
+CFLAGS   := -O --nostdlib 	# Enable optimizations, do not use the previously compiled libraries.
+LDFLAGS  := -r  			# Relocatable flag to join objects without making a binary
 
 # Output names
-TARGET_OBJ := lib.o
+TARGET_OBJ := calcic_libc.o
 SRC_DIR    := src
 OBJ_DIR    := build
 
