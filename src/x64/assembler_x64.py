@@ -229,6 +229,27 @@ class AssemblerProgram(AssemblyAST):
 
     def emitCode(self) -> str:
         ret = ""
+        if not globalContext.useGCCLibraries and globalContext.generateExecutable:
+            # The _start entry point has to be manually added.
+            ret = """
+	.text
+	.globl	_start
+_start:
+	pushq	%rbp
+	movq	%rsp, %rbp
+	subq	$16, %rsp
+	movl	$0, %eax
+	call	main@PLT
+	movl	%eax, -4(%rbp)
+	movl	-4(%rbp), %eax
+	
+    # Perform a syscall "exit" (code 60).
+	movl %eax, %edi 
+	movl $60, %eax
+	syscall
+	ret
+"""
+
         for func in self.programDefs:
             ret += func.emitCode() + "\n"
 

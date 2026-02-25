@@ -6,7 +6,7 @@
  * the C99 standard. 
  * 
  * This library is part of the calcic compiler, written by @dabecart. 2026.
- **************************************************************************************************/
+***************************************************************************************************/
 
 #ifndef _CALCIC_STDARG_h
 #define _CALCIC_STDARG_h
