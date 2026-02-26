@@ -1587,6 +1587,43 @@ class AssemblerFunction(AssemblyAST):
                                           va_list_inner_struct)
                 self.instructions.extend(copyInst)
 
+            case TACBuiltIn_asm():
+                # Move the inputs to the input registers.
+                for index in range(len(tac.inValues)):
+                    registerName: str = tac.asmAST.inputs[index][0]
+                    try:
+                        register: REG = REG[registerName]
+                    except:
+                        tac.asmAST.raiseError(f"Invalid input register {registerName}")
+
+                    src = self.fromTACValue(tac.inValues[index])
+
+                    self.createInst(MOV,
+                                    src.assemblyType,
+                                    src,
+                                    Register(src.assemblyType, register))
+
+                # Write the given assembly code.
+                self.createInst(CODE, tac.asmAST.asmbCode)
+
+                # Move the outputs from the registers to the assigned variables.
+                for index in range(len(tac.outValues)):
+                    registerName: str = tac.asmAST.outputs[index][0]
+                    try:
+                        register: REG = REG[registerName]
+                    except:
+                        tac.asmAST.raiseError(f"Invalid output register {registerName}")
+
+                    dst = self.fromTACValue(tac.outValues[index])
+
+                    self.createInst(MOV,
+                                    dst.assemblyType,
+                                    Register(dst.assemblyType, register),
+                                    dst)
+
+            case _:
+                raise ValueError(f"Unexpected built-in TAC {tac}")
+
     def secondPass(self):
         for inst in self.instructions:
             inst.secondPass()
@@ -2615,6 +2652,18 @@ class COMMENT(AssemblerInstruction):
 
     def print(self) -> str:
         return f"\n# {self.comment}"
+
+# Writes raw code into the assembly output.
+class CODE(AssemblerInstruction):
+    def __init__(self, asmbCode: str, parentAST: AssemblyAST | None = None) -> None:
+        self.asmbCode = asmbCode
+        super().__init__(parentAST)
+
+    def emitCode(self) -> str:
+        return self.asmbCode
+
+    def print(self) -> str:
+        return f"\n# __asm__\n{self.asmbCode}"
 
 """
 OPERANDS

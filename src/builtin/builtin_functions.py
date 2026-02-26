@@ -13,16 +13,19 @@ from src.builtin.builtin_functions_parser import *
 from src.builtin.builtin_functions_TAC import *
 
 class BuiltInFunctions:
-    FUNCS: list[str] = [
+    FUNCS: dict[str, type]  = {
         # <stdarg.h>
-        BuiltIn_va_start.FUNC_NAME,
-        BuiltIn_va_arg.FUNC_NAME,
-        BuiltIn_va_end.FUNC_NAME,
-        BuiltIn_va_copy.FUNC_NAME,
+        BuiltIn_va_start.FUNC_NAME  : BuiltIn_va_start,
+        BuiltIn_va_arg.FUNC_NAME    : BuiltIn_va_arg,
+        BuiltIn_va_end.FUNC_NAME    : BuiltIn_va_end,
+        BuiltIn_va_copy.FUNC_NAME   : BuiltIn_va_copy,
 
         # <stddef.h>
-        BuiltIn_offsetof.FUNC_NAME,
-    ]
+        BuiltIn_offsetof.FUNC_NAME  : BuiltIn_offsetof,
+
+        # Custom macros.
+        BuiltIn_asm.FUNC_NAME       : BuiltIn_asm,
+    }
 
     @staticmethod
     def connectHandlersToContext(ctx: GlobalContext):
@@ -40,35 +43,22 @@ class BuiltInFunctions:
         return isinstance(elem, BuiltInFunctionCall)
     
     @staticmethod
-    def _getBuiltInClassFromName(name: str) -> type:
-        match name:
-            # <stdarg.h>
-            case BuiltIn_va_start.FUNC_NAME:    return BuiltIn_va_start
-            case BuiltIn_va_arg.FUNC_NAME:      return BuiltIn_va_arg
-            case BuiltIn_va_end.FUNC_NAME:      return BuiltIn_va_end
-            case BuiltIn_va_copy.FUNC_NAME:     return BuiltIn_va_copy
-            # <stddef.h>
-            case BuiltIn_offsetof.FUNC_NAME:    return BuiltIn_offsetof
-            case _:
-                raise ValueError(f"Built-in class {name} does not exist")
-
-    @staticmethod
     def parseBuiltInASTFunctionCall(parentAST: AST, funcName: str) -> BuiltInFunctionCall:
-        return parentAST.createChild(BuiltInFunctions._getBuiltInClassFromName(funcName))
+        astClass = BuiltInFunctions.FUNCS.get(funcName)
+        if astClass is None:
+            raise ValueError(f"Cannot create built-in function call from {funcName}")
+        
+        return parentAST.createChild(astClass)
     
     @staticmethod
-    def parseBuiltInTACFunctionCall(exp: BuiltInFunctionCall, insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
-        match exp:
-            # <stdarg.h>
-            case BuiltIn_va_start():    return TACBuiltIn_va_start.fromAST(exp, insts, parent)
-            case BuiltIn_va_arg():      return TACBuiltIn_va_arg.fromAST(exp, insts, parent)
-            case BuiltIn_va_end():      return TACBuiltIn_va_end.fromAST(exp, insts, parent)
-            case BuiltIn_va_copy():     return TACBuiltIn_va_copy.fromAST(exp, insts, parent)
-            case BuiltIn_va_copy():     return TACBuiltIn_va_copy.fromAST(exp, insts, parent)
+    def parseBuiltInTACFunctionCall(exp: BuiltInFunctionCall, 
+                                    insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
+        # Add TAC to the class name of exp and call the fromAST static function.
+        className = exp.__class__.__name__
+        tacName = f"TAC{className}"
+        tacClass = globals().get(tacName)
 
-            # <stddef.h>
-            case BuiltIn_offsetof():    return TACBuiltIn_offsetof.fromAST(exp, insts, parent)
-
-            case _:
-                raise ValueError(f"Cannot create built-in function TAC from {exp}")
-
+        if tacClass is None:
+            raise ValueError(f"Cannot create built-in function TAC from {className}")
+        
+        return tacClass.fromAST(exp, insts, parent)

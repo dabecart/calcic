@@ -243,4 +243,47 @@ class TACBuiltIn_offsetof(TACBuiltInFunction):
         # Replace offsetof by a constant.
         offset = TACValue(True, ast.typeId, str(ast.memberOffset))
         return TACBaseOperand(offset, offset.valueType, insts)
+
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Custom macros.
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+class TACBuiltIn_asm(TACBuiltInFunction):
+    def __init__(self, asmAST: BuiltIn_asm, 
+                 instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
+        self.asmAST = asmAST
+        super().__init__(instructionsList, parentTAC)
+
+    def parse(self) -> TACValue:
+        # Parse the input and output expressions.
+        self.outValues: list[TACValue] = []
+        for _, outExp in self.asmAST.outputs:
+            self.outValues.append(self.parseTACExpression(outExp, self.insts).convert())
+
+        self.inValues: list[TACValue] = []
+        for _, inExp in self.asmAST.inputs:
+            self.inValues.append(self.parseTACExpression(inExp, self.insts).convert())
+
+        return TACValue(False, TypeSpecifier.VOID.toBaseType())
+
+    def printBuiltIn(self) -> str:
+        return f"__asm__\n"
     
+    @staticmethod
+    def fromAST(ast: BuiltIn_asm, insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
+        func = parent.createChild(TACBuiltIn_asm, ast, insts)
+        return TACBaseOperand(func.result, ast.typeId, insts)
+
+    def anotateReachingCopies(self, copies: set[TACCopy], aliased: set[TACValue]):
+        # This will probably affect reaching copies, but we'll suppose the programmer know what is
+        # doing when including raw assembly in C code.
+        pass
+
+    def rewriteWithReachingCopies(self) -> TACInstruction|None:
+        return self
+
+    def anotateLiveVariables(self, liveVariables: set[TACValue], aliased: set[TACValue]):
+        # This does not affect live variables.
+        pass

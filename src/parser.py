@@ -927,7 +927,7 @@ class AST(ABC):
 
             # If it's none of that, raise an error.
             tok = self.pop()
-            self.raiseError(f"Expected a type, not {tok.value}")
+            self.raiseError(f"{tok.value} is not a valid type")
 
         if {"signed", "unsigned"} <= typeSet:
             self.raiseError("Variable declared as signed and unsigned at the same time")

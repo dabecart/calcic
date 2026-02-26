@@ -227,3 +227,61 @@ class BuiltIn_offsetof(BuiltInFunctionCall):
     def print(self, padding: int) -> str:
         pad = " " * padding
         return f'{pad}offsetof\n'
+    
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Custom macros.
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+class BuiltIn_asm(BuiltInFunctionCall):
+    FUNC_NAME: str = "__asm__"
+
+    def parseArguments(self, *args) -> DeclaratorType:
+        # __asm__ (asmbCode : outputs : inputs);
+        self.asmbCode = self.createChild(String).value
+
+        self.outputs: list[tuple[str,Exp]] = []
+        if self.peek().id == ":":
+            # outputs: "register" (exp)
+            while True:
+                self.pop() # Either pop the , or the :
+
+                register = self.createChild(String).value
+                self.expect("(")
+                exp = self.createChild(Exp)
+
+                if not exp.typeId.isScalar():
+                    self.raiseError(f"Expected a scalar type")
+    
+                self.expect(")")
+
+                self.outputs.append((register, exp))
+
+                if self.peek().id != ",":
+                    break
+            
+        self.inputs = []
+        if self.peek().id == ":":
+            # inputs: "register" (exp)
+            while True:
+                self.pop() # Either pop the , or the :
+
+                register = self.createChild(String).value
+                self.expect("(")
+                exp = self.createChild(Exp)
+
+                if not exp.typeId.isScalar():
+                    self.raiseError(f"Expected a scalar type")
+
+                self.expect(")")
+
+                self.inputs.append((register, exp))
+
+                if self.peek().id != ",":
+                    break
+
+        return TypeSpecifier.VOID.toBaseType()
+
+    def print(self, padding: int) -> str:
+        pad = " " * padding
+        return f'{pad}__asm__\n'
