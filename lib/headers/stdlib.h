@@ -26,19 +26,30 @@ void *realloc(void *ptr, size_t size);
 
 #ifdef COMPILING_STDLIB
 
+// Dynamic memory allocation.
+
 // This header is added on the top of the allocated block.
-typedef struct {
+// TODO: Optimize this struct.
+typedef struct BlockHeader{
     // Pointer to the previous and next block.
-    void *prev, *next;
+    struct BlockHeader *prev, *next;
     // Size of the block.
     size_t size;
+
+    // The block's heap chunk position.
+    struct BlockHeader* heap;
+    size_t heapSize;
+
+    // Flags.
+    char isInUse;
 } BlockHeader;
 
 #define BLOCK_HEADER_SIZE   sizeof(BlockHeader) // bytes
 #define BLOCK_ALIGNMENT     16 // bytes
+#define HEAP_CHUNK_SIZE     4096 // bytes
 
 // Defined in malloc.
-extern BlockHeader *firstBlock;
+extern BlockHeader *firstHeap;
 extern BlockHeader *lastBlock;
 
 #endif // COMPILING_STDLIB

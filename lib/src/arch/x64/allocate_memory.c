@@ -45,7 +45,7 @@ void *__mmap(void *start, size_t len, int prot, int flags, int fd, long off)
 }
 
 void* __arch_allocate_memory(size_t size) {
-    void* ret = __mmap(0, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    void* ret = __mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     
     if(ret == MAP_FAILED) {
         return NULL;
