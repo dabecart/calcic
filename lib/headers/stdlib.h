@@ -31,9 +31,11 @@ void *realloc(void *ptr, size_t size);
 // This header is added on the top of the allocated block.
 // TODO: Optimize this struct.
 typedef struct BlockHeader{
-    // Pointer to the previous and next block.
+    // Pointer to the previous and next block (used in coalescing).
     struct BlockHeader *prev, *next;
-    // Size of the block.
+    // Pointer to the previous and next free block.
+    struct BlockHeader *freePrev, *freeNext;
+    // Size of the block (including the header).
     size_t size;
 
     // The block's heap chunk position.
@@ -51,6 +53,11 @@ typedef struct BlockHeader{
 // Defined in malloc.
 extern BlockHeader *firstHeap;
 extern BlockHeader *lastBlock;
+extern BlockHeader *freeListHead;
+extern size_t heapSize;
+
+void _insertInFreeList(BlockHeader* block);
+void _removeFromFreeList(BlockHeader* block);
 
 #endif // COMPILING_STDLIB
 
