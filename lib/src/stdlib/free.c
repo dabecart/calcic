@@ -18,8 +18,8 @@ void free(void *ptr) {
     // ptr is expected to be preceded by a block header.
     BlockHeader *block = (BlockHeader*) ((char*) ptr - BLOCK_HEADER_SIZE);
 
-    // The block is now unused.
-    block->isInUse = 0;
+    // Subtract the size of the block to the 'usedSize' in the heap.
+    block->heap->usedSize -= block->size;
 
     // Try to coalesce unused blocks together.
     // Take a look at the previous block.
@@ -77,38 +77,34 @@ void free(void *ptr) {
         lastBlock = lastBlock->prev;
     }
 
-    // Check if the heap chunk becomes empty when freeing this block.
-    // if(block->heap != firstHeap) {
-    //     int isHeapEmpty = 1;
+    if(lastBlock != NULL) {
+        // In case we removed a bunch of blocks when pruning free blocks, remember to set the last 
+        // block next to NULL.
+        lastBlock->next = NULL;
+    }
 
-    //     // Check the previous blocks in the same heap as 'block'.
-    //     BlockHeader *beforeChunk = block->prev;
-    //     while (isHeapEmpty && beforeChunk != NULL && (beforeChunk->heap == block->heap)) {
-    //         isHeapEmpty = !beforeChunk->isInUse;
-    //         beforeChunk = beforeChunk->prev;
-    //     }
+    // Check the current heap chunk. With the current free() operation, we may have emptied it.
+    // Never deallocate the first heap chunk.
+    if(block->heap != firstHeapChunk && block->heap->usedSize == 0) {
+        BlockHeader *iterator = block->heap->lastFreed;
+        while(iterator != NULL && iterator->heap == block->heap) {
+            // Remove it from the free list.
+            _removeFromFreeList(iterator);
 
-    //     // Check the next blocks in the same heap as 'block'.
-    //     BlockHeader *afterChunk = block->next;
-    //     while (isHeapEmpty && afterChunk != NULL && (afterChunk->heap == block->heap)) {
-    //         isHeapEmpty = !afterChunk->isInUse;
-    //         afterChunk = afterChunk->next;
-    //     }
+            // Remove it from the normal list.
+            if(iterator->next != NULL) {
+                iterator->next->prev = iterator->prev;
+            }
+            if(iterator->prev != NULL) {
+                iterator->prev->next = iterator->next;
+            }
 
-    //     if(isHeapEmpty) {
-    //         if(beforeChunk != NULL && afterChunk != NULL) {
-    //             // The chunk being removed is between two chunks, connect them together.
-    //             beforeChunk->next = afterChunk;
-    //             afterChunk->prev = beforeChunk;
+            // We made sure that freed blocks are together in the list, so go back in the list.
+            iterator = iterator->freePrev;
+        }
 
-    //         }else if(beforeChunk != NULL) {
-    //             // We just removed the latest chunk (lastInChunk is NULL).
-    //             beforeChunk->next = NULL;
-    //         }
-
-    //         // If the heap chunk is empty, deallocate it.
-    //         heapSize -= block->heapSize;
-    //         __arch_deallocate_memory(block->heap, block->heapSize);
-    //     }
-    // }    
+        // We have removed all blocks in the chunk, deallocate the heap.
+        heapSize -= block->heap->size;
+        __arch_deallocate_memory(block->heap, block->heap->size + CHUNK_HEADER_SIZE);
+    }
 }

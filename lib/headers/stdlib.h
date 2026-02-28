@@ -26,32 +26,46 @@ void *realloc(void *ptr, size_t size);
 
 #ifdef COMPILING_STDLIB
 
+// Aligns n to the next multiple of a if n is not a multiple already.
+#define ALIGN_UP(n, a) (((n) + ((a) - 1)) & ~((a) - 1))
+
 // Dynamic memory allocation.
+
+struct HeapChunkHeader;
 
 // This header is added on the top of the allocated block.
 // TODO: Optimize this struct.
 typedef struct BlockHeader{
     // Pointer to the previous and next block (used in coalescing).
     struct BlockHeader *prev, *next;
-    // Pointer to the previous and next free block.
+    // Pointer to the previous and next free block (used when the block is not in use).
     struct BlockHeader *freePrev, *freeNext;
     // Size of the block (including the header).
     size_t size;
 
     // The block's heap chunk position.
-    struct BlockHeader* heap;
-    size_t heapSize;
+    struct HeapChunkHeader* heap;
 
     // Flags.
     char isInUse;
 } BlockHeader;
 
-#define BLOCK_HEADER_SIZE   sizeof(BlockHeader) // bytes
-#define BLOCK_ALIGNMENT     16 // bytes
-#define HEAP_CHUNK_SIZE     4096 // bytes
+typedef struct HeapChunkHeader {
+    // Allocated chunk size (including chunk header).
+    size_t size;
+    // Used size by the blocks in the chunk. If it reaches zero, this chunk is empty.
+    size_t usedSize;
+    // Pointer to the last freed block belonging to this chunk.
+    BlockHeader *lastFreed;
+} HeapChunkHeader;
+
+#define BLOCK_ALIGNMENT     16
+#define BLOCK_HEADER_SIZE   ALIGN_UP(sizeof(BlockHeader), BLOCK_ALIGNMENT)
+#define CHUNK_HEADER_SIZE   ALIGN_UP(sizeof(HeapChunkHeader), BLOCK_ALIGNMENT)
+#define HEAP_CHUNK_SIZE     4096
 
 // Defined in malloc.
-extern BlockHeader *firstHeap;
+extern HeapChunkHeader *firstHeapChunk;
 extern BlockHeader *lastBlock;
 extern BlockHeader *freeListHead;
 extern size_t heapSize;
