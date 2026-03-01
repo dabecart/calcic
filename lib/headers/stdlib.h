@@ -26,28 +26,18 @@ void *realloc(void *ptr, size_t size);
 
 #ifdef COMPILING_STDLIB
 
-// Aligns n to the next multiple of a if n is not a multiple already.
 #define ALIGN_UP(n, a) (((n) + ((a) - 1)) & ~((a) - 1))
-
-// Dynamic memory allocation.
 
 struct HeapChunkHeader;
 
 // This header is added on the top of the allocated block.
-// TODO: Optimize this struct.
 typedef struct BlockHeader{
-    // Pointer to the previous and next block (used in coalescing).
-    struct BlockHeader *prev, *next;
-    // Pointer to the previous and next free block (used when the block is not in use).
-    struct BlockHeader *freePrev, *freeNext;
-    // Size of the block (including the header).
-    size_t size;
-
+    // Pointer to the previous and next free block (used for coalescing).
+    struct BlockHeader *prevFree, *nextFree;
     // The block's heap chunk position.
     struct HeapChunkHeader* heap;
-
-    // Flags.
-    char isInUse;
+    // Size of the block (including the header).
+    size_t size;
 } BlockHeader;
 
 typedef struct HeapChunkHeader {
@@ -68,7 +58,6 @@ typedef struct HeapChunkHeader {
 
 // Defined in malloc.
 extern HeapChunkHeader *firstHeapChunk;
-extern BlockHeader *lastBlock;
 extern BlockHeader *freeListHead;
 extern size_t heapSize;
 extern HeapChunkHeader *chunkDeallocateList[DEALLOCATE_LIST_LEN];

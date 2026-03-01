@@ -11,10 +11,8 @@
 #include <arch.h>
 
 HeapChunkHeader *firstHeapChunk = NULL;
-BlockHeader *lastBlock  = NULL;
 BlockHeader *freeListHead = NULL;
 size_t heapSize = 0;
-
 HeapChunkHeader *chunkDeallocateList[DEALLOCATE_LIST_LEN] = {NULL};
 int chunkDeallocateLen = 0;
 
@@ -28,19 +26,15 @@ static void initHeap(HeapChunkHeader *chunk, size_t chunkSize) {
     chunk->lastFreed = NULL;
 }
 
-static void initBlock(BlockHeader *block, BlockHeader *previousBlock, BlockHeader *nextBlock, 
-    size_t blockSize, HeapChunkHeader* currentHeap) 
+static void initBlock(BlockHeader *block, size_t blockSize, HeapChunkHeader* currentHeap) 
 {
     if(block == NULL) {
         return;
     }
 
-    block->prev = previousBlock;
-    block->next = nextBlock;
-
+    block->prevFree = block->nextFree = NULL;
     block->size = blockSize;
     block->heap = currentHeap;
-    block->isInUse = 1;
 
     if(block->heap->usedSize == 0) {
         // The heap chunk is no longer empty. Search for this block in the 'to deallocate' list and 
@@ -63,122 +57,107 @@ static void initBlock(BlockHeader *block, BlockHeader *previousBlock, BlockHeade
     }
     // Add the size of the block to the heap 'usedSize' counter.
     block->heap->usedSize += blockSize;
-
-    // Update the previous and next blocks with references to the newly created block.
-    if(previousBlock != NULL) {
-        previousBlock->next = block;
-    }
-    if(nextBlock != NULL) {
-        nextBlock->prev = block;
-    }
 }
 
 void _insertInFreeList(BlockHeader* block) {
     // This block needs to be inserted along the other free blocks from the same heap.
     if(block->heap->lastFreed == NULL) {
         // No other block from the heap was freed, add this block to the end of the free list.
-        block->freeNext = NULL;
-        block->freePrev = freeListHead;
+        block->nextFree = NULL;
+        block->prevFree = freeListHead;
         if(freeListHead != NULL) {
-            freeListHead->freeNext = block;
+            freeListHead->nextFree = block;
         }
         freeListHead = block;
     }else {
-        // Insert the block to the right of the last freed block in the same heap.
-        block->freePrev = block->heap->lastFreed;
-        block->freeNext = block->heap->lastFreed->freeNext;
+        // 'prevInList' will be the previous block to the current one in the free list.
+        BlockHeader *prevInList = block->heap->lastFreed;
+        BlockHeader *nextInList = prevInList->nextFree;
+        while((prevInList != NULL) && (prevInList->heap == block->heap) && (block < prevInList)) {
+            nextInList = prevInList;
+            prevInList = prevInList->prevFree;
+        }
 
-        if(block->heap->lastFreed == freeListHead) {
-            // The 'lastFreed' was the head of the free list. Set the head now to be the current 
+        // Insert the block to the right of the last freed block in the same heap.
+        block->prevFree = prevInList;
+        block->nextFree = nextInList;
+
+        if(nextInList == NULL) {
+            // The 'prevInList' was the head of the free list. Set the head now to be the current 
             // block.
             freeListHead = block;
         }else {
-            block->heap->lastFreed->freeNext->freePrev = block;
+            nextInList->prevFree = block;
         }
-        block->heap->lastFreed->freeNext = block;
+
+        if(prevInList != NULL) {
+            prevInList->nextFree = block;
+        }
     }
     
-    // This is now the last freed block.
-    block->heap->lastFreed = block;
-    // This block is not in use.
-    block->isInUse = 0;
+    // Store the rightmost freed direction of the heap.
+    if(block > block->heap->lastFreed) {
+        block->heap->lastFreed = block;
+    }
+
+    // printFreeBlocks();
 }
 
 void _removeFromFreeList(BlockHeader* block) {
     // If the block being removed is the 'lastFreed' block of the heap, set it to the previous one 
     // in the same heap or NULL if there isn't one.
     if(block == block->heap->lastFreed) {
-        if(block->freePrev != NULL && block->freePrev->heap == block->heap) {
-            block->heap->lastFreed = block->freePrev;
+        if(block->prevFree != NULL && block->prevFree->heap == block->heap) {
+            block->heap->lastFreed = block->prevFree;
         }else {
             block->heap->lastFreed = NULL;
         }
     }
 
-    if(block->freeNext == NULL) {
+    if(block->nextFree == NULL) {
         // This is the head of the free list.
-        freeListHead = block->freePrev;
+        freeListHead = block->prevFree;
     }else {
-        block->freeNext->freePrev = block->freePrev;
+        block->nextFree->prevFree = block->prevFree;
     }
 
-    if(block->freePrev != NULL) {
-        block->freePrev->freeNext = block->freeNext;
+    if(block->prevFree != NULL) {
+        block->prevFree->nextFree = block->nextFree;
     }
 
-    block->freeNext = NULL;
-    block->freePrev = NULL;
+    // printFreeBlocks();
 }
 
-void* malloc(size_t size) {
-    BlockHeader *block = NULL;
-    
-    // Add the size of the block header.
-    size += BLOCK_HEADER_SIZE;
-    
-    // Convert 'size' in a multiple of BLOCK_ALIGNMENT.
-    size = ALIGN_UP(size, BLOCK_ALIGNMENT);
+void *malloc(size_t size) {
+    BlockHeader* block = NULL;
 
-    // Check if the size fits in the current heap (if it exists).
-    if(lastBlock != NULL) {
-        char* endOfLastBlock = ((char*) lastBlock) + lastBlock->size;
-        char* endOfHeap = ((char*) lastBlock->heap) + lastBlock->heap->size + CHUNK_HEADER_SIZE;
-        size_t remainingBytesInHeap = endOfHeap - endOfLastBlock;
+    // Add the size of the block header, and align to BLOCK_ALIGNMENT.
+    size = ALIGN_UP(size + BLOCK_HEADER_SIZE, BLOCK_ALIGNMENT);
 
-        if(size <= remainingBytesInHeap) {
-            // The new block can be assigned in the current heap next to the last block.
-            block = (BlockHeader*) endOfLastBlock;
-            initBlock(block, lastBlock, NULL, size, lastBlock->heap);
-
-            // This is the last block made in the heap.
-            lastBlock = block;
-            goto return_malloc;
-        }
-
+    if(freeListHead != NULL) {
         // Check if there are any previous blocks which were freed. Start from the free list's head.
         BlockHeader* iterator = freeListHead;
         while(iterator != NULL) {
             if(iterator->size >= size) {
                 // We found a previous block which can be reused.
+                // Remove 'iterator' from the free list.
+                _removeFromFreeList(iterator);
+
                 block = iterator;
 
-                // The previous block remains the same.
-                BlockHeader *prevBlock = iterator->prev;
-                
-                // If the size of the current block is the same as the iterator's, then, the 
-                // next block also remains the same.
-                BlockHeader *nextBlock = iterator->next;
                 size_t remainingSizeInBlock = iterator->size - size;
                 if(remainingSizeInBlock >= (BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT)) {
                     // The block is going to be splitted in two because there's space for a new 
                     // block.
-                    nextBlock = (BlockHeader*) (((char*) iterator) + size);
-                    initBlock(nextBlock, block, iterator->next, remainingSizeInBlock, iterator->heap);
+                    BlockHeader *splittedBlock = (BlockHeader*) (((char*) iterator) + size);
+                    
+                    initBlock(splittedBlock, remainingSizeInBlock, iterator->heap);
+                    // Subtract the size of the block to the 'usedSize' in the heap. This is added 
+                    // inside initBlock, undo it.
+                    block->heap->usedSize -= remainingSizeInBlock;
                     
                     // Insert it into the free list.
-                    _insertInFreeList(nextBlock);
-                    // Subtract the size of the block to the 'usedSize' in the heap.
-                    block->heap->usedSize -= remainingSizeInBlock;
+                    _insertInFreeList(splittedBlock);
 
                 }else{
                     // If the block is not splitted, make the current block be as large as the 
@@ -186,16 +165,13 @@ void* malloc(size_t size) {
                     size = iterator->size;
                 }
 
-                // Remove the current block from the free list.
-                _removeFromFreeList(block);
-                
-                initBlock(block, prevBlock, nextBlock, size, iterator->heap);
+                initBlock(block, size, iterator->heap);
 
                 goto return_malloc;
             }
             
             // Go to the previous block if this one wasn't available.
-            iterator = iterator->freePrev;
+            iterator = iterator->prevFree;
         }
     }
 
@@ -205,26 +181,45 @@ void* malloc(size_t size) {
         (newHeapSize > HEAP_CHUNK_SIZE) ? newHeapSize : HEAP_CHUNK_SIZE,
         HEAP_CHUNK_SIZE
     );
-    HeapChunkHeader *chunk = __arch_allocate_memory(newHeapSize);
-    // fprintf(stderr, " [allocated %zu at %p] ", newHeapSize, chunk);
-    if(chunk == NULL) {
+    HeapChunkHeader *heapChunk = __arch_allocate_memory(newHeapSize);
+    if(heapChunk == NULL) {
         return NULL;
     }
 
+    // Modify the total allocated heap size.
     heapSize += newHeapSize;
-    initHeap(chunk, newHeapSize);
+    initHeap(heapChunk, newHeapSize);
+
+    // The new block will be after the heap chunk.
+    block = (BlockHeader*) ((char*) heapChunk + CHUNK_HEADER_SIZE);
+
+    size_t remainingSizeInHeap = heapChunk->size - size;
+    if(remainingSizeInHeap >= (BLOCK_HEADER_SIZE + BLOCK_ALIGNMENT)) {
+        // We are going to add two blocks to the heap, the requested one and a free one.
+        BlockHeader *freeBlock = (BlockHeader*) (((char*) block) + size);
+        
+        initBlock(freeBlock, remainingSizeInHeap, heapChunk);
+        // Subtract the size of the block to the 'usedSize' in the heap. This is added 
+        // inside initBlock, undo it.
+        heapChunk->usedSize -= remainingSizeInHeap;
+        
+        // Insert it into the free list.
+        _insertInFreeList(freeBlock);
+
+    }else{
+        // If there's no space for a free block, make the requested block be as big as the chunk 
+        // allows it so there are no holes left in memory.
+        size = heapChunk->size;
+    }
 
     // Initialize the block.
-    block = (BlockHeader*) ((char*) chunk + CHUNK_HEADER_SIZE);
-    initBlock(block, lastBlock, NULL, size, chunk);
+    initBlock(block, size, heapChunk);
 
-    // This is the last block made in the heap.
-    lastBlock = block;
     if(firstHeapChunk == NULL) {
         // This was the first heap block created. Use this to check if the heap chunk to delete in 
         // free() is the first heap or not. This is used so that we don't keep allocating heap 
         // chunks when only one block is being used by the program.  
-        firstHeapChunk = chunk;
+        firstHeapChunk = heapChunk;
     }
     
 return_malloc:
