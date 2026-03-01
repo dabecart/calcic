@@ -15,6 +15,9 @@ BlockHeader *lastBlock  = NULL;
 BlockHeader *freeListHead = NULL;
 size_t heapSize = 0;
 
+HeapChunkHeader *chunkDeallocateList[DEALLOCATE_LIST_LEN] = {NULL};
+int chunkDeallocateLen = 0;
+
 static void initHeap(HeapChunkHeader *chunk, size_t chunkSize) {
     if(chunk == NULL) {
         return;
@@ -39,6 +42,25 @@ static void initBlock(BlockHeader *block, BlockHeader *previousBlock, BlockHeade
     block->heap = currentHeap;
     block->isInUse = 1;
 
+    if(block->heap->usedSize == 0) {
+        // The heap chunk is no longer empty. Search for this block in the 'to deallocate' list and 
+        // remove it.
+        int toDeallocateIndex = 0;
+        while(toDeallocateIndex < chunkDeallocateLen) {
+            if(block->heap == chunkDeallocateList[toDeallocateIndex]) {
+                break;
+            }
+            toDeallocateIndex++;
+        }
+        
+        if(toDeallocateIndex != chunkDeallocateLen) {
+            // If found, move all elements from this index to the left.
+            for(int index = toDeallocateIndex; index < chunkDeallocateLen - 1; index++) {
+                chunkDeallocateList[index] = chunkDeallocateList[index + 1];
+            }
+            chunkDeallocateLen--;
+        }
+    }
     // Add the size of the block to the heap 'usedSize' counter.
     block->heap->usedSize += blockSize;
 
@@ -109,8 +131,6 @@ void _removeFromFreeList(BlockHeader* block) {
 }
 
 void* malloc(size_t size) {
-    // fprintf(stderr, "malloc(%zu)", size);
-    
     BlockHeader *block = NULL;
     
     // Add the size of the block header.

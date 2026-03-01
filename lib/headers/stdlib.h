@@ -64,11 +64,15 @@ typedef struct HeapChunkHeader {
 #define CHUNK_HEADER_SIZE   ALIGN_UP(sizeof(HeapChunkHeader), BLOCK_ALIGNMENT)
 #define HEAP_CHUNK_SIZE     4096
 
+#define DEALLOCATE_LIST_LEN 5
+
 // Defined in malloc.
 extern HeapChunkHeader *firstHeapChunk;
 extern BlockHeader *lastBlock;
 extern BlockHeader *freeListHead;
 extern size_t heapSize;
+extern HeapChunkHeader *chunkDeallocateList[DEALLOCATE_LIST_LEN];
+extern int chunkDeallocateLen;
 
 void _insertInFreeList(BlockHeader* block);
 void _removeFromFreeList(BlockHeader* block);
