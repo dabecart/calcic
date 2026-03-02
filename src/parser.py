@@ -1218,6 +1218,7 @@ class FunctionParameterDeclarator(DeclaratorAST):
             _, self.declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
 
             self.decl: TopDeclarator|TopAbstractDeclarator|None = None
+            self.isAnonymous: bool = True 
             if self.peek().id not in (",", ")"):
                 # Function parameters can be anonymous during declaration. Try to parse a normal 
                 # declarator first, and if it fails, try with an anonymous declarator.
@@ -1227,17 +1228,21 @@ class FunctionParameterDeclarator(DeclaratorAST):
                     self.decl = TopDeclarator(tokensCopy, self.context, self)
                     self.tokens.clear()
                     self.tokens.extend(tokensCopy)
+                    # Normal declarator was succesful, the parameter is not anonymous.
+                    self.isAnonymous = False
                 except:
                     self.decl = self.createChild(TopAbstractDeclarator)
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
         if self.decl is None:
-            info = DeclaratorInformation(".anonymous.", baseType, [], isAnonymous=True)
+            info = DeclaratorInformation(".anonymous.", baseType, [])
         else:
             info = self.decl.process(baseType)
             info.type = info.type.decay()
             if info.type == TypeSpecifier.VOID.toBaseType():
                 self.raiseError("A parameter must not have void type")
+        
+        info.isAnonymous = self.isAnonymous
         return info
 
 class DirectDeclarator(DeclaratorAST):

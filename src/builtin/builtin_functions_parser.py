@@ -233,54 +233,94 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 Custom macros.
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 """
+class BuiltIn_asmIOType(enum.Enum):
+    REGISTER = enum.auto()
+    IMMEDIATE = enum.auto()
+
+@dataclass
+class BuiltIn_asmIO:
+    ioType: BuiltIn_asmIOType
+    # Args is used to store the requested register for a REGISTER type.
+    args: str
+    exp: Exp
+
+    # This needs to be set from the assembler.
+    _asmbRepresentation: str = ""
+
+    def setAsmbRepresentation(self, repr: str):
+        self._asmbRepresentation = repr.lstrip(" \t\r\n").rstrip(" \t\r\n")
+
 class BuiltIn_asm(BuiltInFunctionCall):
     FUNC_NAME: str = "__asm__"
+
+    def parseIOList(self, validIOTypes: set[BuiltIn_asmIOType]) -> list[BuiltIn_asmIO]:
+        # "r:register" (exp)   <- Pass a value to a register before inserting the code.
+        # "i" (exp)            <- Replace a value as an immediate in the assembly code.
+
+        ret: list[BuiltIn_asmIO] = []
+        while True:
+            self.pop() # Either pop the , or the :
+
+            typeStr = self.createChild(String).value
+
+            match typeStr[0].lower():
+                case "r":
+                    asmIOType = BuiltIn_asmIOType.REGISTER
+                    args = typeStr.split(":")
+                    if len(args) != 2:
+                        self.raiseError(f'Invalid type string {typeStr}. For registers, use "r:<reg>"')
+                    arg = args[1]
+
+                case "i":
+                    asmIOType = BuiltIn_asmIOType.IMMEDIATE
+                    arg = ""
+
+                case _:
+                    self.raiseError(f"Invalid type string {typeStr}")
+
+            if asmIOType not in validIOTypes:
+                self.raiseError(f"Invalid IO type for this argument")
+
+            self.expect("(")
+            exp = self.createChild(Exp)
+
+            if not exp.typeId.isScalar():
+                self.raiseError(f"Expected a scalar type")
+
+            self.expect(")")
+
+            asmIO = BuiltIn_asmIO(asmIOType, arg, exp)
+            ret.append(asmIO)
+
+            if self.peek().id != ",":
+                break
+
+        return ret
 
     def parseArguments(self, *args) -> DeclaratorType:
         # __asm__ (asmbCode : outputs : inputs);
         self.asmbCode = self.createChild(String).value
 
-        self.outputs: list[tuple[str,Exp]] = []
+        self.outputs: list[BuiltIn_asmIO] = []
         if self.peek().id == ":":
-            # outputs: "register" (exp)
-            while True:
-                self.pop() # Either pop the , or the :
+            self.outputs = self.parseIOList(set([BuiltIn_asmIOType.REGISTER]))
 
-                register = self.createChild(String).value
-                self.expect("(")
-                exp = self.createChild(Exp)
-
-                if not exp.typeId.isScalar():
-                    self.raiseError(f"Expected a scalar type")
-    
-                self.expect(")")
-
-                self.outputs.append((register, exp))
-
-                if self.peek().id != ",":
-                    break
-            
-        self.inputs = []
+        self.inputs: list[BuiltIn_asmIO]  = []
         if self.peek().id == ":":
-            # inputs: "register" (exp)
-            while True:
-                self.pop() # Either pop the , or the :
-
-                register = self.createChild(String).value
-                self.expect("(")
-                exp = self.createChild(Exp)
-
-                if not exp.typeId.isScalar():
-                    self.raiseError(f"Expected a scalar type")
-
-                self.expect(")")
-
-                self.inputs.append((register, exp))
-
-                if self.peek().id != ",":
-                    break
+            self.inputs = self.parseIOList(set([BuiltIn_asmIOType.IMMEDIATE, BuiltIn_asmIOType.REGISTER]))
 
         return TypeSpecifier.VOID.toBaseType()
+    
+    # Before calling this, remember to set all _asmbRepresentation of the inputs.
+    def generateAssemblyCode(self) -> str:
+        # Replace the %\d with the immediate representation.
+        for index, input in enumerate(self.inputs):
+            if input.ioType == BuiltIn_asmIOType.IMMEDIATE:
+                self.asmbCode = self.asmbCode.replace(f"%{index}", input._asmbRepresentation)
+        
+        # Replace all %% with %.
+        self.asmbCode = self.asmbCode.replace("%%", "%")
+        return self.asmbCode
 
     def print(self, padding: int) -> str:
         pad = " " * padding

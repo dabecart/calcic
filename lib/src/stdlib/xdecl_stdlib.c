@@ -1,29 +1,24 @@
 /***************************************************************************************************
- * <arch.h>
+ * xdecl_stdlib.c
  * 
- * Functions which are dependent on the system architecture. Only used during compilation of the 
- * libraries.
+ * Contains all declarations of global variables used by the stdlib functions.
  * 
  * This library is part of the calcic compiler, written by @dabecart. 2026.
 ***************************************************************************************************/
 
-#ifndef _CALCIC_ARCH_h
-#define _CALCIC_ARCH_h
-
-#include <stddef.h>
+#define COMPILING_STDLIB
+#include <stdlib.h>
 
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-// Memory allocation (for <stdlib.h>).
+// Pseudo-random sequence generation.
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-void    *__arch_allocate_memory(size_t size);
-int     __arch_deallocate_memory(void* ptr, size_t size);
+unsigned long NEXT_RAND = 1;
 
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-// I/O (for <stdio.h>).
+// Memory management functions.
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-int     __arch_open_file(const char* path, int flags);
-int     __arch_close_file(int fd);
-long    __arch_write_file(int fd, const void *buf, size_t count);
-long    __arch_read_file(int fd, void *buf, size_t count);
-
-#endif // _CALCIC_ARCH_h
+HeapChunkHeader *firstHeapChunk = NULL;
+BlockHeader *freeListHead = NULL;
+size_t heapSize = 0;
+HeapChunkHeader *chunkDeallocateList[DEALLOCATE_LIST_LEN] = {NULL};
+int chunkDeallocateLen = 0;

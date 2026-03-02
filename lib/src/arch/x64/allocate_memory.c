@@ -25,20 +25,21 @@
 
 #define MAP_FAILED	((void *) -1)
 
-void *__mmap(void *start, size_t len, int prot, int flags, int fd, long off)
+static void *__mmap(void *start, size_t len, int prot, int flags, int fd, long off)
 {
     void *ret;
     
     __asm__("\t"
-        "mov        $9, %rax\n\t"       // Move the opcode __NR_mmap to AX.
-        "syscall            \n\t"       // AX contains the return value.
-        :   "AX" (ret)                  // OUTPUTS
-        :   "DI" (start),               // INPUTS (following the order of syscall(2))
-            "SI" (len),
-            "DX" (prot),
-            "R10" (flags),
-            "R8" (fd),
-            "R9" (off)
+        "mov        %0, %%rax\n\t"      // Move the opcode __NR_mmap to AX.
+        "syscall    \n\t"       // AX contains the return value.
+        :   "r:AX"  (ret)                 // OUTPUTS
+        :   "i"     (__NR_mmap),          // INPUTS (following the order of syscall(2))
+            "r:DI"  (start),               
+            "r:SI"  (len),
+            "r:DX"  (prot),
+            "r:R10" (flags),
+            "r:R8"  (fd),
+            "r:R9"  (off)
     );
 
     return ret;

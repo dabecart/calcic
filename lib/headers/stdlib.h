@@ -11,20 +11,42 @@
 #define _CALCIC_STDLIB_h
 
 #include <stddef.h> // size_t, NULL
+#include <limits.h>
 
 // TODO: div_t, ldiv_t, lldiv_t
 
 #define EXIT_FAILURE 1
 #define EXIT_SUCCESS 0
 
-// TODO: RAND_MAX, MB_CUR_MAX
+// TODO: MB_CUR_MAX
+
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+// Pseudo-random sequence generation.
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+#define RAND_MAX UINT_MAX
+int rand(void);
+void srand(unsigned int seed);
+
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+// Memory management functions.
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 void *calloc(size_t nmemb, size_t size);
 void  free(void *ptr);
 void *malloc(size_t size);
 void *realloc(void *ptr, size_t size);
 
+// All global variables are inside xdecl_stdlib.c
 #ifdef COMPILING_STDLIB
+
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+// Pseudo-random sequence generation.
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+extern unsigned long NEXT_RAND;
+
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+// Memory management.
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 #define ALIGN_UP(n, a) (((n) + ((a) - 1)) & ~((a) - 1))
 

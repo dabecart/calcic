@@ -1,7 +1,8 @@
 // SYSCALL codes.
+// Taken from: /usr/src/linux-headers-6.17.0-14-generic/arch/x86/include/generated/uapi/asm/unistd_64.h
 
-#ifndef _ASM_UNISTD_64_H
-#define _ASM_UNISTD_64_H
+#ifndef UNISTD_64_h
+#define UNISTD_64_h
 
 #define __NR_read 0
 #define __NR_write 1
@@ -377,5 +378,4 @@
 #define __NR_lsm_set_self_attr 460
 #define __NR_lsm_list_modules 461
 
-
-#endif /* _ASM_UNISTD_64_H */
+#endif // UNISTD_64_h

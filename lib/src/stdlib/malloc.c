@@ -10,12 +10,6 @@
 #include <stdlib.h>
 #include <arch.h>
 
-HeapChunkHeader *firstHeapChunk = NULL;
-BlockHeader *freeListHead = NULL;
-size_t heapSize = 0;
-HeapChunkHeader *chunkDeallocateList[DEALLOCATE_LIST_LEN] = {NULL};
-int chunkDeallocateLen = 0;
-
 static void initHeap(HeapChunkHeader *chunk, size_t chunkSize) {
     if(chunk == NULL) {
         return;

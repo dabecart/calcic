@@ -1,5 +1,5 @@
 /***************************************************************************************************
- * deallocate_memory.c
+ * close_file.c
  * 
  * This function is part of the <arch.h> library.
  * 
@@ -8,23 +8,26 @@
 
 #include <arch.h>
 #include <x64/unistd_64.h>
+#include <x64/fcntl.h>
 
-static int __munmap(void *start, size_t len)
+#define COMPILING_STDIO
+#include <stdio.h>
+
+static int __close(int fd)
 {
     int ret;
     
     __asm__("\t"
-        "mov        %0, %%rax\n\t"      // Move the opcode __NR_munmap to AX.
-        "syscall\n\t"                   // AX contains the return value.
+        "mov        %0, %%rax\n\t"      // Move the opcode __NR_close to AX.
+        "syscall    \n\t"               // AX contains the return value.
         :   "r:AX"  (ret)               // OUTPUTS
-        :   "i"     (__NR_munmap),      // INPUTS (following the order of syscall(2))
-            "r:DI"  (start),              
-            "r:SI"  (len)
+        :   "i"     (__NR_close),       // INPUTS (following the order of syscall(2))
+            "r:DI"  (fd)
     );
-    
+
     return ret;
 }
 
-int  __arch_deallocate_memory(void* ptr, size_t size) {
-    return __munmap(ptr, size);
+int __arch_close_file(int fd) {
+    return __close(fd);
 }

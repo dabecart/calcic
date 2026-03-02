@@ -1588,38 +1588,51 @@ class AssemblerFunction(AssemblyAST):
                 self.instructions.extend(copyInst)
 
             case TACBuiltIn_asm():
-                # Move the inputs to the input registers.
-                for index in range(len(tac.inValues)):
-                    registerName: str = tac.asmAST.inputs[index][0]
-                    try:
-                        register: REG = REG[registerName]
-                    except:
-                        tac.asmAST.raiseError(f"Invalid input register {registerName}")
+                # Move the register inputs to their registers. Calculate the immediate 
+                # representation of immediate inputs.
+                for input, inputValue in zip(tac.asmAST.inputs, tac.inValues):
+                    src = self.fromTACValue(inputValue)
 
-                    src = self.fromTACValue(tac.inValues[index])
+                    if input.ioType == BuiltIn_asmIOType.REGISTER:
+                        try:
+                            register: REG = REG[input.args]
+                        except:
+                            tac.asmAST.raiseError(f"Invalid input register {input.args}")
 
-                    self.createInst(MOV,
-                                    src.assemblyType,
-                                    src,
-                                    Register(src.assemblyType, register))
+                        self.createInst(MOV,
+                                        src.assemblyType,
+                                        src,
+                                        Register(src.assemblyType, register))
+
+                    elif input.ioType == BuiltIn_asmIOType.IMMEDIATE:
+                        if not isinstance(src, Immediate):
+                            input.exp.raiseError("Not an immediate value")
+
+                        input.setAsmbRepresentation(src.emitCode())
+                    
+                    else:
+                        raise ValueError()
 
                 # Write the given assembly code.
-                self.createInst(CODE, tac.asmAST.asmbCode)
+                self.createInst(CODE, tac.asmAST.generateAssemblyCode())
 
                 # Move the outputs from the registers to the assigned variables.
-                for index in range(len(tac.outValues)):
-                    registerName: str = tac.asmAST.outputs[index][0]
-                    try:
-                        register: REG = REG[registerName]
-                    except:
-                        tac.asmAST.raiseError(f"Invalid output register {registerName}")
+                for output, outputValue in zip(tac.asmAST.outputs, tac.outValues):
+                    dst = self.fromTACValue(outputValue)
 
-                    dst = self.fromTACValue(tac.outValues[index])
+                    if output.ioType == BuiltIn_asmIOType.REGISTER:
+                        try:
+                            register: REG = REG[output.args]
+                        except:
+                            tac.asmAST.raiseError(f"Invalid output register {output.args}")
 
-                    self.createInst(MOV,
-                                    dst.assemblyType,
-                                    Register(dst.assemblyType, register),
-                                    dst)
+                        self.createInst(MOV,
+                                        dst.assemblyType,
+                                        Register(dst.assemblyType, register),
+                                        dst)
+                    
+                    else:
+                        raise ValueError()
 
             case _:
                 raise ValueError(f"Unexpected built-in TAC {tac}")

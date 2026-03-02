@@ -259,12 +259,12 @@ class TACBuiltIn_asm(TACBuiltInFunction):
     def parse(self) -> TACValue:
         # Parse the input and output expressions.
         self.outValues: list[TACValue] = []
-        for _, outExp in self.asmAST.outputs:
-            self.outValues.append(self.parseTACExpression(outExp, self.insts).convert())
+        for output in self.asmAST.outputs:
+            self.outValues.append(self.parseTACExpression(output.exp, self.insts).convert())
 
         self.inValues: list[TACValue] = []
-        for _, inExp in self.asmAST.inputs:
-            self.inValues.append(self.parseTACExpression(inExp, self.insts).convert())
+        for input in self.asmAST.inputs:
+            self.inValues.append(self.parseTACExpression(input.exp, self.insts).convert())
 
         return TACValue(False, TypeSpecifier.VOID.toBaseType())
 
