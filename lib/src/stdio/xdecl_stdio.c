@@ -74,6 +74,20 @@ size_t push(FILE *f, const unsigned char item) {
     return 1;
 }
 
+size_t push_back(FILE *f, const unsigned char item) {
+    if(f->len >= f->bufSize) {
+        return 0;
+    }
+
+    f->tail--;
+    if(f->tail < f->buffer) {
+        f->tail = f->buffer + f->bufSize - 1;
+    } 
+    *f->tail = item;
+    f->len++; 
+    return 1;
+}
+
 size_t push_N(FILE *f, const unsigned char *items, size_t count) {
     size_t toPush = count;
     while(toPush > 0) {

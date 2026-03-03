@@ -23,6 +23,16 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t elementsRead;
 
     if(stream->flags & UNBUFFERED_MODE) {
+        // First check the pushback character (if any).
+        if(stream->flags & PUSHBACK_AVAILABLE) {
+            *buf = stream->pushback;
+            buf++;
+            byteCount--;
+            
+            // Clear the pushback flag.
+            stream->flags &= ~PUSHBACK_AVAILABLE;
+        }
+        
         // In unbuffered mode, fetch the data directly from the OS.
         long status = __arch_read_file(stream->fd, buf, byteCount);
         if(status < 0) {
@@ -46,35 +56,31 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
         
         // We may need to do multiple fetches.
         while(bytesRead < byteCount) {
-            // If the number of bytes we need to pop is larger than the current number of bytes in 
-            // the buffer...
-            if((byteCount - bytesRead) >= stream->len) {
-                // Empty the buffer and dump it to buff.
-                bytesRead += pop_N(stream, buf + bytesRead, stream->len);
-    
-                // Now, fetch as many bytes from the OS as possible.
-                if(temp == NULL) {
-                    // Initialize the temporary lineal buffer.
-                    temp = malloc(BUFSIZ);
-                    if(temp == NULL) {
-                        // An error occurred while allocating memory.
-                        break;
-                    }
-                }
+            // Try to get what we can from the existing buffer.
+            size_t available = pop_N(stream, buf + bytesRead, byteCount - bytesRead);
+            bytesRead += available;
 
-                long status = __arch_read_file(stream->fd, ptr, BUFSIZ);
-                if(status < 0) {
-                    // An error occurred during I/O.
+            if (bytesRead >= byteCount) {
+                break;
+            }
+
+            // Buffer is empty, refill with a request to the OS.
+            if (temp == NULL) {
+                temp = malloc(BUFSIZ);
+                if (!temp) {
+                    // Could not allocate space for the temporal buffer.
                     break;
                 }
-
-                // Push all bytes into the circular buffer.
-                push_N(stream, temp, status);
             }
-            
-            // Fetch from the buffer the remaining bytes. If there aren't enough bytes in the buffer
-            // maybe we'll fetch them in the next iteration.
-            bytesRead += pop_N(stream, buf + bytesRead, byteCount - bytesRead);
+
+            long status = __arch_read_file(stream->fd, temp, BUFSIZ);
+            if (status <= 0) {
+                // There was an error reading bytes from the file.
+                break;
+            }
+
+            // Push from the temp buffer to the circular buffer of 'stream'.
+            push_N(stream, temp, (size_t)status);
         }
 
         if(temp != NULL) {

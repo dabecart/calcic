@@ -13,17 +13,17 @@
 #include <arch.h>
 
 int fflush(FILE *stream) {
-    if(stream == NULL || (stream->flags & WRITE_MODE) == 0 || 
-       stream->buffer == NULL || stream->head == NULL || stream->tail == NULL){
+    if((stream == NULL) || (stream->buffer == NULL) || 
+      !(stream->flags & WRITE_MODE) || (stream->flags & UNBUFFERED_MODE)){
         return EOF;
     }
 
     int status = 1;
     
-    // Pop the data from the buffer into a temporal linear array.
-    unsigned char *tempBuffer = malloc(stream->len);
+    // Pop all the data from the buffer into a temporal linear array.
     size_t bufLen = stream->len;
-    size_t toFlush = push_N(stream, tempBuffer, stream->len);
+    unsigned char *tempBuffer = malloc(bufLen);
+    size_t toFlush = pop_N(stream, tempBuffer, bufLen);
     status &= (bufLen == toFlush);
 
     // Write the data.
@@ -32,9 +32,6 @@ int fflush(FILE *stream) {
 
     // Free the temporal array.
     free(tempBuffer);
-
-    // The circular buffer is now empty.
-    stream->tail = stream->head;
 
     return status ? 0 : EOF;
 }

@@ -28,5 +28,9 @@ static int __write(int fd, const void *buf, size_t count)
 }
 
 long __arch_write_file(int fd, const void *buf, size_t count) {
+    if(count == 0) {
+        return 0;
+    }
+
     return __write(fd, buf, count);
 }

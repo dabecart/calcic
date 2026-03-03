@@ -24,12 +24,13 @@ int fclose(FILE *stream) {
     // Remove the pointer from the open files array.
     for(size_t index = stream->openFileIndex; index < FOPEN_MAX - 1; index++) {
         FILE *movingFile = files[index + 1];
-        movingFile->openFileIndex--;
         files[index] = movingFile;
         
         if(movingFile == NULL) {
             // Reached the end of the files list.
             break;
+        }else {
+            movingFile->openFileIndex--;
         }
     }
     openFiles--;

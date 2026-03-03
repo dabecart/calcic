@@ -40,6 +40,8 @@ typedef struct {
     char    *head;          // Index to read from.
     char    *tail;          // Index to write to.
     char    *buffer;        // Data buffer.
+
+    int pushback;           // Used in the ungetc function.
 } FILE;
 
 typedef struct {
@@ -62,36 +64,41 @@ int setvbuf(FILE *stream, char *buf, int mode, size_t size);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
 
-void clearerr(FILE *);
-int feof(FILE *);
-int ferror(FILE *);
-int fgetc(FILE *);
-int fgetpos(FILE *, fpos_t *);
-char *fgets(char *, int, FILE *);
-int fprintf(FILE *, const char *, ...);
-int fputc(int, FILE *);
-int fputs(const char *, FILE *);
-int fscanf(FILE *, const char *, ...);
-int fseek(FILE *, long, int);
-int fsetpos(FILE *, const fpos_t *);
-long ftell(FILE *);
-int getc(FILE *);
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+// Character input/output functions.
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+int fgetc(FILE *stream);
+char *fgets(char *s, int n, FILE *stream);
+int fputc(int c, FILE *stream);
+int fputs(const char *s, FILE *stream);
 int getchar(void);
-char *gets(char *);
+char *gets(char *s);
+int putchar(int c);
+int puts(const char *s);
+int ungetc(int c, FILE *stream);
+
+#define getc(stream) fgetc(stream)
+#define putc(c,stream) fputc(c,stream)
+
+void clearerr(FILE *stream);
+int feof(FILE *stream);
+int ferror(FILE *stream);
+int fgetpos(FILE *stream, fpos_t *);
+int fprintf(FILE *stream, const char *, ...);
+int fscanf(FILE *stream, const char *, ...);
+int fseek(FILE *stream, long, int);
+int fsetpos(FILE *stream, const fpos_t *);
+long ftell(FILE *stream);
 void perror(const char *);
 int printf(const char *, ...);
-int putc(int, FILE *);
-int putchar(int);
-int puts(const char *);
 int remove(const char *);
 int rename(const char *, const char *);
-void rewind(FILE *);
+void rewind(FILE *stream);
 int scanf(const char *, ...);
 int sprintf(char *, const char *, ...);
 int sscanf(const char *, const char *, ...);
 FILE *tmpfile(void);
 char *tmpnam(char *);
-int ungetc(int, FILE *);
 int vfprintf(FILE *, const char *, char *);
 int vprintf(const char *, char *);
 int vsprintf(char *, const char *, char *);
@@ -107,6 +114,7 @@ extern FILE *stderr, *stdin, *stdout;
     #define BINARY_MODE         0x10
     #define LINE_BUFFERED_MODE  0x20
     #define UNBUFFERED_MODE     0x40
+    #define PUSHBACK_AVAILABLE  0x80
 
     // Array of open files.
     extern FILE *files[FOPEN_MAX];
@@ -119,6 +127,7 @@ extern FILE *stderr, *stdin, *stdout;
     int initBuffer(FILE *f);
     int closeBuffer(FILE *f);
     size_t push(FILE *f, const unsigned char item);
+    size_t push_back(FILE *f, const unsigned char item);
     size_t push_N(FILE *f, const unsigned char *items, size_t count);
     size_t pop(FILE *f, unsigned char* outItem);
     size_t pop_N(FILE *f, unsigned char* outItems, size_t count);

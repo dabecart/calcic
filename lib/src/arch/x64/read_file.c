@@ -28,5 +28,9 @@ static int __read(int fd, void *buf, size_t count)
 }
 
 long __arch_read_file(int fd, void *buf, size_t count) {
+    if(count == 0) {
+        return 0;
+    }
+    
     return __read(fd, buf, count);
 }
