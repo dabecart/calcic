@@ -60,7 +60,7 @@ int setvbuf(FILE *stream, char *buf, int mode, size_t size);
 // Direct input/output functions.
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
-size_t fwrite(const void * ptr, size_t size, size_t nmemb, FILE *stream);
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
 
 void clearerr(FILE *);
 int feof(FILE *);
@@ -116,8 +116,10 @@ extern FILE *stderr, *stdin, *stdout;
     int _processModeString(const char *mode);
 
     // Circular buffer handling.
-    size_t push(FILE *f, unsigned char item);
-    size_t push_N(FILE *f, unsigned char *items, size_t count);
+    int initBuffer(FILE *f);
+    int closeBuffer(FILE *f);
+    size_t push(FILE *f, const unsigned char item);
+    size_t push_N(FILE *f, const unsigned char *items, size_t count);
     size_t pop(FILE *f, unsigned char* outItem);
     size_t pop_N(FILE *f, unsigned char* outItems, size_t count);
 

@@ -36,7 +36,7 @@ int fclose(FILE *stream) {
 
     // Deallocate the buffer.
     if(stream->buffer != NULL) {
-        free(stream->buffer);
+        closeBuffer(stream);
     }
 
     // Deallocate the pointer.

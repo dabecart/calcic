@@ -93,8 +93,6 @@ void _insertInFreeList(BlockHeader* block) {
     if(block > block->heap->lastFreed) {
         block->heap->lastFreed = block;
     }
-
-    // printFreeBlocks();
 }
 
 void _removeFromFreeList(BlockHeader* block) {
@@ -118,8 +116,6 @@ void _removeFromFreeList(BlockHeader* block) {
     if(block->prevFree != NULL) {
         block->prevFree->nextFree = block->nextFree;
     }
-
-    // printFreeBlocks();
 }
 
 void *malloc(size_t size) {

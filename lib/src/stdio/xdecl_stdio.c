@@ -9,10 +9,11 @@
 #define COMPILING_STDIO
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static FILE in  = {0, READ_MODE};
-static FILE out = {1, WRITE_MODE};
-static FILE err = {2, READ_MODE|UNBUFFERED_MODE};
+static FILE out = {1, WRITE_MODE|LINE_BUFFERED_MODE};
+static FILE err = {2, WRITE_MODE|UNBUFFERED_MODE};
 
 FILE *stdin = &in;
 FILE *stdout = &out;
@@ -39,7 +40,27 @@ int _processModeString(const char *mode) {
     return flags;
 }
 
-size_t push(FILE *f, unsigned char item) {
+int initBuffer(FILE *f) {
+    f->buffer = malloc(BUFSIZ);
+    if(f->buffer == NULL) {
+        return 0;
+    }
+
+    f->bufSize = BUFSIZ;
+    f->head = f->tail = f->buffer;
+    return 1;
+}
+
+int closeBuffer(FILE *f) {
+    if(f->buffer != NULL) {
+        free(f->buffer);
+        f->bufSize = 0;
+        f->head = f->tail = NULL;
+    }
+    return 1;
+}
+
+size_t push(FILE *f, const unsigned char item) {
     if(f->len >= f->bufSize) {
         return 0;
     }
@@ -53,7 +74,7 @@ size_t push(FILE *f, unsigned char item) {
     return 1;
 }
 
-size_t push_N(FILE *f, unsigned char *items, size_t count) {
+size_t push_N(FILE *f, const unsigned char *items, size_t count) {
     size_t toPush = count;
     while(toPush > 0) {
         if(!push(f, *items)){
