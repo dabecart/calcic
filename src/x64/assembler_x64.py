@@ -79,7 +79,7 @@ class AssemblyAST(ABC):
             # In x64, decimal numbers are stored into memory and cannot be used as immediate.
             if tacValue.valueType.isDecimal():
                 doubleConstant = AssemblerStaticConstant.newSimpleConstant(
-                    tacValue.valueType, tacValue.print())
+                    tacValue.valueType, tacValue.print(), isGlobal=False)
                 return Data(AssemblyType.fromTAC(tacValue.valueType), doubleConstant.identifier, 0, self)
             
             return Immediate(tacValue, self)
@@ -202,7 +202,7 @@ class AssemblerProgram(AssemblyAST):
             match topLevel:
                 case TACConstantVariable():
                     AssemblerStaticConstant.newComplexConstant(
-                        topLevel.valueType, topLevel.identifier, topLevel.initialization)
+                        topLevel.valueType, topLevel.identifier, topLevel.isGlobal, topLevel.initialization)
                 
                 case TACStaticVariable():
                     topLevelAssembly = self.createChild(
@@ -248,6 +248,7 @@ _start:
 	movl $60, %eax
 	syscall
 	ret
+
 """
 
         for func in self.programDefs:
@@ -256,6 +257,8 @@ _start:
         # Emit the constant section.
         ret += "\t.section\t.rodata\n"
         for constant in AssemblerStaticConstant.CONSTANTS:
+            if constant.isGlobal:
+                ret += f"\t.globl {constant.identifier}\n"
             ret += constant.emitCode() + "\n"
         ret += '\t.section .note.GNU-stack,"",@progbits\n'
         return ret
@@ -339,7 +342,8 @@ class AssemblerStaticConstant(AssemblyAST):
 
     # Utility to generate constants during the assembly stage.
     @staticmethod
-    def newSimpleConstant(valueType: DeclaratorType, initialization: str, alignment: int|None = None) -> AssemblerStaticConstant:
+    def newSimpleConstant(valueType: DeclaratorType, initialization: str, isGlobal: bool,
+                          alignment: int|None = None) -> AssemblerStaticConstant:
         asmbType = AssemblyType.fromTAC(valueType)
         initializationList: list[tuple[str, str]] = [(asmbType.getDataSectionName(), initialization)]
 
@@ -355,14 +359,14 @@ class AssemblerStaticConstant(AssemblyAST):
         if alignment is None:
             alignment = asmbType.alignment
 
-        ret = AssemblerStaticConstant(valueType, identifier, initializationList, alignment)
+        ret = AssemblerStaticConstant(valueType, identifier, isGlobal, initializationList, alignment)
         AssemblerStaticConstant.CONSTANTS_MAP[identifier] = ret
         AssemblerStaticConstant.CONSTANTS.append(ret)
         return ret
 
     # Utility to generate assembly code for C constants.
     @staticmethod
-    def newComplexConstant(valueType: DeclaratorType, identifier: str, 
+    def newComplexConstant(valueType: DeclaratorType, identifier: str, isGlobal: bool,
                            initialization: list[Constant], alignment: int|None = None) -> AssemblerStaticConstant:
         initializationList: list[tuple[str, str]] = []
         for const in initialization:
@@ -383,23 +387,26 @@ class AssemblerStaticConstant(AssemblyAST):
         if alignment is None:
             alignment = AssemblyType.fromTAC(valueType).alignment
 
-        ret = AssemblerStaticConstant(valueType, identifier, initializationList, alignment)
+        ret = AssemblerStaticConstant(valueType, identifier, isGlobal, initializationList, alignment)
         AssemblerStaticConstant.CONSTANTS_MAP[identifier] = ret
         AssemblerStaticConstant.CONSTANTS.append(ret)
         return ret
 
     # "initialization" is a list of (data section name, value)
-    def __init__(self, valueType: DeclaratorType, identifier: str, initialization: list[tuple[str, str]], 
+    def __init__(self, valueType: DeclaratorType, identifier: str, isGlobal: bool, 
+                 initialization: list[tuple[str, str]], 
                  alignment: int, parentAST: AssemblyAST | None = None) -> None:
         self.valueType = valueType
         self.identifier = identifier
+        self.isGlobal = isGlobal
         self.initialization = initialization
         self.alignment = alignment
     
         super().__init__(parentAST)
 
     def copy(self) -> AssemblerStaticConstant:
-        return AssemblerStaticConstant(self.valueType, self.identifier, self.initialization, self.alignment, self.parent)
+        return AssemblerStaticConstant(
+            self.valueType, self.identifier, self.isGlobal, self.initialization, self.alignment, self.parent)
 
     def firstPass(self):
         pass
@@ -813,11 +820,11 @@ class AssemblerFunction(AssemblyAST):
                                 # when working with double numbers.
                                 if inst.result.valueType == TypeSpecifier.DOUBLE.toBaseType():
                                     negZero = AssemblerStaticConstant.newSimpleConstant(
-                                        TypeSpecifier.DOUBLE.toBaseType(), "-0.0", 16)
+                                        TypeSpecifier.DOUBLE.toBaseType(), "-0.0", False, 16)
                                     negZeroData = Data(AssemblyType.DOUBLE, negZero.identifier, 0, self)
                                 else:
                                     negZero = AssemblerStaticConstant.newSimpleConstant(
-                                        TypeSpecifier.FLOAT.toBaseType(), "-0.0", 16)
+                                        TypeSpecifier.FLOAT.toBaseType(), "-0.0", False, 16)
                                     negZeroData = Data(AssemblyType.FLOAT, negZero.identifier, 0, self)
 
                                 self.createInst(MOV, exp.assemblyType, exp, dest)

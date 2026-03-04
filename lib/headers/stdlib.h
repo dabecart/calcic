@@ -21,6 +21,23 @@
 // TODO: MB_CUR_MAX
 
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+// Numeric conversion functions.
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+double atof(const char *nptr);
+int atoi(const char *nptr);
+long atol(const char *nptr);
+double strtod(const char *nptr, char **endptr);
+double strtof(const char *nptr, char **endptr);
+long strtol(const char *nptr, char **endptr, int base);
+unsigned long strtoul(const char *nptr, char **endptr, int base);
+
+// TODO: To be implemented when long double and long long support is added.
+// long long atoll(const char *nptr);
+// double strtold(const char *nptr, char **endptr);
+// long long strtoll(const char *nptr, char **endptr, int base);
+// unsigned long long strtoull(const char *nptr, char **endptr, int base);
+
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 // Pseudo-random sequence generation.
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 #define RAND_MAX UINT_MAX

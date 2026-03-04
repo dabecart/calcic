@@ -149,8 +149,9 @@ class TAC(ABC):
                 constantName: str = exp.context.mangleIdentifier(".Lstr")
 
                 exp.context.constantVariablesMap[constantName] = ConstantVariableContext(
-                    name=constantName,
                     idType=exp.typeId,
+                    name=constantName,
+                    isGlobal=False,
                     initialization=exp.toConstantsList()
                 )
 
@@ -852,15 +853,19 @@ class TACProgram(TAC):
                     staticVar.mangledName, staticVar.isGlobal, [])
                 # Add its value to the constant variables.
                 self.program.context.constantVariablesMap[staticVar.mangledName] = ConstantVariableContext(
-                    name=staticVar.mangledName,
                     idType=staticVar.idType,
+                    name=staticVar.mangledName,
+                    isGlobal=staticVar.isGlobal,
                     initialization=staticVar.initialization
                 )
                 continue
             else:
                 topLevelDecl = self.createChild(
-                    TACStaticVariable, staticVar.idType, staticVar.mangledName, 
-                    staticVar.isGlobal, staticVar.initialization)
+                    TACStaticVariable, 
+                    staticVar.idType, 
+                    staticVar.mangledName, 
+                    staticVar.isGlobal, 
+                    staticVar.initialization)
             
             self.topLevel.append(topLevelDecl)
         
@@ -883,7 +888,7 @@ class TACProgram(TAC):
         # them on top of everything as they need to be processed first on the assembly stage.
         for const in self.program.context.constantVariablesMap.values():
             topLevelDecl = self.createChild(
-                TACConstantVariable, const.idType, const.name, const.initialization)
+                TACConstantVariable, const.idType, const.name, const.isGlobal, const.initialization)
             self.topLevel.insert(0, topLevelDecl)
 
     def print(self) -> str:
@@ -928,10 +933,12 @@ class TACStaticVariable(TACTopLevel):
 class TACConstantVariable(TACTopLevel):
     constantVariables: dict[str, TACConstantVariable] = {}
 
-    def __init__(self, valueType: DeclaratorType, identifier: str, initialization: list[Constant], 
+    def __init__(self, valueType: DeclaratorType, identifier: str, isGlobal: bool, 
+                 initialization: list[Constant], 
                  parentTAC: TAC | None = None) -> None:
         self.valueType = valueType
         self.identifier = identifier
+        self.isGlobal = isGlobal
         self.initialization = initialization
         super().__init__(parentTAC)
 

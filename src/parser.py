@@ -80,8 +80,9 @@ class StaticVariableContext:
 
 @dataclass
 class ConstantVariableContext:
-    name: str
     idType: DeclaratorType
+    name: str
+    isGlobal: bool
     initialization: list[Constant]
 
 @dataclass
@@ -1079,8 +1080,9 @@ class AST(ABC):
                 constantName: str = self.context.mangleIdentifier(".Lstr")
 
                 self.context.constantVariablesMap[constantName] = ConstantVariableContext(
-                    name=constantName,
                     idType=strAST.typeId,
+                    name=constantName,
+                    isGlobal=False,
                     initialization=strAST.toConstantsList()
                 )
                 
