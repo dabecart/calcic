@@ -200,19 +200,25 @@ class AssemblerProgram(AssemblyAST):
 
         for topLevel in self.program.topLevel:
             match topLevel:
-                case TACConstantVariable():
-                    AssemblerStaticConstant.newComplexConstant(
-                        topLevel.valueType, topLevel.identifier, topLevel.isGlobal, topLevel.initialization)
-                
                 case TACStaticVariable():
-                    topLevelAssembly = self.createChild(
-                        AssemblerStaticVariable, 
-                        AssemblyType.fromTAC(topLevel.valueType),
-                        topLevel.isGlobal,
-                        topLevel.identifier,
-                        topLevel.initialization
-                    )
-                    self.programDefs.append(topLevelAssembly)
+                    if topLevel.isReadOnly:
+                        # Create a 'section .rodata' constant.
+                        AssemblerStaticConstant.newComplexConstant(
+                            topLevel.valueType,
+                            topLevel.identifier,
+                            topLevel.isGlobal,
+                            topLevel.initialization
+                        )
+                    else:
+                        # Create a 'section .data' constant.
+                        topLevelAssembly = self.createChild(
+                            AssemblerStaticVariable, 
+                            AssemblyType.fromTAC(topLevel.valueType),
+                            topLevel.isGlobal,
+                            topLevel.identifier,
+                            topLevel.initialization
+                        )
+                        self.programDefs.append(topLevelAssembly)
 
                 case TACFunction():
                     topLevelAssembly = self.createChild(AssemblerFunction, topLevel)
@@ -370,9 +376,14 @@ class AssemblerStaticConstant(AssemblyAST):
                            initialization: list[Constant], alignment: int|None = None) -> AssemblerStaticConstant:
         initializationList: list[tuple[str, str]] = []
         for const in initialization:
-            initializationList.append(
-                (AssemblyType.fromTAC(const.typeId).getDataSectionName(), const.constValue)
-            )
+            if isinstance(const, ZeroPaddingInitializer):
+                sectionName = 'zero'
+                constValue = str(const.byteCount)
+            else:
+                sectionName = AssemblyType.fromTAC(const.typeId).getDataSectionName()
+                constValue = const.constValue
+
+            initializationList.append((sectionName, constValue))
 
         for prevConst in AssemblerStaticConstant.CONSTANTS_MAP.values():
             if prevConst.valueType == valueType and \

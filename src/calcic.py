@@ -298,7 +298,7 @@ def main() -> None:
 
     assemblyCommand: list[str] = ["gcc", f"{inputFileBasename}.s", "-o", exeOutput]
 
-    if not args.nostdlib:
+    if not args.nostdlib and globalContext.useCalcicSTDLibraries:
         # Include the calcic standard libraries.
         libBuildObject: str = str(libPath / "calcic_libc.o")
         if not os.path.exists(libBuildObject):

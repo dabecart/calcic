@@ -75,14 +75,8 @@ class StaticVariableContext:
     mangledName: str
     # True if it has external linkage.
     isGlobal: bool
+    isReadOnly: bool
     tentative: bool
-    initialization: list[Constant]
-
-@dataclass
-class ConstantVariableContext:
-    idType: DeclaratorType
-    name: str
-    isGlobal: bool
     initialization: list[Constant]
 
 @dataclass
@@ -131,11 +125,8 @@ class Context:
     variablesMap: dict[str, VariableIdentifier]              = field(default_factory=dict)
     # Stores the attributes of functions. Key is the original name (function names aren't mangled).
     functionMap: dict[str, FunctionIdentifier]               = field(default_factory=dict)
-    # Stores the attributes of variables which are stored on the .data section. Key is the original 
-    # name.
+    # Stores the attributes of static variables.
     staticVariablesMap: dict[str, StaticVariableContext]     = field(default_factory=dict)
-    # Stores the attributes of variables which are stored on the .rodata section.
-    constantVariablesMap: dict[str, ConstantVariableContext] = field(default_factory=dict)
     # Contains the declarators of the typedef, keyed by the mangled identifier.
     typedefMap: dict[str, TypedefContext]                    = field(default_factory=dict)
 
@@ -715,6 +706,19 @@ class AST(ABC):
 
             case "string":
                 ret = self.createChild(String)
+                
+                # This string is being used inside an expression. Therefore, the content of the string
+                # should be stored in the .rodata section (constants section) first, then use its value
+                # as a reference.
+                self.context.staticVariablesMap[ret.identifier] = StaticVariableContext(
+                    storageClass=None,
+                    idType=ret.typeId,
+                    mangledName=ret.identifier,
+                    isGlobal=False,
+                    isReadOnly=True,
+                    tentative=False,
+                    initialization=ret.toConstantsList()
+                )
 
             case "identifier":
                 if self.peek(1).id == "(":
@@ -1079,10 +1083,13 @@ class AST(ABC):
                 # Start with .L so that the linker "hides" this constant.
                 constantName: str = self.context.mangleIdentifier(".Lstr")
 
-                self.context.constantVariablesMap[constantName] = ConstantVariableContext(
+                self.context.staticVariablesMap[constantName] = StaticVariableContext(
+                    storageClass=None,
                     idType=strAST.typeId,
-                    name=constantName,
+                    mangledName=constantName,
                     isGlobal=False,
+                    isReadOnly=True,
+                    tentative=False,
                     initialization=strAST.toConstantsList()
                 )
                 
@@ -2128,6 +2135,7 @@ class VariableDeclaration(Declaration):
                         idType=self.typeId,
                         storageClass=self.storageClass,
                         isGlobal=True,
+                        isReadOnly=self.typeId.getTypeQualifiers().const,
                         tentative=False,
                         initialization=[]
                     )
@@ -2152,6 +2160,7 @@ class VariableDeclaration(Declaration):
                     idType=self.typeId,
                     storageClass=self.storageClass,
                     isGlobal=False,
+                    isReadOnly=self.typeId.getTypeQualifiers().const,
                     tentative=False,
                     initialization=self.initialization
                 )
@@ -2219,6 +2228,7 @@ class VariableDeclaration(Declaration):
                 idType=self.typeId,
                 storageClass=self.storageClass,
                 isGlobal=self.isGlobal,
+                isReadOnly=self.typeId.getTypeQualifiers().const,
                 tentative=tentative,
                 initialization=self.initialization # type: ignore
             )
@@ -3136,6 +3146,10 @@ class String(Exp):
 
         # Add +1 for the null terminator.
         self.typeId = ArrayDeclaratorType(TypeSpecifier.CHAR.toBaseType(), len(self.value) + 1)
+
+        # This identifier can be set if the string is used by the program. Start with .L so its 
+        # hidden.
+        self.identifier: str = self.context.mangleIdentifier(".Lstr")
 
     def staticEval(self) -> StaticEvalValue:
         # TODO: change to pointer name

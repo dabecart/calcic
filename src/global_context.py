@@ -20,6 +20,7 @@ class TargetArchitectures(enum.Enum):
 class GlobalContext:
     targetArchitecture: TargetArchitectures                 = TargetArchitectures.x64
     useGCCLibraries: bool                                   = False
+    useCalcicSTDLibraries: bool                             = True
     # To know when to add the entry point to the generated assembly.
     generateExecutable: bool                                = True
 
@@ -30,3 +31,8 @@ class GlobalContext:
     parseTACBuiltInFunction: Callable                       = lambda *args, **kwargs: None
 
 globalContext = GlobalContext()
+
+# If running the 'Writing a C compiler' testsuite...
+# globalContext.useGCCLibraries = True
+# globalContext.useCalcicSTDLibraries = False
+# globalContext.generateExecutable = False

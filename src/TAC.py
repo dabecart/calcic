@@ -143,19 +143,7 @@ class TAC(ABC):
                 return TACBaseOperand(val, exp.typeId, insts)
             
             case String():
-                # This string is being used inside an expression. Therefore, the content of the string
-                # should be stored in the .rodata section (constants section) first, then use its value
-                # as a reference. Start with .L so its hidden.
-                constantName: str = exp.context.mangleIdentifier(".Lstr")
-
-                exp.context.constantVariablesMap[constantName] = ConstantVariableContext(
-                    idType=exp.typeId,
-                    name=constantName,
-                    isGlobal=False,
-                    initialization=exp.toConstantsList()
-                )
-
-                stringConstant = self.createChild(TACValue, True, exp.typeId, constantName)
+                stringConstant = self.createChild(TACValue, True, exp.typeId, exp.identifier)
                 return TACBaseOperand(stringConstant, exp.typeId, insts)
             
             case Variable():
@@ -836,7 +824,8 @@ class TACProgram(TAC):
             if staticVar.tentative:
                 # Set to zero by default.
                 topLevelDecl = self.createChild(
-                    TACStaticVariable, staticVar.idType, staticVar.mangledName, staticVar.isGlobal, 
+                    TACStaticVariable, staticVar.idType, staticVar.mangledName, 
+                    staticVar.isGlobal, staticVar.isReadOnly,
                     [ZeroPaddingInitializer([], None, None, staticVar.idType, staticVar.idType.getByteSize())])
             elif len(staticVar.initialization) == 0:
                 # This must be an extern variable initialized somewhere else.
@@ -844,20 +833,7 @@ class TACProgram(TAC):
                 # but do not add it to the topLevel TAC list.
                 self.createChild(
                     TACStaticVariable, staticVar.idType, 
-                    staticVar.mangledName, staticVar.isGlobal, [])
-                continue
-            elif staticVar.idType.getTypeQualifiers().const:
-                # If the variable is constant, do something similar to above. 
-                self.createChild(
-                    TACStaticVariable, staticVar.idType, 
-                    staticVar.mangledName, staticVar.isGlobal, [])
-                # Add its value to the constant variables.
-                self.program.context.constantVariablesMap[staticVar.mangledName] = ConstantVariableContext(
-                    idType=staticVar.idType,
-                    name=staticVar.mangledName,
-                    isGlobal=staticVar.isGlobal,
-                    initialization=staticVar.initialization
-                )
+                    staticVar.mangledName, staticVar.isGlobal, staticVar.isReadOnly, [])
                 continue
             else:
                 topLevelDecl = self.createChild(
@@ -865,6 +841,7 @@ class TACProgram(TAC):
                     staticVar.idType, 
                     staticVar.mangledName, 
                     staticVar.isGlobal, 
+                    staticVar.isReadOnly,
                     staticVar.initialization)
             
             self.topLevel.append(topLevelDecl)
@@ -883,13 +860,6 @@ class TACProgram(TAC):
         for fun in generateProcessList(self.program.topLevel):
             topLevelDecl = self.createChild(TACFunction, fun)
             self.topLevel.append(topLevelDecl)
-
-        # Finally, once all instructions have been processed, create the constants section. Push 
-        # them on top of everything as they need to be processed first on the assembly stage.
-        for const in self.program.context.constantVariablesMap.values():
-            topLevelDecl = self.createChild(
-                TACConstantVariable, const.idType, const.name, const.isGlobal, const.initialization)
-            self.topLevel.insert(0, topLevelDecl)
 
     def print(self) -> str:
         ret = ""
@@ -910,11 +880,12 @@ class TACTopLevel(TAC):
 class TACStaticVariable(TACTopLevel):
     staticVariables: dict[str, TACStaticVariable] = {}
 
-    def __init__(self, valueType: DeclaratorType, identifier: str, isGlobal: bool,
+    def __init__(self, valueType: DeclaratorType, identifier: str, isGlobal: bool, isReadOnly: bool,
                  initialization: list[Constant], parentTAC: TAC | None = None) -> None:
         self.valueType = valueType
         self.identifier = identifier
         self.isGlobal = isGlobal
+        self.isReadOnly = isReadOnly
         self.initialization = initialization
         super().__init__(parentTAC)
 
@@ -930,30 +901,6 @@ class TACStaticVariable(TACTopLevel):
         ret += f"{toprint}"
         return ret
     
-class TACConstantVariable(TACTopLevel):
-    constantVariables: dict[str, TACConstantVariable] = {}
-
-    def __init__(self, valueType: DeclaratorType, identifier: str, isGlobal: bool, 
-                 initialization: list[Constant], 
-                 parentTAC: TAC | None = None) -> None:
-        self.valueType = valueType
-        self.identifier = identifier
-        self.isGlobal = isGlobal
-        self.initialization = initialization
-        super().__init__(parentTAC)
-
-        # Add the static variable to the list for easy finding on the assembler stage.
-        TACConstantVariable.constantVariables[identifier] = self
-
-    def parse(self):
-        pass
-
-    def print(self) -> str:
-        ret  = f"--- ({self.valueType}) {self.identifier} ---\n"
-        toprint = ''.join([str(x) for x in self.initialization])
-        ret += f"{toprint}"
-        return ret
-
 class TACFunction(TACTopLevel):
     functions: dict[str, TACFunction] = {}
 
