@@ -13,8 +13,6 @@
 #include <stddef.h> // size_t, NULL
 #include <limits.h>
 
-// TODO: div_t, ldiv_t, lldiv_t
-
 #define EXIT_FAILURE 1
 #define EXIT_SUCCESS 0
 
@@ -47,13 +45,30 @@ void srand(unsigned int seed);
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 // Memory management functions.
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
 void *calloc(size_t nmemb, size_t size);
 void  free(void *ptr);
 void *malloc(size_t size);
 void *realloc(void *ptr, size_t size);
 
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+// Integer arithmetic functions.
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+int abs(int j);
+long labs(long j);
 
+typedef struct {
+    int quot;
+    int rem;
+} div_t;
+div_t div(int numer, int denom);
+
+typedef struct {
+    long quot;
+    long rem;
+} ldiv_t;
+ldiv_t ldiv(long numer, long denom);
+
+// TODO: llabs and lldiv to be implemented when long long support is added.
 
 // All global variables are inside xdecl_stdlib.c
 #ifdef COMPILING_STDLIB

@@ -304,6 +304,9 @@ class BuiltIn_asm(BuiltInFunctionCall):
         self.outputs: list[BuiltIn_asmIO] = []
         if self.peek().id == ":":
             self.outputs = self.parseIOList(set([BuiltIn_asmIOType.REGISTER]))
+            for output in self.outputs:
+                if not output.exp.isLvalueAssignable():
+                    self.raiseError(f"Expected an lvalue as argument for {output.args}")
 
         self.inputs: list[BuiltIn_asmIO]  = []
         if self.peek().id == ":":

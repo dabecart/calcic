@@ -1634,7 +1634,7 @@ class AssemblerFunction(AssemblyAST):
                 # Write the given assembly code.
                 self.createInst(CODE, tac.asmAST.generateAssemblyCode())
 
-                # Move the outputs from the registers to the assigned variables.
+                # Move the outputs from the registers to the temporary output variables.
                 for output, outputValue in zip(tac.asmAST.outputs, tac.outValues):
                     dst = self.fromTACValue(outputValue)
 

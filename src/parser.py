@@ -3649,7 +3649,7 @@ class Binary(Exp):
         # Subtract can operate with arithmetic types, with a pointer first and integer second, or 
         # with two pointers of the same type.
         elif op == BinaryOperator.SUBTRACT:
-            if isExp1Pointer and isExp2Pointer and exp1.typeId != exp2.typeId:
+            if isExp1Pointer and isExp2Pointer and exp1.typeId.unqualified() != exp2.typeId.unqualified():
                 self.raiseError("Both expressions must have the same pointer type")
 
             if not isExp1PointerComplete:

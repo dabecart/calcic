@@ -12,6 +12,10 @@
 
 #include <stddef.h> // size_t, NULL
 
+#ifdef COMPILING_STDIO
+    #include <stdarg.h>
+#endif
+
 // TODO: L_tmpnam
 
 #define EOF -1
@@ -80,23 +84,28 @@ int ungetc(int c, FILE *stream);
 #define getc(stream) fgetc(stream)
 #define putc(c,stream) fputc(c,stream)
 
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+// Formatted input/output functions.
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+int fprintf(FILE *stream, const char *format, ...);
+int fscanf(FILE *stream, const char *format, ...);
+int printf(const char *format, ...);
+int scanf(const char *format, ...);
+int snprintf(char *s, size_t n, const char *format, ...);
+int sprintf(char *s, const char *format, ...);
+int sscanf(const char *s, const char *format, ...);
+
 void clearerr(FILE *stream);
 int feof(FILE *stream);
 int ferror(FILE *stream);
 int fgetpos(FILE *stream, fpos_t *);
-int fprintf(FILE *stream, const char *, ...);
-int fscanf(FILE *stream, const char *, ...);
 int fseek(FILE *stream, long, int);
 int fsetpos(FILE *stream, const fpos_t *);
 long ftell(FILE *stream);
 void perror(const char *);
-int printf(const char *, ...);
 int remove(const char *);
 int rename(const char *, const char *);
 void rewind(FILE *stream);
-int scanf(const char *, ...);
-int sprintf(char *, const char *, ...);
-int sscanf(const char *, const char *, ...);
 FILE *tmpfile(void);
 char *tmpnam(char *);
 int vfprintf(FILE *, const char *, char *);
@@ -132,6 +141,12 @@ extern FILE *stderr, *stdin, *stdout;
     size_t pop(FILE *f, unsigned char* outItem);
     size_t pop_N(FILE *f, unsigned char* outItems, size_t count);
 
+    // Guess length of a formatted string.
+    #define FORMATTED_STRING_LEN_GUESS 2048
+
+    // Formatted string generation.
+    long _generateFormattedString(const char *format, va_list args, char *out, size_t maxLen);
+    long _printfToStream(FILE *stream, const char * format, va_list args);
 #endif
 
 #endif // _CALCIC_STDIO_h

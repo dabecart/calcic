@@ -255,13 +255,19 @@ class TACBuiltIn_asm(TACBuiltInFunction):
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
         self.asmAST = asmAST
         super().__init__(instructionsList, parentTAC)
+        # Now create the assignments: tempValues -> outputs.
+        for output, tempVal in zip(self.asmAST.outputs, self.outValues):
+            dst = self.parseTACExpression(output.exp, self.insts)
+            self.makeAssignment(dst.processedType, dst, tempVal, self.insts)
 
     def parse(self) -> TACValue:
-        # Parse the input and output expressions.
+        # The output values are saved in temporary variables. After all of them have been saved, 
+        # these variables are assigned to the relative outputs.
         self.outValues: list[TACValue] = []
         for output in self.asmAST.outputs:
-            self.outValues.append(self.parseTACExpression(output.exp, self.insts).convert())
+            self.outValues.append(TACValue(False, output.exp.typeId))
 
+        # Parse the input expressions. 
         self.inValues: list[TACValue] = []
         for input in self.asmAST.inputs:
             self.inValues.append(self.parseTACExpression(input.exp, self.insts).convert())
