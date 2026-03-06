@@ -27,7 +27,7 @@ double atof(const char *nptr);
 int atoi(const char *nptr);
 long atol(const char *nptr);
 double strtod(const char *nptr, char **endptr);
-double strtof(const char *nptr, char **endptr);
+float strtof(const char *nptr, char **endptr);
 long strtol(const char *nptr, char **endptr, int base);
 unsigned long strtoul(const char *nptr, char **endptr, int base);
 
@@ -53,18 +53,15 @@ void  free(void *ptr);
 void *malloc(size_t size);
 void *realloc(void *ptr, size_t size);
 
+
+
 // All global variables are inside xdecl_stdlib.c
 #ifdef COMPILING_STDLIB
 
-// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 // Pseudo-random sequence generation.
-// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 extern unsigned long NEXT_RAND;
 
-// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 // Memory management.
-// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
 #define ALIGN_UP(n, a) (((n) + ((a) - 1)) & ~((a) - 1))
 
 struct HeapChunkHeader;
@@ -95,7 +92,6 @@ typedef struct HeapChunkHeader {
 
 #define DEALLOCATE_LIST_LEN 5
 
-// Defined in malloc.
 extern HeapChunkHeader *firstHeapChunk;
 extern BlockHeader *freeListHead;
 extern size_t heapSize;
@@ -104,6 +100,16 @@ extern int chunkDeallocateLen;
 
 void _insertInFreeList(BlockHeader* block);
 void _removeFromFreeList(BlockHeader* block);
+
+// Numeric conversion.
+#define INFINITY_STR "INFINITY"
+#define INF_STR "INF"
+#define NAN_STR "NAN"
+
+unsigned long _strToInteger(const char *nptr, char **endptr, int base, int* negative, int *overflow);
+double _strToDecimal(const char *nptr, char **endptr,
+    const int min10Exp, const int max10Exp, const double minValue, const double maxValue,
+    int *negative, int *underflow, int *overflow);
 
 #endif // COMPILING_STDLIB
 
