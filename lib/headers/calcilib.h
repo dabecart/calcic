@@ -24,4 +24,9 @@ udiv_t udiv(unsigned int numer, unsigned int denom);
 #define MAX(a,b) (((a) >= (b)) ? (a) : (b))
 #define MIN(a,b) (((a) <= (b)) ? (a) : (b))
 
+// Calculates 10^exp fast.
+double pow10(int exp);
+// Calculates floor(log(x)).
+int ilog10(double x);
+
 #endif // _CALCIC_CALCILIB_h

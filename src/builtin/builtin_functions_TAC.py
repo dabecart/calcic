@@ -291,5 +291,6 @@ class TACBuiltIn_asm(TACBuiltInFunction):
         return self
 
     def anotateLiveVariables(self, liveVariables: set[TACValue], aliased: set[TACValue]):
-        # This does not affect live variables.
-        pass
+        # Input variables are alive. Output variables are killed, but they get annotated on the 
+        # assignment instructions (created at the constructor of this class).
+        liveVariables |= set(self.inValues)

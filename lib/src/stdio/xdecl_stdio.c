@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <calcilib.h>
+#include <math.h>
 
 static FILE in  = {0, READ_MODE};
 static FILE out = {1, WRITE_MODE|LINE_BUFFERED_MODE};
@@ -162,7 +163,7 @@ size_t pop_N(FILE *f, unsigned char* outItems, size_t count) {
 #define BAD_FORMAT_STRING       (-1)
 
 static char numberToChar(int num, int upper) {
-    if(num < 9) {
+    if(num < 10) {
         return num + '0';
     }
     
@@ -188,7 +189,7 @@ static long ulongToString(unsigned long val, int writeSign, int base, int upper,
         val = div.quot;
         
         buf--;
-    }while((str >= buf) || (val > 0));
+    }while((str <= buf) && (val > 0));
 
     if(val != 0) {
         // There wasn't enough space to represent 'val'.
@@ -242,6 +243,204 @@ static long longToString(long val, int writeSign, int base, int upper, char *str
     return digitsWritten;
 }
 
+static int handleSpecialDoubleValues(double val, int upper, char *str) {
+    if(isinf(val)) {
+        if(upper) {
+            strcpy(str, "INF");
+        }else {
+            strcpy(str, "inf");
+        }
+        return 3;
+    }else if(isnan(val)) {
+        if(upper) {
+            strcpy(str, "NAN");
+        }else {
+            strcpy(str, "nan");
+        }
+        return 3;
+    }
+    return 0;
+}
+
+static long doubleToFixedPointString(double val, int writeSign, int upper, int precision, 
+    char *str, size_t maxLen) 
+{
+    if(maxLen < 4) {
+        return -1;
+    }
+
+    long digitsWritten = 0;
+
+    // Print the sign.
+    *str = 0;
+    // Use the 'signbit' macro to detect -0.0.
+    if(signbit(val)) {
+        *str = '-';
+        // Get the number without the sign.
+        val = -val;
+    }else if(writeSign) {
+        *str = '+';
+    }
+    
+    if(*str != 0) {
+        // We wrote a sign symbol. Advance the pointers.
+        str++;
+        digitsWritten++;
+    }
+
+    int specialCases = handleSpecialDoubleValues(val, upper, str);
+    if(specialCases != 0) {
+        return digitsWritten + specialCases;
+    }
+
+    double divider = 1.0;
+    // This is so that we print at least a '0.xx' at the beginning. 'decimalPlaces' = 0 is reserved
+    // for the period sign. A negative value is for the integer digits, and positive for the 
+    // decimals.
+    int decimalPlaces = -1;
+    if(val >= 10.0) {
+        int log_val = ilog10(val);
+        divider = pow10(log_val);
+        // Subtract 1 for the period sign.
+        decimalPlaces = -log_val - 1;
+    }
+
+    do{
+        if(decimalPlaces == 0) {
+            *str = '.';
+        }else {
+            // Move the digit to print to the units position.
+            double div = val / divider;
+            int digit;
+            if(decimalPlaces == precision) {
+                // The last decimal must be rounded.
+                digit = round(div);
+            }else {
+                // The rest of decimal values must be floored.
+                digit = div;
+            }
+            // Remove the digit from the value.
+            val -= digit * divider;
+            // Advance for the next divider.
+            divider /= 10.0;
+
+            *str = numberToChar(MIN(round(digit),9), upper);
+        }
+        
+        str++;
+        digitsWritten++;
+        decimalPlaces++;
+    }while((digitsWritten < maxLen) && (decimalPlaces <= precision));
+
+    if(decimalPlaces <= precision) {
+        // There wasn't enough space to represent all digits.
+        return -1;
+    }
+
+    return digitsWritten;
+}
+
+static long doubleToScientificString(double val, int writeSign, int upper, int precision, 
+    char *str, size_t maxLen) 
+{
+    if(maxLen < 4) {
+        return -1;
+    }
+
+    long digitsWritten = 0;
+
+    // Print the sign.
+    *str = 0;
+    // Use the 'signbit' macro to detect -0.0.
+    if(signbit(val)) {
+        *str = '-';
+        // Get the number without the sign.
+        val = -val;
+    }else if(writeSign) {
+        *str = '+';
+    }
+    
+    if(*str != 0) {
+        // We wrote a sign symbol. Advance the pointers.
+        str++;
+        digitsWritten++;
+    }
+
+    int specialCases = handleSpecialDoubleValues(val, upper, str);
+    if(specialCases != 0) {
+        return digitsWritten + specialCases;
+    }
+
+    // Zero is another special case.
+    if(val == 0.0) {
+        *str = '0';
+        if(precision > 0) {
+            str++;
+            *str = '.';
+            str++;
+            for(int decimals = 0; decimals < precision; decimals++) {
+                *str = '0';
+                str++;
+            }
+            *str = upper ? 'E' : 'e';
+            str++;
+            *str = '0';
+            str++;
+            *str = '0';
+            return 5 + precision;
+        }
+    }
+
+    int decimalPlaces = -1;
+    int log_val = ilog10(val);
+
+    int dividerExponent = log_val;
+    double divider = pow10(dividerExponent);
+
+    do{
+        if(decimalPlaces == 0) {
+            *str = '.';
+        }else {
+            // Move the digit to print to the units position.
+            double div = val / divider;
+            int digit;
+            if(decimalPlaces == precision) {
+                // The last decimal must be rounded.
+                digit = round(div);
+            }else {
+                // The rest of decimal values must be floored.
+                digit = div;
+            }
+            // Remove the digit from the value.
+            val -= digit * divider;
+            // Next divider.
+            dividerExponent--;
+            divider = pow10(dividerExponent);
+
+            *str = numberToChar(MIN(digit, 9), upper);
+        }
+        
+        str++;
+        digitsWritten++;
+        decimalPlaces++;
+    }while((digitsWritten < maxLen) && (decimalPlaces <= precision));
+
+    if(decimalPlaces <= precision) {
+        // There wasn't enough space to represent all digits.
+        return -1;
+    }
+
+    *str = upper ? 'E' : 'e';
+    str++;
+    digitsWritten++;
+
+    // TODO: add leading zeros
+    digitsWritten += longToString(log_val, 1, 10, upper, str, maxLen - digitsWritten);
+
+    return digitsWritten;
+}
+
+
 long _generateFormattedString(const char *format, va_list args, char *out, size_t maxLen) {
     // 'out' may be NULL. In this case, do not write anything to it.
     int writeToOut = (out != NULL);
@@ -252,7 +451,7 @@ long _generateFormattedString(const char *format, va_list args, char *out, size_
     char * const end_str = out + maxLen;
 
     // Used to store temporary conversions from "value" to string.
-    char temp[32];
+    char temp[64];
 
     long freeSpace = maxLen;
     while(*format != 0) {
@@ -369,17 +568,20 @@ long _generateFormattedString(const char *format, va_list args, char *out, size_
                 return BAD_FORMAT_STRING;
             }
 
-            int uppercase = (convSpecifier == CS_UINT_HEX_UPPER);
-            int base;
-            if(convSpecifier == CS_UINT) {
-                base = 10;
-            }else if(uppercase || (convSpecifier == CS_UINT_HEX_LOWER)) {
-                base = 16;
-            }else if(convSpecifier == CS_UINT_OCTAL) {
+            int base = 10;
+            if(convSpecifier == CS_UINT_OCTAL) {
                 base = 8;
+            }else if((convSpecifier == CS_UINT_HEX_LOWER) || (convSpecifier == CS_UINT_HEX_UPPER)) {
+                base = 16;
             }
 
-            writtenChars = ulongToString(x, 0, base, uppercase, temp, sizeof(temp));
+            writtenChars = ulongToString(x, 0, base, convSpecifier == CS_UINT_HEX_UPPER, temp, sizeof(temp));
+        }else if((convSpecifier == CS_DOUBLE_LOWER) || (convSpecifier == CS_DOUBLE_UPPER)) {
+            double x = va_arg(args, double);
+            writtenChars = doubleToFixedPointString(x, 0, convSpecifier == CS_DOUBLE_UPPER, 6, temp, sizeof(temp));
+        }else if((convSpecifier == CS_SCIENT_LOWER) || (convSpecifier == CS_SCIENT_UPPER)) {
+            double x = va_arg(args, double);
+            writtenChars = doubleToScientificString(x, 0, convSpecifier == CS_SCIENT_UPPER, 6, temp, sizeof(temp));
         }
 
         // Transfer from 'temp' to the output string.

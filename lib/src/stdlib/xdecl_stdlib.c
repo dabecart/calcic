@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <string.h>
 #include <math.h>
+#include <calcilib.h>
 
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 // Pseudo-random sequence generation.
@@ -200,67 +201,6 @@ exit_strToInteger:
     return number;
 }
 
-// In IEEE 754-1985, the exponent goes from 2^-1022 to 2^1023 which is approximately 10^-307 to 
-// 10^307. We'll create two arrays to fast fetch the powers of 10 when parsing the exponents.
-
-// For an exponent z = abs(x):
-// 10^z = HIGH_EXP[z / 8] * LOW_EXP[z % 8]
-// If x < 0, then calculate 1/10^z.
-
-static double LOW_EXP[8] = {
-    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7
-};
-static double HIGH_EXP[39] = {
-    1e+000, 1e+008, 1e+016, 1e+024, 1e+032, 1e+040, 1e+048, 1e+056, 
-    1e+064, 1e+072, 1e+080, 1e+088, 1e+096, 1e+104, 1e+112, 1e+120, 
-    1e+128, 1e+136, 1e+144, 1e+152, 1e+160, 1e+168, 1e+176, 1e+184, 
-    1e+192, 1e+200, 1e+208, 1e+216, 1e+224, 1e+232, 1e+240, 1e+248, 
-    1e+256, 1e+264, 1e+272, 1e+280, 1e+288, 1e+296, 1e+304, 
-};
-
-static double mypow10(int exponent) {
-    double result;
-    if(exponent >= 0) {
-        result = HIGH_EXP[exponent >> 3] * LOW_EXP[exponent & 0x7];
-    }else {
-        exponent = -exponent;
-        result = HIGH_EXP[exponent >> 3] * LOW_EXP[exponent & 0x7];
-        result = 1.0 / result;
-    }
-    return result;
-}
-
-// Calculates floor(log10 of x).
-static int ilog10(double x) {
-    if(x <= 0) {
-        return -1;
-    }
-
-    // Convert double to ulong.
-    unsigned long u;
-    memcpy(&u, &x, sizeof(x));
-    
-    // Extract binary exponent: floor(log2(x)).
-    // Bits 52 to 62. Exponent is encoded using offset-binary representation. For a exponent of 0, 
-    // the value is 1023.
-    int e_bin = (int)((u >> 52) & 0x7FF) - 1023;
-    
-    // log10(x) = log2(x) * log10(2), where log10(2) = 0.30103 ~ 1233/4096
-    int e_dec = (e_bin * 1233) >> 12;
-
-    // e_dec is an approximation, we have -1,+1 of error.
-    double powe = mypow10(e_dec);
-    double powe_1 = powe * 10.0;
-
-    if(x >= powe_1) {
-        e_dec++;
-    }else if(x < powe) {
-        e_dec--;
-    }
-    
-    return e_dec;
-}
-
 static int strncmp_case(const char *s1, const char *s2, size_t n) {
     const unsigned char *p1 = (const unsigned char *)s1;
     const unsigned char *p2 = (const unsigned char *)s2;
@@ -282,6 +222,7 @@ double _strToDecimal(const char *nptr, char **endptr,
     const int min10Exp, const int max10Exp, const double minValue, const double maxValue,
     int *negative, int *underflow, int *overflow)
 {
+    // TODO: Hex double.
     double number = 0;
     
     if(nptr == NULL) {
@@ -430,7 +371,7 @@ double _strToDecimal(const char *nptr, char **endptr,
         number = maxValue;
         *overflow = 1;
     }else {
-        number = mantissa * mypow10(exponent);
+        number = mantissa * pow10(exponent);
     }
 
 success_strtod:
