@@ -31,9 +31,9 @@ static void *__mmap(void *start, size_t len, int prot, int flags, int fd, long o
     
     __asm__("\t"
         "mov        %0, %%rax\n\t"      // Move the opcode __NR_mmap to AX.
-        "syscall    \n\t"       // AX contains the return value.
-        :   "r:AX"  (ret)                 // OUTPUTS
-        :   "i"     (__NR_mmap),          // INPUTS (following the order of syscall(2))
+        "syscall    \n\t"               // AX contains the return value.
+        :   "r:AX"  (ret)               // OUTPUTS
+        :   "i"     (__NR_mmap),        // INPUTS (following the order of syscall(2))
             "r:DI"  (start),               
             "r:SI"  (len),
             "r:DX"  (prot),

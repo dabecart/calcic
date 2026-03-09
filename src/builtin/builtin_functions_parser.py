@@ -98,6 +98,9 @@ class BuiltIn_va_arg(BuiltInFunctionCall):
         if isinstance(self.param_type, (ArrayDeclaratorType, FunctionDeclaratorType)):
             self.raiseError(f"The second argument to va_arg cannot be a {self.param_type}")
 
+        if isinstance(self.param_type, BaseDeclaratorType) and self.param_type.baseType.needsIntegerPromotion():
+            self.raiseError(f"{self.param_type} is promoted to an int when passed through ...")
+
         return self.param_type
 
     def print(self, padding: int) -> str:
@@ -303,10 +306,14 @@ class BuiltIn_asm(BuiltInFunctionCall):
 
         self.outputs: list[BuiltIn_asmIO] = []
         if self.peek().id == ":":
-            self.outputs = self.parseIOList(set([BuiltIn_asmIOType.REGISTER]))
-            for output in self.outputs:
-                if not output.exp.isLvalueAssignable():
-                    self.raiseError(f"Expected an lvalue as argument for {output.args}")
+            if self.peek(1).id == ":":
+                # The output list could be empty.
+                self.pop()
+            else:
+                self.outputs = self.parseIOList(set([BuiltIn_asmIOType.REGISTER]))
+                for output in self.outputs:
+                    if not output.exp.isLvalueAssignable():
+                        self.raiseError(f"Expected an lvalue as argument for {output.args}")
 
         self.inputs: list[BuiltIn_asmIO]  = []
         if self.peek().id == ":":

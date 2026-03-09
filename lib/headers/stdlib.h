@@ -70,6 +70,11 @@ ldiv_t ldiv(long numer, long denom);
 
 // TODO: llabs and lldiv to be implemented when long long support is added.
 
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+// Communication with the environment.
+// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+void exit(int status);
+
 // All global variables are inside xdecl_stdlib.c
 #ifdef COMPILING_STDLIB
 

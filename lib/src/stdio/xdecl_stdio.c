@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <calcilib.h>
 #include <math.h>
+#include <ctype.h>
 
 static FILE in  = {0, READ_MODE};
 static FILE out = {1, WRITE_MODE|LINE_BUFFERED_MODE};
@@ -130,6 +131,15 @@ size_t pop_N(FILE *f, unsigned char* outItems, size_t count) {
     return count - toPop;
 }
 
+// Flags.
+#define FLAG_LEFT_JUSTIFIED 0x01    // '-'
+#define FLAG_SIGN           0x02    // '+'
+#define FLAG_SPACE          0x04    // ' '
+#define FLAG_ALT_FORM       0x08    // '#'
+#define FLAG_ZERO_PADDING   0x10    // '0'
+
+#define FLAG_UPPERCASE      0x20    // Not represented by a flag symbol, but it's an utility.
+
 // Length modifiers.
 #define LEN_MOD_NONE        0
 #define LEN_MOD_CHAR        1   // hh
@@ -142,7 +152,8 @@ size_t pop_N(FILE *f, unsigned char* outItems, size_t count) {
 #define LEN_MOD_LONG_DOUBLE 8   // L
 
 // Conversion specifiers.
-#define CS_INT                  'd'
+#define CS_INT_D                'd'
+#define CS_INT_I                'i'
 #define CS_UINT                 'u'
 #define CS_UINT_OCTAL           'o'
 #define CS_UINT_HEX_LOWER       'x'
@@ -162,6 +173,13 @@ size_t pop_N(FILE *f, unsigned char* outItems, size_t count) {
 
 #define BAD_FORMAT_STRING       (-1)
 
+// Values used during string formatting.
+typedef struct {
+    int precision;
+    int minFieldWidth;
+    int flags;
+} FormatOptions;
+
 static char numberToChar(int num, int upper) {
     if(num < 10) {
         return num + '0';
@@ -174,21 +192,79 @@ static char numberToChar(int num, int upper) {
     }
 }
 
-static long ulongToString(unsigned long val, int writeSign, int base, int upper, char *str, size_t maxLen) {
+static long ulongToString(unsigned long val, int base, FormatOptions options, char *str, size_t maxLen) {
     if(maxLen < 2) {
         return -1;
     }
 
     long digitsWritten = 0;
+    int uppercase = (options.flags & FLAG_UPPERCASE) != 0;
+    
+    // Write the + sign or [space] if required. Check that there's enough space for it.
+    int printSign = (options.flags & (FLAG_SIGN|FLAG_SPACE)) != 0;
+    if(printSign) {
+        if(options.flags & FLAG_SIGN) {
+            *str = '+';
+        }else {
+            *str = ' ';
+        }
+        str++;
+        digitsWritten++;
+    }
+    
+    int precision = options.precision;
+    if(options.flags & FLAG_ZERO_PADDING) {
+        // Substitute the zero padding flag with a precision value.
+        if(printSign) {
+            // If the sign was added, subtract it.
+            precision = MAX(precision, options.minFieldWidth - 1);
+        }else {
+            precision = MAX(precision, options.minFieldWidth);
+        }
+    }
+
+    if((precision == 0) && (val == 0) && 
+       !((options.flags & FLAG_ALT_FORM) != 0 && (base == 8))) {
+        // A zero value with zero precision returns nothing.
+        // The special case of the alt form for base 8 must return at least a zero.
+        return 0;
+    }
+
+    // Zero values are not affected by the alternative form flag.
+    if((options.flags & FLAG_ALT_FORM) && (val != 0)) {
+        if(base == 16) {
+            if(uppercase) {
+                strcpy(str, "0X");
+            }else {
+                strcpy(str, "0x");
+            }
+            str += 2;
+            digitsWritten += 2;
+            if(options.flags & FLAG_ZERO_PADDING) {
+                // 0x counts towards the field width, but should not modify the precision number, 
+                // unless we're zero padding. In this case, we trick the program by substituting
+                // the padding with precision.
+                precision -= 2;
+            }
+        }else if(base == 8) {
+            // Add a zero beforehand. 
+            *str = '0';
+            str++;
+            digitsWritten++;
+            // Decrement precision as there's already a zero at the start.
+            precision--;
+        }
+    }
 
     // Write the number from right to left, starting at str[maxLen - 1].
     char *buf = str + (maxLen - 1);
     do{
         uldiv_t div = uldiv(val, base);
-        *buf = numberToChar(div.rem, upper);
+        *buf = numberToChar(div.rem, uppercase);
         val = div.quot;
         
         buf--;
+        precision--;
     }while((str <= buf) && (val > 0));
 
     if(val != 0) {
@@ -196,15 +272,11 @@ static long ulongToString(unsigned long val, int writeSign, int base, int upper,
         return -1;
     }
 
-    // Write the + sign if required. Check that there's enough space for it.
-    if(writeSign) {
-        if(buf < str) {
-            return -2;
-        }
-
-        *buf = '+';
-        digitsWritten++;
+    // If there's some precision digits left, add '0'.
+    while(precision > 0) {
+        *buf = '0';
         buf--;
+        precision--;
     }
 
     // 'buf' now points to the last written character.
@@ -220,7 +292,7 @@ static long ulongToString(unsigned long val, int writeSign, int base, int upper,
     return digitsWritten;
 }
 
-static long longToString(long val, int writeSign, int base, int upper, char *str, size_t maxLen) {
+static long longToString(long val, int base, FormatOptions options, char *str, size_t maxLen) {
     if(maxLen < 2) {
         return -1;
     }
@@ -230,15 +302,22 @@ static long longToString(long val, int writeSign, int base, int upper, char *str
         *str = '-';
         str++;
         maxLen--;
-        digitsWritten++;
+        digitsWritten = 1;
 
-        // No need to print the sign inside the 'ulongToString' call.
-        writeSign = 0;
+        // No need to print the sign or space inside the 'ulongToString' call.
+        options.flags &= ~(FLAG_SIGN | FLAG_SPACE);
         // Get the number without the sign.
         val = -val;
+
+        if(options.flags & FLAG_ZERO_PADDING) {
+            // Substitute the zero padding flag with a precision value. Subtract one for the sign.
+            options.precision = MAX(options.precision, options.minFieldWidth - 1);
+            // Clear the zero padding flag.
+            options.flags &= ~FLAG_ZERO_PADDING;
+        }
     }
 
-    digitsWritten += ulongToString(val, writeSign, base, upper, str, maxLen);
+    digitsWritten += ulongToString(val, base, options, str, maxLen);
 
     return digitsWritten;
 }
@@ -262,14 +341,22 @@ static int handleSpecialDoubleValues(double val, int upper, char *str) {
     return 0;
 }
 
-static long doubleToFixedPointString(double val, int writeSign, int upper, int precision, 
+static long doubleToFixedPointString(double val, FormatOptions options,
     char *str, size_t maxLen) 
 {
-    if(maxLen < 4) {
+    // When precision is not specified, it is 6.
+    int precision = options.precision;
+    if(precision < 0) {
+        precision = 6;
+    }
+
+    // At least, sign, one unit, period and precision decimals.
+    if(maxLen < (3 + precision)) {
         return -1;
     }
 
     long digitsWritten = 0;
+    int uppercase = (options.flags & FLAG_UPPERCASE) != 0;
 
     // Print the sign.
     *str = 0;
@@ -278,8 +365,10 @@ static long doubleToFixedPointString(double val, int writeSign, int upper, int p
         *str = '-';
         // Get the number without the sign.
         val = -val;
-    }else if(writeSign) {
+    }else if(options.flags & FLAG_SIGN) {
         *str = '+';
+    }else if(options.flags & FLAG_SPACE) {
+        *str = ' ';
     }
     
     if(*str != 0) {
@@ -288,43 +377,38 @@ static long doubleToFixedPointString(double val, int writeSign, int upper, int p
         digitsWritten++;
     }
 
-    int specialCases = handleSpecialDoubleValues(val, upper, str);
+    int specialCases = handleSpecialDoubleValues(val, uppercase, str);
     if(specialCases != 0) {
         return digitsWritten + specialCases;
     }
 
-    double divider = 1.0;
-    // This is so that we print at least a '0.xx' at the beginning. 'decimalPlaces' = 0 is reserved
-    // for the period sign. A negative value is for the integer digits, and positive for the 
-    // decimals.
+    // Scale 'val' to an 18 digit integer (in base 10). The first digit of this number will be at 
+    // 10^17 (which is the largest integer representable in an unsigned long).
+    unsigned long scaled_val = 0;
     int decimalPlaces = -1;
-    if(val >= 10.0) {
+    unsigned long divider = 100000000000000000UL; // 10^17
+    if(val != 0.0) {
         int log_val = ilog10(val);
-        divider = pow10(log_val);
-        // Subtract 1 for the period sign.
+        double scale = pow10(17 - log_val);
+        scaled_val = round(val * scale);
         decimalPlaces = -log_val - 1;
     }
 
     do{
         if(decimalPlaces == 0) {
-            *str = '.';
-        }else {
-            // Move the digit to print to the units position.
-            double div = val / divider;
-            int digit;
-            if(decimalPlaces == precision) {
-                // The last decimal must be rounded.
-                digit = round(div);
+            // Alt form forces the decimal separator even with zero precision.
+            if(((precision > 0) || ((options.flags & FLAG_ALT_FORM) != 0))) {
+                *str = '.';
             }else {
-                // The rest of decimal values must be floored.
-                digit = div;
+                decimalPlaces++;
+                continue;
             }
-            // Remove the digit from the value.
-            val -= digit * divider;
-            // Advance for the next divider.
-            divider /= 10.0;
-
-            *str = numberToChar(MIN(round(digit),9), upper);
+        }else if(divider > 0) {
+            *str = numberToChar(scaled_val / divider, uppercase);
+            scaled_val %= divider;
+            divider /= 10ULL;
+        }else {
+            *str = '0';
         }
         
         str++;
@@ -340,14 +424,23 @@ static long doubleToFixedPointString(double val, int writeSign, int upper, int p
     return digitsWritten;
 }
 
-static long doubleToScientificString(double val, int writeSign, int upper, int precision, 
+static long doubleToScientificString(double val, FormatOptions options,
     char *str, size_t maxLen) 
 {
-    if(maxLen < 4) {
+    // When precision is not specified, it is 6.
+    int precision = options.precision;
+    if(precision < 0) {
+        precision = 6;
+    }
+
+    // At least, sign, one unit, period, precision decimals, exponent letter ('e' or 'E') and three 
+    // exponents characters (sign and two digits).
+    if(maxLen < (7 + precision)) {
         return -1;
     }
 
     long digitsWritten = 0;
+    int uppercase = (options.flags & FLAG_UPPERCASE) != 0;
 
     // Print the sign.
     *str = 0;
@@ -356,8 +449,10 @@ static long doubleToScientificString(double val, int writeSign, int upper, int p
         *str = '-';
         // Get the number without the sign.
         val = -val;
-    }else if(writeSign) {
+    }else if(options.flags & FLAG_SIGN) {
         *str = '+';
+    }else if(options.flags & FLAG_SPACE) {
+        *str = ' ';
     }
     
     if(*str != 0) {
@@ -366,77 +461,71 @@ static long doubleToScientificString(double val, int writeSign, int upper, int p
         digitsWritten++;
     }
 
-    int specialCases = handleSpecialDoubleValues(val, upper, str);
+    int specialCases = handleSpecialDoubleValues(val, FLAG_UPPERCASE, str);
     if(specialCases != 0) {
         return digitsWritten + specialCases;
     }
 
     // Zero is another special case.
     if(val == 0.0) {
-        *str = '0';
-        if(precision > 0) {
-            str++;
-            *str = '.';
-            str++;
-            for(int decimals = 0; decimals < precision; decimals++) {
-                *str = '0';
-                str++;
-            }
-            *str = upper ? 'E' : 'e';
-            str++;
-            *str = '0';
-            str++;
-            *str = '0';
-            return 5 + precision;
-        }
+        long n = doubleToFixedPointString(val, options, str, maxLen - digitsWritten);
+        strcpy(str + n, uppercase ? "E00" : "e00");
+        return digitsWritten + n + 3;
     }
 
-    int decimalPlaces = -1;
+    // Scale 'val' to an 18 digit integer (in base 10). The first digit of this number will be at 
+    // 10^17 (which is the largest integer representable in an unsigned long).
     int log_val = ilog10(val);
+    double scale = pow10(17 - log_val);
+    unsigned long scaled_val = round(val * scale);
 
-    int dividerExponent = log_val;
-    double divider = pow10(dividerExponent);
-
-    do{
-        if(decimalPlaces == 0) {
-            *str = '.';
-        }else {
-            // Move the digit to print to the units position.
-            double div = val / divider;
-            int digit;
-            if(decimalPlaces == precision) {
-                // The last decimal must be rounded.
-                digit = round(div);
-            }else {
-                // The rest of decimal values must be floored.
-                digit = div;
-            }
-            // Remove the digit from the value.
-            val -= digit * divider;
-            // Next divider.
-            dividerExponent--;
-            divider = pow10(dividerExponent);
-
-            *str = numberToChar(MIN(digit, 9), upper);
-        }
-        
-        str++;
-        digitsWritten++;
-        decimalPlaces++;
-    }while((digitsWritten < maxLen) && (decimalPlaces <= precision));
-
-    if(decimalPlaces <= precision) {
-        // There wasn't enough space to represent all digits.
-        return -1;
-    }
-
-    *str = upper ? 'E' : 'e';
+    // Print the first digit.
+    unsigned long divider = 100000000000000000UL; // 10^17
+    
+    *str = numberToChar(scaled_val / divider, uppercase);
     str++;
     digitsWritten++;
 
-    // TODO: add leading zeros
-    digitsWritten += longToString(log_val, 1, 10, upper, str, maxLen - digitsWritten);
+    scaled_val %= divider;
+    divider /= 10UL;
 
+    // Alt form forces the decimal separator even with zero precision.
+    if((precision > 0) || ((options.flags & FLAG_ALT_FORM) != 0)) {
+        *str++ = '.';
+        digitsWritten++;
+    }
+
+    // Extract decimal digits.
+    for(int i = 0; i < precision; i++) {
+        // If we run out of precision in the scaled_val, just print '0'.
+        if (divider > 0) {
+            *str = numberToChar(scaled_val / divider, uppercase);
+            scaled_val %= divider;
+            divider /= 10UL;
+        } else {
+            *str = '0';
+        }
+        str++;
+        digitsWritten++;
+
+        if(digitsWritten == maxLen) {
+            return -1;
+        }
+    }
+
+    // Print the exponent.
+    *str = uppercase ? 'E' : 'e';
+    str++;
+    digitsWritten++;
+    FormatOptions expOpts = {0};
+    expOpts.flags = FLAG_SIGN;
+    expOpts.precision = 2;
+    long expOk = longToString(log_val, 10, expOpts, str, maxLen - digitsWritten);
+    if(expOk < 0) {
+        return -1;
+    }
+    digitsWritten += expOk;
+    
     return digitsWritten;
 }
 
@@ -447,47 +536,128 @@ long _generateFormattedString(const char *format, va_list args, char *out, size_
     // Leave space for the null termination.
     maxLen--;
 
-    char *str = out;
+    char *strOut = out;
     char * const end_str = out + maxLen;
 
     // Used to store temporary conversions from "value" to string.
-    char temp[64];
+    char TEMP_BUF[64];
+    // Stores the theoretical number of bytes written to the output.
+    long retCount = 0;
 
-    long freeSpace = maxLen;
     while(*format != 0) {
-        freeSpace = end_str - str;
-        // Do not write if we're passed 'end_str'.
-        writeToOut &= (freeSpace > 0);
+        // Do not write to the output in case we exceeded maxLen.
+        writeToOut &= (retCount < maxLen);
 
         // Normal characters.
         if(*format != '%') {
             if(writeToOut) {
-                *str = *format;
+                *strOut = *format;
+                strOut++;
             }
 
-            str++;
             format++;
+            retCount++;
             continue;
         }
 
-        // Escape sequence.
+        // This starts an escape sequence.
         format++;
-
+        
         if(*format == '%') {
-            // %% scape sequence -> %.
+            // %% -> %.
             if(writeToOut) {
-                *str = '%';
+                *strOut = '%';
+                strOut++;
             }
-
-            str++;
+            
             format++;
+            retCount++;
             continue;
+        }
+
+        // An unspecified precision will be negative.
+        FormatOptions options = {-1, 0, 0};
+        // Normally, we'll use the 'TEMP_BUF' array to store the the value that will be copied into 
+        // 'out', but that won't happen for strings (%s).
+        char *temp = TEMP_BUF;
+
+        // Flags.
+        int toIncFormat = 1;
+        char escapeChar;
+        while(toIncFormat > 0) {
+            escapeChar = *format;
+            toIncFormat = 1;
+
+            if(escapeChar == '-') {
+                options.flags |= FLAG_LEFT_JUSTIFIED;
+                // Clear the zero padding flag.
+                options.flags &= ~FLAG_ZERO_PADDING;
+            }else if(escapeChar == '+') {
+                options.flags |= FLAG_SIGN;
+                // Clear the space flag.
+                options.flags &= ~FLAG_SPACE;
+            }else if(escapeChar == ' ') {
+                // Only add the space flag if the sign flag is not present.
+                if(!(options.flags & FLAG_SIGN)) {
+                    options.flags |= FLAG_SPACE;
+                }
+            }else if(escapeChar == '#') {
+                options.flags |= FLAG_ALT_FORM;
+            }else if(escapeChar == '0') {
+                // Do not add the zero paddding when the field is left justified.
+                if(!(options.flags & FLAG_LEFT_JUSTIFIED)) {
+                    options.flags |= FLAG_ZERO_PADDING;
+                }
+            }else {
+                toIncFormat = 0;
+            }
+            format += toIncFormat;
+        }
+
+        // Minimum field width.
+        escapeChar = *format;
+        if(escapeChar == '*') {
+            options.minFieldWidth = va_arg(args, int);
+            format++;
+            
+            if(options.minFieldWidth < 0) {
+                // A negative field width is taken as a '-' flag plus the field width.
+                options.minFieldWidth = -options.minFieldWidth;
+                options.flags |= FLAG_LEFT_JUSTIFIED;
+                // Clear the zero padding flag.
+                options.flags &= ~FLAG_ZERO_PADDING;
+            }
+        }else if(isdigit(escapeChar)) {
+            char *endptr;
+            options.minFieldWidth = strtol(format, &endptr, 10);
+            format = endptr;
+        }
+
+        // Precision.
+        if(*format == '.') {
+            format++;
+            // A single period means precision zero.
+            options.precision = 0;
+
+            escapeChar = *format;
+            if(escapeChar == '*') {
+                options.precision = va_arg(args, int);
+                format++;
+            }else if(isdigit(escapeChar)) {
+                char *endptr;
+                options.precision = strtol(format, &endptr, 10);
+                if(options.precision < 0) {
+                    // Cannot have negative precision.
+                    return -1;
+                }
+                format = endptr;
+            }
         }
 
         // Get length modifiers.
         int lenMod = LEN_MOD_NONE;
-        int toIncFormat = 1;
-        char escapeChar = *format;
+        escapeChar = *format;
+        toIncFormat = 1;
         if(escapeChar == 'h') {
             if(format[1] == 'h') {
                 lenMod = LEN_MOD_CHAR;
@@ -522,9 +692,18 @@ long _generateFormattedString(const char *format, va_list args, char *out, size_
         int convSpecifier = *format;
         format++;
 
+        if((convSpecifier == CS_UINT_HEX_UPPER) || 
+           (convSpecifier == CS_DOUBLE_UPPER) || 
+           (convSpecifier == CS_SCIENT_UPPER) || 
+           (convSpecifier == CS_DOUBLE_AUTO_UPPER) || 
+           (convSpecifier == CS_DOUBLE_HEX_UPPER)) 
+        {
+            options.flags |= FLAG_UPPERCASE;
+        }
+
         // Fetch from the variadic arguments and convert to string, save them in 'temp'.
         long writtenChars = 0;
-        if(convSpecifier == CS_INT) {
+        if((convSpecifier == CS_INT_D) || (convSpecifier == CS_INT_I)) {
             // Signed integer types.
             long x;
             if(lenMod == LEN_MOD_NONE) {
@@ -539,12 +718,19 @@ long _generateFormattedString(const char *format, va_list args, char *out, size_
             } else if(lenMod == LEN_MOD_LONG) {
                 // long.
                 x = va_arg(args, long);
+            } else if(lenMod == LEN_MOD_SIZET) {
+                // size_t
+                x = va_arg(args, size_t);
+            } else if(lenMod == LEN_MOD_PTRDIFF) {
+                // ptrdiff_t
+                x = va_arg(args, ptrdiff_t);
             }else {
                 // Error, the escape char is not valid for this type. Go back to the start of the 
                 // escape sequence and return an error.
                 return BAD_FORMAT_STRING;
             }
-            writtenChars = longToString(x, 0, 10, 0, temp, sizeof(temp));
+
+            writtenChars = longToString(x, 10, options, temp, sizeof(TEMP_BUF));
         }else if((convSpecifier == CS_UINT) || (convSpecifier == CS_UINT_OCTAL) || 
                  (convSpecifier == CS_UINT_HEX_LOWER) || (convSpecifier == CS_UINT_HEX_UPPER)) 
         {
@@ -562,6 +748,12 @@ long _generateFormattedString(const char *format, va_list args, char *out, size_
             } else if(lenMod == LEN_MOD_LONG) {
                 // unsigned long.
                 x = va_arg(args, unsigned long);
+            } else if(lenMod == LEN_MOD_SIZET) {
+                // size_t
+                x = va_arg(args, size_t);
+            } else if(lenMod == LEN_MOD_PTRDIFF) {
+                // ptrdiff_t
+                x = va_arg(args, ptrdiff_t);
             }else {
                 // Error, the escape char is not valid for this type. Go back to the start of the 
                 // escape sequence and return an error.
@@ -575,32 +767,102 @@ long _generateFormattedString(const char *format, va_list args, char *out, size_
                 base = 16;
             }
 
-            writtenChars = ulongToString(x, 0, base, convSpecifier == CS_UINT_HEX_UPPER, temp, sizeof(temp));
+            writtenChars = ulongToString(x, base, options, temp, sizeof(TEMP_BUF));
+
         }else if((convSpecifier == CS_DOUBLE_LOWER) || (convSpecifier == CS_DOUBLE_UPPER)) {
             double x = va_arg(args, double);
-            writtenChars = doubleToFixedPointString(x, 0, convSpecifier == CS_DOUBLE_UPPER, 6, temp, sizeof(temp));
+            writtenChars = doubleToFixedPointString(x, options, temp, sizeof(TEMP_BUF));
+        
         }else if((convSpecifier == CS_SCIENT_LOWER) || (convSpecifier == CS_SCIENT_UPPER)) {
             double x = va_arg(args, double);
-            writtenChars = doubleToScientificString(x, 0, convSpecifier == CS_SCIENT_UPPER, 6, temp, sizeof(temp));
+            writtenChars = doubleToScientificString(x, options, temp, sizeof(TEMP_BUF));
+        
+        }else if((convSpecifier == CS_DOUBLE_AUTO_LOWER) || (convSpecifier == CS_DOUBLE_AUTO_UPPER)) {
+            // Scientific form is used only if the exponent is less than -4 or greater or equal to 
+            // the precission.
+            double x = va_arg(args, double);
+            // Calculate the exponent.
+            int log_val = ilog10(x);
+            if((log_val < -4) || (log_val >= options.precision)) {
+                writtenChars = doubleToScientificString(x, options, temp, sizeof(TEMP_BUF));
+            }else {
+                writtenChars = doubleToFixedPointString(x, options, temp, sizeof(TEMP_BUF));
+            }
+
+        }else if(convSpecifier == CS_CHAR) {
+            // Use the pointer as temporary buffer. This will be copied to the 'out' string.
+            char c = va_arg(args, int);
+            *temp = c;
+            writtenChars = 1;
+
+        }else if(convSpecifier == CS_STRING) {
+            // Use the pointer as temporary buffer. This will be copied to the 'out' string.
+            temp = va_arg(args, char*);
+            // Precision dictates the maximum number of bytes to be written.
+            writtenChars = strlen(temp);
+            if(options.precision > 0) {
+                writtenChars = MIN(writtenChars, options.precision);
+            }
+        
+        }else if(convSpecifier == CS_POINTER) {
+            // Pointers get written as uppercase hexadecimal with preceding 0x.
+            void *ptr = va_arg(args, void*);
+            writtenChars = ulongToString((unsigned long) ptr, 16, options, temp, sizeof(TEMP_BUF));
+        
+        }else if(convSpecifier == CS_PRINTED_COUNTER) {
+            // Store in a pointer argument the current number of characters printed.
+            int *ptr = va_arg(args, int*);
+            *ptr = retCount;
+            continue;
+
+        }else {
+            return BAD_FORMAT_STRING;
+        }
+        
+        // Get the real width of the field, taking into account the minimum field width.
+        long fieldWidth = MAX(writtenChars, options.minFieldWidth);
+        // The number of bytes to write depend on the free space.
+        long toWrite = MIN(fieldWidth, maxLen - retCount);
+
+        if((toWrite > 0) && writeToOut) {
+            const char padSymbol = (options.flags & FLAG_ZERO_PADDING) ? '0' : ' ';
+            if(options.flags & FLAG_LEFT_JUSTIFIED) {
+                // Copy from the temporary buffer.
+                long toCopy = MIN(writtenChars, maxLen - retCount);
+                memcpy(strOut, temp, toCopy);
+                strOut += toCopy;
+                
+                // Add the necessary padding.
+                for(; toCopy < toWrite; toCopy++) {
+                    *strOut = padSymbol;
+                    strOut++;
+                }
+            }else {
+                // Add the necessary padding.
+                long toPad = MAX(options.minFieldWidth - writtenChars, 0);
+                for(long count = 0; count < toPad; count++) {
+                    *strOut = padSymbol;
+                    strOut++;
+                }
+
+                // Copy from the temporary buffer.
+                long toCopy = toWrite - toPad;
+                memcpy(strOut, temp, toCopy);
+                strOut += toCopy;
+                
+            }
         }
 
-        // Transfer from 'temp' to the output string.
-        long toWrite = MIN(freeSpace, writtenChars);
-        if(toWrite > 0) {
-            if(writeToOut) {
-                memcpy(str, temp, writtenChars);
-            }
-            str += toWrite;
-        }
+        retCount += fieldWidth;
     }
 
     if(out != NULL) {
         // Add the null terminator at the end. Do not take it into account when calculating the 
         // return value of the function.
-        *str = 0;
+        *strOut = 0;
     }
 
-    return str - out;
+    return retCount;
 }
 
 long _printfToStream(FILE *stream, const char * format, va_list args) {
