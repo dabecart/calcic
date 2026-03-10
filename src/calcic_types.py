@@ -34,9 +34,13 @@ class ParameterInformation:
     offset: int = 0
 
     def __str__(self) -> str:
-        return f"{self.type} {self.name}"
+        if self.isAnonymous:
+            return str(self.type)
+        else:
+            return f"{self.type} {self.name}"
     
     def __eq__(self, other):
+        # The name does not matter, just the type.
         if not isinstance(other, ParameterInformation):
             return False
         return self.type == other.type
@@ -268,10 +272,10 @@ class DeclaratorType(ABC):
         return super().__str__()
 
     def __str__(self) -> str:
-        ret = self._internal_str()
+        ret = self._internal_str().replace("`", "")
         if self.alias == "": 
-            return ret
-        return f"{self.alias} ({ret})"
+            return f"`{ret}`"
+        return f"`{self.alias} ({ret})`"
 
     @abstractmethod
     def _internal_copy(self: DT) -> DT:
@@ -459,25 +463,31 @@ class FunctionDeclaratorType(DeclaratorType):
         super().__init__()
 
     def decay(self) -> DeclaratorType:
-        raise ValueError()
+        return PointerDeclaratorType(self)
 
     def _internal_copy(self) -> FunctionDeclaratorType:
         return FunctionDeclaratorType(self.params, self.returnDeclarator, self.variadic)
 
     def _internal_str(self) -> str:
         paramStrings = [str(p) for p in self.params]
-        return f"{self.returnDeclarator}({', '.join(paramStrings)})"
+        variadicArg = ", ..." if self.variadic else ""
+        return f"{self.returnDeclarator}({', '.join(paramStrings)}{variadicArg})"
     
     def __eq__(self, other):
         if not isinstance(other, FunctionDeclaratorType):
             return False
-        return self.returnDeclarator == other.returnDeclarator and all([p1 == p2 for p1, p2 in zip(self.params, other.params)])
+        return self.returnDeclarator == other.returnDeclarator and \
+            len(self.params) == len(other.params) and \
+            all([p1 == p2 for p1, p2 in zip(self.params, other.params)]) and \
+            self.variadic == other.variadic
 
     def getTypeQualifiers(self) -> TypeQualifier:
-        raise ValueError()
+        # Functions don't have type qualifiers.
+        return TypeQualifier()
 
     def setTypeQualifiers(self, newQualifiers: TypeQualifier):
-        raise ValueError()
+        # This won't affect the function, it doesn't have type qualifiers.
+        pass
 
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

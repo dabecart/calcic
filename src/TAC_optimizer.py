@@ -372,7 +372,7 @@ class ControlFlowNode:
                     if (sameTypes or bothPointers or bothChars) and not anyVolatile:
                         reachingCopies.add(inst)
                 
-                case TACFunctionCall():
+                case TACFunctionCall() | TACIndirectFunctionCall():
                     # Instead of analyzing the behavior of the function being called and how it 
                     # affects the reaching copies of aliased variables, whenever a function call is 
                     # made, all reaching copies related with aliased variables will get killed.
@@ -471,7 +471,22 @@ class ControlFlowNode:
                     ret = TACFunctionCall(inst.identifier, inst.returnType, newArguments, inst.isVariadic, [])
                     ret.result = inst.result
                     return ret
+
+            case TACIndirectFunctionCall():
+                isReplaceable, newFuncAddrs = inst.replaceOperand(inst.funcAddress)
+
+                newArguments: list[TACValue] = []
+                for arg in inst.arguments:
+                    isArgumentReplaceable, newArgument = inst.replaceOperand(arg)
+                    
+                    isReplaceable = isReplaceable or isArgumentReplaceable
+                    newArguments.append(newArgument)
                 
+                if isReplaceable:
+                    ret = TACIndirectFunctionCall(newFuncAddrs, inst.returnType, newArguments, inst.isVariadic, [])
+                    ret.result = inst.result
+                    return ret
+
             case TACJumpIfZero() | TACJumpIfNotZero():
                 isReplaceable, newCondition = inst.replaceOperand(inst.condition)
                 if isReplaceable:
@@ -647,6 +662,20 @@ class ControlFlowNode:
                     # We'll suppose that all aliased variables will be live before a function call,
                     # as they may be needed inside.
                     liveVariables |= aliasedVariables
+
+                case TACIndirectFunctionCall():
+                    if inst.result in liveVariables:
+                        liveVariables.remove(inst.result)
+
+                    for arg in inst.arguments:
+                        if not arg.isConstant:
+                            liveVariables.add(arg)
+
+                    # We'll suppose that all aliased variables will be live before a function call,
+                    # as they may be needed inside.
+                    liveVariables |= aliasedVariables
+                    # The function address must also be alive.
+                    liveVariables.add(inst.funcAddress)
 
                 case TACLabel() | TACJump():
                     continue

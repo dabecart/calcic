@@ -63,6 +63,7 @@ class FunctionIdentifier:
     name: str
     arguments: list[ParameterInformation]
     variadic: bool
+    funcType: DeclaratorType
     returnType: DeclaratorType
     storageClass: StorageClass|None
     isGlobal: bool
@@ -655,6 +656,13 @@ class AST(ABC):
                 # Pointer structure/union arrow.
                 self.pop()
                 ret = self.createChild(Arrow, ret)
+            elif postTok.id == "(":
+                # Function call.
+                if isinstance(ret, Variable) and \
+                   globalContext.isBuiltInFunctionByIdentifier(ret.originalIdentifier):
+                    ret = globalContext.createBuiltInFunction(self, ret.originalIdentifier)
+                else:
+                    ret = self.createChild(FunctionCall, ret)
             else:
                 # No postfix.
                 break
@@ -721,12 +729,7 @@ class AST(ABC):
                 )
 
             case "identifier":
-                if self.peek(1).id == "(":
-                    if globalContext.isBuiltInFunctionByIdentifier(tok.value):
-                        ret = globalContext.createBuiltInFunction(self, tok.value)
-                    else:
-                        ret = self.createChild(FunctionCall)
-                elif tok.value in self.context.identifierMap is not None:
+                if tok.value in self.context.identifierMap is not None:
                     # Remove the token.
                     self.pop()
                     
@@ -737,6 +740,11 @@ class AST(ABC):
                         ret = constVal
                     else:
                         ret = self.createChild(Variable, tok.value)
+
+                elif globalContext.isBuiltInFunctionByIdentifier(tok.value) and self.peek(1).id == "(":
+                    # TODO: This is a bit hacky but it's good enough for built-in functions which 
+                    # cannot have their declarations in C (like va_arg or __asm__).
+                    ret = globalContext.createBuiltInFunction(self, tok.value)
 
             case "(":
                 self.expect("(")
@@ -1314,19 +1322,16 @@ class DirectDeclarator(DeclaratorAST):
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
         if self.isFunctionDeclarator:
-            simpleDecl = self.simple.process(baseType)
-            if isinstance(simpleDecl.type, (BaseDeclaratorType, PointerDeclaratorType)):
-                funcParams: list[ParameterInformation] = []
-                for param in self.paramDeclarators:
-                    paramInfo: DeclaratorInformation = param.process(param.declType)
-                    if isinstance(paramInfo.type, FunctionDeclaratorType):
-                        self.raiseError("Function pointers aren't supported as parameters")
-                    funcParams.append(ParameterInformation(paramInfo.type, paramInfo.name, isAnonymous=paramInfo.isAnonymous))
-                
-                funcDecl = FunctionDeclaratorType(funcParams, simpleDecl.type, self.hasEllipsis)
-                return DeclaratorInformation(simpleDecl.name, funcDecl, funcDecl.params)
-            else:
-                self.raiseError("Not implemented")
+            if isinstance(baseType, (ArrayDeclaratorType, FunctionDeclaratorType)):
+                self.raiseError(f"Functions cannot return {baseType}")
+
+            funcParams: list[ParameterInformation] = []
+            for param in self.paramDeclarators:
+                paramInfo: DeclaratorInformation = param.process(param.declType)
+                funcParams.append(ParameterInformation(paramInfo.type, paramInfo.name, isAnonymous=paramInfo.isAnonymous))
+            
+            funcDecl = FunctionDeclaratorType(funcParams, baseType, self.hasEllipsis)
+            return self.simple.process(funcDecl)
 
         elif self.isArrayDeclarator:
             if not baseType.isComplete():
@@ -1380,40 +1385,6 @@ class AbstractDeclaratorAST(AST):
 
     def print(self, padding: int) -> str:
         return ""
-
-class TopAbstractDeclarator(AbstractDeclaratorAST):
-    def parse(self, *args):
-        if self.peek().id == "*":
-            self.pop()
-
-            self.isPointer = True
-            self.pointerQualifier = TypeQualifier()
-            while self.peek().id in Token.TYPE_QUALIFIER:
-                qualifier = self.pop().id
-                if qualifier == "const":
-                    self.pointerQualifier.const = True
-                elif qualifier == "volatile":
-                    self.pointerQualifier.volatile = True
-                else:
-                    raise ValueError()
-
-            try:
-                self.decl = self.createChild(TopAbstractDeclarator)
-            except:
-                self.decl = None
-        else:
-            self.decl = self.createChild(BaseAbstractDeclarator)
-            self.isPointer = False
-
-    def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
-        if self.isPointer:
-            baseType = PointerDeclaratorType(baseType, self.pointerQualifier)
-            if self.decl is None:
-                return DeclaratorInformation("", baseType, [])
-        
-        if self.decl is not None:
-            return self.decl.process(baseType)
-        self.raiseError("No declaration inside TopAbstractDeclarator")
 
 class BaseAbstractDeclarator(AbstractDeclaratorAST):
     def parse(self, *args):
@@ -1469,6 +1440,145 @@ class BaseAbstractDeclarator(AbstractDeclaratorAST):
 
         return DeclaratorInformation("", retType, [])
 
+class SimpleAbstractDeclarator(DeclaratorAST):
+    def parse(self, *args):
+        self.hasNested = False
+        
+        if self.peek().id == "(":
+            # Ambiguity resolution: '(' could be a nested abstract declarator 
+            # or the start of function parameters. Try to parse it as nested first.
+            tokensCopy = list(self.tokens)
+            self.pop()
+            
+            if self.peek().id != ")":
+                try:
+                    self.declarator = self.createChild(TopAbstractDeclarator)
+                    self.expect(")")
+                    self.hasNested = True
+                except:
+                    # Failed to parse as an abstract declarator (likely a parameter list).
+                    # Restore tokens and leave as an empty simple abstract declarator.
+                    self.tokens.clear()
+                    self.tokens.extend(tokensCopy)
+            else:
+                # An empty '()' unambiguously belongs to function parameters.
+                self.tokens.clear()
+                self.tokens.extend(tokensCopy)
+
+    def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
+        if self.hasNested:
+            return self.declarator.process(baseType)
+        else:
+            return DeclaratorInformation(".anonymous.", baseType, [])
+
+class DirectAbstractDeclarator(DeclaratorAST):
+    def parse(self, *args):
+        self.simple = self.createChild(SimpleAbstractDeclarator)
+        self.isFunctionDeclarator = False
+        self.isArrayDeclarator = False
+
+        nextTok = self.peek()
+        if nextTok.id == "(":
+            self.isFunctionDeclarator = True
+            self.hasEllipsis = False
+            self.paramDeclarators: list[FunctionParameterDeclarator] = []
+
+            self.pop()
+
+            if self.peek().id == "void" and self.peek(1).id == ")":
+                self.pop()
+            elif self.peek().id == ")":
+                # Relaxed C99 rule for empty argument lists
+                pass
+            else:
+                while True:
+                    param = self.createChild(FunctionParameterDeclarator)
+
+                    if param.isEllipsis:
+                        if len(self.paramDeclarators) < 1:
+                            self.raiseError("Variadic function requires a minimum of one named argument")
+
+                        self.hasEllipsis = True
+                        break
+                    else:
+                        self.paramDeclarators.append(param)
+                        if self.peek().id == ",":
+                            self.pop()
+                        else:
+                            break
+            
+            self.expect(")")
+        elif nextTok.id == "[":
+            self.isArrayDeclarator = True
+            self.arrayDimensions: list[int] = []
+
+            while self.peek().id == "[":
+                self.pop()
+
+                if self.peek().id == "]":
+                    self.raiseError("Variable length arrays not implemented")
+
+                arrayDim = self.parseConstantFromType(TypeSpecifier.LONG.toBaseType(), strict=True)[0]
+                dim = int(arrayDim.constValue)
+                if dim <= 0:
+                    self.raiseError("Array dimension must be greater than zero")
+                
+                self.expect("]")
+
+                self.arrayDimensions.insert(0, dim)
+
+    def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
+        if self.isFunctionDeclarator:
+            if isinstance(baseType, (ArrayDeclaratorType, FunctionDeclaratorType)):
+                self.raiseError(f"Functions cannot return {baseType}")
+        
+            funcParams: list[ParameterInformation] = []
+            for param in self.paramDeclarators:
+                paramInfo: DeclaratorInformation = param.process(param.declType)
+                funcParams.append(ParameterInformation(paramInfo.type, paramInfo.name, isAnonymous=paramInfo.isAnonymous))
+            
+            funcDecl = FunctionDeclaratorType(funcParams, baseType, self.hasEllipsis)
+            return self.simple.process(funcDecl)
+
+        elif self.isArrayDeclarator:
+            if not baseType.isComplete():
+                self.raiseError("Cannot create array of an incomplete type")
+            
+            arrayDecl = ArrayDeclaratorType(baseType, self.arrayDimensions[0])
+            for dim in self.arrayDimensions[1:]:
+                arrayDecl = ArrayDeclaratorType(arrayDecl, dim)
+            return self.simple.process(arrayDecl)
+
+        else:
+            return self.simple.process(baseType)
+        
+class TopAbstractDeclarator(DeclaratorAST):
+    def parse(self, *args):
+        if self.peek().id == "*":
+            self.pop()
+            self.isPointer = True
+
+            self.pointerQualifier = TypeQualifier()
+            while self.peek().id in Token.TYPE_QUALIFIER:
+                qualifier = self.pop().id
+                if qualifier == "const":
+                    self.pointerQualifier.const = True
+                elif qualifier == "volatile":
+                    self.pointerQualifier.volatile = True
+                else:
+                    raise ValueError()
+
+            self.decl = self.createChild(TopAbstractDeclarator)
+        else:
+            self.decl = self.createChild(DirectAbstractDeclarator)
+            self.isPointer = False
+
+    def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
+        if self.isPointer:
+            baseType = PointerDeclaratorType(baseType, self.pointerQualifier)
+        ret = self.decl.process(baseType)
+        return ret
+    
 class Program(AST):
     def parse(self, *args):
         self.topLevel: list[Declaration] = []
@@ -1989,13 +2099,14 @@ class FunctionDeclaration(Declaration):
         else:
             # Add the function information to the current context.
             self.context.functionMap[self.identifier] = FunctionIdentifier(
-                name=self.identifier,
-                arguments=self.argumentList,
-                variadic=info.type.variadic,
-                returnType=self.returnType,
-                storageClass=self.storageClass,
-                isGlobal=self.isGlobal,
-                alreadyDefined=False
+                name            = self.identifier,
+                arguments       = self.argumentList,
+                variadic        = info.type.variadic,
+                funcType        = self.typeId,
+                returnType      = self.returnType,
+                storageClass    = self.storageClass,
+                isGlobal        = self.isGlobal,
+                alreadyDefined  = False
             )
 
         self.body: list[AST]|None = None
@@ -2766,8 +2877,8 @@ class Exp(AST):
     def preconvertExpression(self) -> Exp:
         ret = self
 
-        # If an array is input in an expression, add an AddressOf operation beforehand. 
-        if isinstance(self.typeId, ArrayDeclaratorType):
+        # If an array or a function is input in an expression, add an AddressOf operation beforehand. 
+        if isinstance(self.typeId, (ArrayDeclaratorType, FunctionDeclaratorType)):
             # This will return pointer to array...
             ret = self.createChild(AddressOf, self)
             # In our case, we want to "decay" the array. We're not really taking the address of the
@@ -3214,10 +3325,18 @@ class Variable(Exp):
         ctxVar = self.context.identifierMap[originalName]
         
         # Get the type of variable from the identifier.
-        if ctxVar.mangledName not in self.context.variablesMap:
-            self.raiseError("Internal error")
+        if ctxVar.identifierType == IdentifierType.VARIABLE:
+            if ctxVar.mangledName not in self.context.variablesMap:
+                self.raiseError("Internal error")
 
-        self.typeId = self.context.variablesMap[ctxVar.mangledName].idType
+            self.typeId = self.context.variablesMap[ctxVar.mangledName].idType
+        
+        elif ctxVar.identifierType == IdentifierType.FUNCTION:
+            if ctxVar.originalName not in self.context.functionMap:
+                self.raiseError("Internal error")
+
+            self.typeId = self.context.functionMap[ctxVar.originalName].funcType
+
         self.originalIdentifier: str = originalName
         self.identifier: str = ctxVar.mangledName
 
@@ -4038,25 +4157,36 @@ class TernaryConditional(Exp):
         return ret
     
 class FunctionCall(Exp):
-    def parse(self, *args):
-        self.funcIdentifier = self.expect("identifier").value
+    def parse(self, funcExpression: Exp):
+        self.funcExpression = funcExpression
+        self.isIndirect = False
 
-        if self.funcIdentifier not in self.context.identifierMap:
-            self.raiseError(f"Function {self.funcIdentifier} is not declared")
+        if isinstance(self.funcExpression.typeId, FunctionDeclaratorType):
+            # Normal function.
+            funcType = self.funcExpression.typeId
+            
+            if not isinstance(self.funcExpression, Variable):
+                self.raiseError("This should be a Variable")
+
+            self.funcIdentifier = self.funcExpression.originalIdentifier
+
         else:
-            # The function could be obscured by a variable. Search in the identifier map.
-            if self.funcIdentifier not in self.context.identifierMap:
-                self.raiseError(f"Identifier {self.funcIdentifier} is not declared")
+            self.funcExpression = self.funcExpression.preconvertExpression()
+            
+            if isinstance(self.funcExpression.typeId, PointerDeclaratorType) and \
+               isinstance(self.funcExpression.typeId.declarator, FunctionDeclaratorType):
+                # Pointer to function.
+                funcType = self.funcExpression.typeId.declarator
+                self.isIndirect = True
 
-            if self.context.identifierMap[self.funcIdentifier].identifierType != IdentifierType.FUNCTION:
-                self.raiseError(f"{self.funcIdentifier} is not a function")
+            else:
+                self.raiseError(f"Expected a function or a pointer to a function, received {self.funcExpression.typeId}")
+
+        self.typeId = funcType.returnDeclarator
+        self.isFunctionVariadic = funcType.variadic
+        funcArgs = funcType.params
 
         self.expect("(")
-
-        funcCtx = self.context.functionMap[self.funcIdentifier]
-        self.typeId = funcCtx.returnType
-        self.isFunctionVariadic = funcCtx.variadic
-
         self.argumentList: list[Exp] = []
         
         if self.peek().id != ")":
@@ -4064,15 +4194,15 @@ class FunctionCall(Exp):
             while True:
                 argExp: Exp = self.createChild(Exp).preconvertExpression()
                 
-                if argumentIndex < len(funcCtx.arguments):
+                if argumentIndex < len(funcArgs):
                     # See if this argument needs a cast before being passed to the function.
-                    if argExp.typeId.unqualified() != funcCtx.arguments[argumentIndex].type:
+                    if argExp.typeId.unqualified() != funcArgs[argumentIndex].type:
                         argExp = self.createChild(Cast, 
-                                                  funcCtx.arguments[argumentIndex].type, 
+                                                  funcArgs[argumentIndex].type, 
                                                   argExp, True
                                                 ).preconvertExpression()
                 else:
-                    if funcCtx.variadic:
+                    if self.isFunctionVariadic:
                         # Variadic arguments get promoted:
                         # - integer types smaller than int, get promoted to int.
                         # - float gets promoted to double.
@@ -4084,7 +4214,7 @@ class FunctionCall(Exp):
                                                       argExp, True
                                                     ).preconvertExpression()
                     else:
-                        self.raiseError(f"Too many arguments, expected {len(funcCtx.arguments)}")
+                        self.raiseError(f"Too many arguments, expected {len(funcArgs)}")
 
                 self.argumentList.append(argExp)
 
@@ -4097,8 +4227,8 @@ class FunctionCall(Exp):
         self.expect(")")
 
         passedArgsLen = len(self.argumentList)
-        funcDeclLen = len(funcCtx.arguments)
-        if funcCtx.variadic:
+        funcDeclLen = len(funcArgs)
+        if self.isFunctionVariadic:
             if passedArgsLen < funcDeclLen:
                 self.raiseError(f"Expected {funcDeclLen} arguments at least, received {passedArgsLen}")
         else:
@@ -4110,7 +4240,7 @@ class FunctionCall(Exp):
 
     def print(self, padding: int) -> str:
         pad = " " * padding
-        ret  = f'{pad}{self.typeId} FunctionCall: {self.funcIdentifier}(\n'
+        ret  = f'{pad}{self.typeId} FunctionCall: {self.funcExpression}(\n'
         if len(self.argumentList) > 0:
             for exp in self.argumentList:
                 ret += exp.print(padding + PADDING_INCREMENT)

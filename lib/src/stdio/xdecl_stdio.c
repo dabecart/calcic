@@ -406,7 +406,7 @@ static long doubleToFixedPointString(double val, FormatOptions options,
         }else if(divider > 0) {
             *str = numberToChar(scaled_val / divider, uppercase);
             scaled_val %= divider;
-            divider /= 10ULL;
+            divider /= 10UL;
         }else {
             *str = '0';
         }

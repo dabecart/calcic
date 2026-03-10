@@ -8,6 +8,7 @@
 
 #define COMPILING_STDIO
 #include <stdio.h>
+#include <stdarg.h>
 
 int fprintf(FILE *stream, const char *format, ...) {
     va_list args;

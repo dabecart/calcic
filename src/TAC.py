@@ -147,7 +147,10 @@ class TAC(ABC):
                 return TACBaseOperand(stringConstant, exp.typeId, insts)
             
             case Variable():
-                val = self.createChild(TACValue, False, exp.typeId, exp)
+                if isinstance(exp.typeId, FunctionDeclaratorType):
+                    val = self.createChild(TACValue, True, exp.typeId, exp.originalIdentifier)
+                else:
+                    val = self.createChild(TACValue, False, exp.typeId, exp)
                 return TACBaseOperand(val, exp.typeId, insts)
 
             case Unary():
@@ -301,9 +304,16 @@ class TAC(ABC):
                     argValues.append(argVal)
 
                 # Call the function.
-                funcCall = self.createChild(TACFunctionCall, 
-                                            exp.funcIdentifier, exp.typeId, argValues, 
-                                            exp.isFunctionVariadic, insts)
+                if exp.isIndirect:
+                    funcBody = self.parseTACExpression(exp.funcExpression, insts).convert()
+                    funcCall = self.createChild(TACIndirectFunctionCall, 
+                                                funcBody, exp.typeId, argValues, 
+                                                exp.isFunctionVariadic, insts)
+                else:
+                    funcCall = self.createChild(TACFunctionCall, 
+                                                exp.funcIdentifier, exp.typeId, argValues, 
+                                                exp.isFunctionVariadic, insts)
+                    
                 return TACBaseOperand(funcCall.result, exp.typeId, insts)
 
             case Cast():
@@ -1665,6 +1675,28 @@ class TACFunctionCall(TACInstruction):
     def print(self) -> str:
         argList = ', '.join([arg.print() for arg in self.arguments])
         return f"FunctionCall: {self.identifier}({argList}) -> {self.result}\n"
+    
+    def isDeadStore(self) -> bool:
+        # We cannot eliminate function calls as they may affect other parts of the code.
+        return False
+
+class TACIndirectFunctionCall(TACInstruction):
+    def __init__(self, funcAddress: TACValue, returnType: DeclaratorType, arguments: list[TACValue], 
+                 isVariadic: bool,
+                 instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
+        self.funcAddress = funcAddress
+        self.returnType = returnType
+        self.arguments = arguments
+        self.isVariadic = isVariadic
+        super().__init__(instructionsList, parentTAC)
+
+    def parse(self) -> TACValue:
+        # After the function execution, this is where the return value will be stored.
+        return TACValue(False, self.returnType)
+
+    def print(self) -> str:
+        argList = ', '.join([arg.print() for arg in self.arguments])
+        return f"IndirectFunctionCall: {self.funcAddress}({argList}) -> {self.result}\n"
     
     def isDeadStore(self) -> bool:
         # We cannot eliminate function calls as they may affect other parts of the code.

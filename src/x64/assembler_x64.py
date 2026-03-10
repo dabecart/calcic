@@ -70,8 +70,7 @@ class AssemblyAST(ABC):
 
     def fromTACValue(self, tacValue: TACValue, offset: int = 0) -> AssemblerOperand:
         if tacValue.isConstant:
-            # First, check if the constant is defined inside the AssemblerStaticConstant.CONSTANTS 
-            # array.
+            # Check if the constant is defined inside the AssemblerStaticConstant.CONSTANTS array.
             found: AssemblerStaticConstant|None = AssemblerStaticConstant.CONSTANTS_MAP.get(tacValue.constantValue)
             if found is not None:
                 return Data(AssemblyType.fromTAC(tacValue.valueType), found.identifier, 0, self)
@@ -82,6 +81,10 @@ class AssemblyAST(ABC):
                     tacValue.valueType, tacValue.print(), isGlobal=False)
                 return Data(AssemblyType.fromTAC(tacValue.valueType), doubleConstant.identifier, 0, self)
             
+            # Functions behave like Data constants.
+            if isinstance(tacValue.valueType, FunctionDeclaratorType):
+                return Data(AssemblyType.QUADWORD, tacValue.constantValue, 0, self)
+
             return Immediate(tacValue, self)
         else:
             if isinstance(tacValue.valueType, ArrayDeclaratorType) or \
@@ -1094,7 +1097,7 @@ class AssemblerFunction(AssemblyAST):
                 case TACLabel():
                     self.createInst(LABEL, inst.identifier)
 
-                case TACFunctionCall():
+                case TACFunctionCall() | TACIndirectFunctionCall():
                     returnIntRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
                     returnDoubleRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
                     self.returnInStack: bool = False
@@ -1186,7 +1189,15 @@ class AssemblerFunction(AssemblyAST):
                                         Register(AssemblyType.BYTE, REG.AX))
 
                     # Emit the call instruction.
-                    self.createInst(CALL, inst.identifier)
+                    if isinstance(inst, TACIndirectFunctionCall):
+                        funcAddrs = self.fromTACValue(inst.funcAddress)
+                        self.createInst(MOV,
+                                        AssemblyType.QUADWORD,
+                                        funcAddrs, 
+                                        Register(funcAddrs.assemblyType, REG.AX))
+                        self.createInst(CALL, Register(funcAddrs.assemblyType, REG.AX))
+                    else:
+                        self.createInst(CALL, inst.identifier)
 
                     # Readjust the stack pointer.
                     deallocBytes = 8 * len(stackArgs) + stackPadding
@@ -2223,20 +2234,29 @@ class PUSH(AssemblerInstruction):
         return f"Push({self.operand})\n"
     
 class CALL(AssemblerInstruction):
-    def __init__(self, funcIdentifier: str, parentAST: AssemblyAST | None = None) -> None:
-        self.funcIdentifier = funcIdentifier
+    def __init__(self, callArgument: str|Register, parentAST: AssemblyAST | None = None) -> None:
+        self.callArgument = callArgument
         super().__init__(parentAST)
 
     def emitCode(self) -> str:
-        if self.funcIdentifier in TACFunction.functions:
-            return f"\tcall\t{self.funcIdentifier}\n"
+        if isinstance(self.callArgument, str):
+            # Offset call.
+            if self.callArgument in TACFunction.functions:
+                return f"\tcall\t{self.callArgument}\n"
+            else:
+                # If the function is not defined in the code, maybe it's located somewhere else.
+                # Add @PLT to link it externally. 
+                return f"\tcall\t{self.callArgument}@PLT\n"
+            
+        elif isinstance(self.callArgument, Register):
+            # Indirect call.
+            return f"\tcall\t*{self.callArgument.emitCode()}\n"
+        
         else:
-            # If the function is not defined in the code, maybe it's located somewhere else.
-            # Add @PLT to link it externally. 
-            return f"\tcall\t{self.funcIdentifier}@PLT\n"
+            raise ValueError()
     
     def print(self) -> str:
-        return f'Call({self.funcIdentifier})\n'
+        return f'Call({self.callArgument})\n'
 
 class RET(AssemblerInstruction):
     def __init__(self, parentAST: AssemblyAST | None = None) -> None:
