@@ -13,6 +13,8 @@
 typedef long            ptrdiff_t;
 // Return type of the sizeof() function.
 typedef unsigned long   size_t;
+// Max value of size_t.
+#define SIZE_T_MAX 18446744073709551615UL
 
 // wchar not implemented.
 

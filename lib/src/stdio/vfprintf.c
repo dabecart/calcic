@@ -1,5 +1,5 @@
 /***************************************************************************************************
- * fprintf.c
+ * vfprintf.c
  * 
  * This function is part of the <stdio.h> standard library.
  * 
@@ -9,10 +9,6 @@
 #define COMPILING_STDIO
 #include <stdio.h>
 
-int fprintf(FILE *stream, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    int retCode = (int) _formatString(format, args, _writeFormattedStringToStream, stream, SIZE_T_MAX);
-    va_end(args);
-    return retCode;
+int vfprintf(FILE *stream, const char *format, va_list args) {
+    return (int) _formatString(format, args, _writeFormattedStringToStream, stream, SIZE_T_MAX);
 }

@@ -1,5 +1,5 @@
 /***************************************************************************************************
- * snprintf.c
+ * vsprintf.c
  * 
  * This function is part of the <stdio.h> standard library.
  * 
@@ -9,14 +9,12 @@
 #define COMPILING_STDIO
 #include <stdio.h>
 
-int sprintf(char *s, const char *format, ...) {
+int vsprintf(char *s, const char *format, va_list args) {
     size_t n = SIZE_T_MAX;
     if(s == NULL) {
         n = 0;
     }
     
-    va_list args;
-    va_start(args, format);
     // This str will be advanced when _writeFormattedStringToString is called.
     char *str = s;
     // The closing null-character is not counted.
@@ -27,6 +25,5 @@ int sprintf(char *s, const char *format, ...) {
         *str = 0;
     }
 
-    va_end(args);
     return retCode;
 }

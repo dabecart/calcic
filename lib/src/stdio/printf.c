@@ -12,7 +12,7 @@
 int printf(const char *format, ...) {
     va_list args;
     va_start(args, format);
-    int retCode = _printfToStream(stdout, format, args);
+    int retCode = (int) _formatString(format, args, _writeFormattedStringToStream, stdout, SIZE_T_MAX);
     va_end(args);
     return retCode;
 }

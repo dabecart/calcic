@@ -63,6 +63,10 @@ def main() -> None:
                            help="Link a library.",
                            dest="library",
                            action="append")
+    argParser.add_argument("-g",
+                           help="Generate debug information.",
+                           action="store_true",
+                           dest="debug")
     argParser.add_argument("-v", "--verbose",
                            help="Prints insightful information.",
                            action="store_true")
@@ -121,6 +125,11 @@ def main() -> None:
     # When generating an object (.o), do not add the entry point. Only do it when generating an 
     # executable.
     globalContext.generateExecutable = not args.generate_object
+    
+    if args.optimize > 0 and args.debug:
+        print(f"Cannot optimize program and generate debug information.", file=sys.stderr)
+        exit(1)
+    globalContext.addDebugInfo = args.debug
 
     """
     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

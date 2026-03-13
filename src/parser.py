@@ -1900,8 +1900,9 @@ class ForStatement(Statement):
                     nextToken = self.expect(",", ";")
                     if nextToken.id == ";":
                         break
-            elif tok.id != ";":
-                self.init.append(self.createChild(Exp).preconvertExpression())
+            else:
+                if tok.id != ";":
+                    self.init.append(self.createChild(Exp).preconvertExpression())
                 self.expect(";")
 
             self.condition = None

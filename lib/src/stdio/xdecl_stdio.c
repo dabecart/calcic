@@ -529,20 +529,17 @@ static long doubleToScientificString(double val, FormatOptions options,
     return digitsWritten;
 }
 
-
-long _generateFormattedString(const char *format, va_list args, char *out, size_t maxLen) {
-    // 'out' may be NULL. In this case, do not write anything to it.
-    int writeToOut = (out != NULL);
+long _formatString(const char *format, va_list args, 
+    size_t (*writingFunction)(void*,const char*,size_t), void* writingFuncArg, size_t maxLen) 
+{
+    int writeToOut = (writingFunction != NULL);
     // Leave space for the null termination.
-    maxLen--;
+    if(maxLen > 0) maxLen--;
 
-    char *strOut = out;
-    char * const end_str = out + maxLen;
-
-    // Used to store temporary conversions from "value" to string.
-    char TEMP_BUF[64];
     // Stores the theoretical number of bytes written to the output.
     long retCount = 0;
+    // Used to store temporary conversions from "value" to string.
+    char TEMP_BUF[64];
 
     while(*format != 0) {
         // Do not write to the output in case we exceeded maxLen.
@@ -551,8 +548,7 @@ long _generateFormattedString(const char *format, va_list args, char *out, size_
         // Normal characters.
         if(*format != '%') {
             if(writeToOut) {
-                *strOut = *format;
-                strOut++;
+                writingFunction(writingFuncArg, format, 1);
             }
 
             format++;
@@ -566,8 +562,7 @@ long _generateFormattedString(const char *format, va_list args, char *out, size_
         if(*format == '%') {
             // %% -> %.
             if(writeToOut) {
-                *strOut = '%';
-                strOut++;
+                writingFunction(writingFuncArg, "%", 1);
             }
             
             format++;
@@ -829,67 +824,38 @@ long _generateFormattedString(const char *format, va_list args, char *out, size_
             if(options.flags & FLAG_LEFT_JUSTIFIED) {
                 // Copy from the temporary buffer.
                 long toCopy = MIN(writtenChars, maxLen - retCount);
-                memcpy(strOut, temp, toCopy);
-                strOut += toCopy;
+                writingFunction(writingFuncArg, temp, toCopy);
                 
                 // Add the necessary padding.
                 for(; toCopy < toWrite; toCopy++) {
-                    *strOut = padSymbol;
-                    strOut++;
+                    writingFunction(writingFuncArg, &padSymbol, 1);
                 }
             }else {
                 // Add the necessary padding.
                 long toPad = MAX(options.minFieldWidth - writtenChars, 0);
                 for(long count = 0; count < toPad; count++) {
-                    *strOut = padSymbol;
-                    strOut++;
+                    writingFunction(writingFuncArg, &padSymbol, 1);
                 }
 
                 // Copy from the temporary buffer.
                 long toCopy = toWrite - toPad;
-                memcpy(strOut, temp, toCopy);
-                strOut += toCopy;
-                
+                writingFunction(writingFuncArg, temp, toCopy);
             }
         }
 
         retCount += fieldWidth;
     }
 
-    if(out != NULL) {
-        // Add the null terminator at the end. Do not take it into account when calculating the 
-        // return value of the function.
-        *strOut = 0;
-    }
-
     return retCount;
 }
 
-long _printfToStream(FILE *stream, const char * format, va_list args) {
-    char *s = malloc(FORMATTED_STRING_LEN_GUESS);
-    if(s == NULL) {
-        return -158479;
-    }
+size_t _writeFormattedStringToStream(void *stream, const char *buf, size_t bufLen) {
+    return fwrite(buf, 1, bufLen, stream);
+}
 
-    long strLen = _generateFormattedString(format, args, s, FORMATTED_STRING_LEN_GUESS);
-
-    if(strLen > FORMATTED_STRING_LEN_GUESS) {
-        // The initial guess was wrong... You'll have to create the string again in a bigger buffer.
-        // Use the value 'strLen' as the right size. 
-        free(s);
-        s = malloc(strLen + 1); // Add one as the function does not count the null termination.
-        if(s == NULL) {
-            return -1;
-        }
-        strLen = _generateFormattedString(format, args, s, FORMATTED_STRING_LEN_GUESS);
-    }
-
-    if(strLen > 0) {
-        // Write s into the stream. Return the number of bytes written to the stream.
-        strLen = fwrite(s, strLen + 1, 1, stream);
-    }
-
-    free(s);
-
-    return strLen;
+size_t _writeFormattedStringToString(void *arg, const char *buf, size_t bufLen) {
+    char **string = arg;
+    memcpy(*string, buf, bufLen);
+    *string += bufLen;
+    return bufLen;
 }

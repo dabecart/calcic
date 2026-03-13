@@ -30,6 +30,9 @@ class GlobalContext:
     isBuiltInFunctionByClass: Callable                      = lambda *args, **kwargs: None
     parseTACBuiltInFunction: Callable                       = lambda *args, **kwargs: None
 
+    # Debug information.
+    addDebugInfo: bool                                      = False
+
 globalContext = GlobalContext()
 
 # If running the 'Writing a C compiler' testsuite...

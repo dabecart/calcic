@@ -11,10 +11,7 @@
 #define _CALCIC_STDIO_h
 
 #include <stddef.h> // size_t, NULL
-
-#ifdef COMPILING_STDIO
-    #include <stdarg.h>
-#endif
+#include <stdarg.h>
 
 // TODO: L_tmpnam
 
@@ -88,11 +85,16 @@ int ungetc(int c, FILE *stream);
 // Formatted input/output functions.
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 int fprintf(FILE *stream, const char *format, ...);
-int fscanf(FILE *stream, const char *format, ...);
 int printf(const char *format, ...);
-int scanf(const char *format, ...);
 int snprintf(char *s, size_t n, const char *format, ...);
 int sprintf(char *s, const char *format, ...);
+int vfprintf(FILE *stream, const char *format, va_list arg);
+int vprintf(const char *format, va_list arg);
+int vsnprintf(char *s, size_t n, const char *format, va_list arg);
+int vsprintf(char *s, const char *format, va_list arg);
+
+int fscanf(FILE *stream, const char *format, ...);
+int scanf(const char *format, ...);
 int sscanf(const char *s, const char *format, ...);
 
 void clearerr(FILE *stream);
@@ -108,9 +110,6 @@ int rename(const char *, const char *);
 void rewind(FILE *stream);
 FILE *tmpfile(void);
 char *tmpnam(char *);
-int vfprintf(FILE *, const char *, char *);
-int vprintf(const char *, char *);
-int vsprintf(char *, const char *, char *);
 
 extern FILE *stderr, *stdin, *stdout;
 
@@ -145,8 +144,10 @@ extern FILE *stderr, *stdin, *stdout;
     #define FORMATTED_STRING_LEN_GUESS 2048
 
     // Formatted string generation.
-    long _generateFormattedString(const char *format, va_list args, char *out, size_t maxLen);
-    long _printfToStream(FILE *stream, const char * format, va_list args);
+    long _formatString(const char *format, va_list args, 
+        size_t (*writingFunction)(void*,const char*,size_t), void* writingFuncArg, size_t maxLen);
+    size_t _writeFormattedStringToStream(void *stream, const char *buf, size_t bufLen);
+    size_t _writeFormattedStringToString(void *arg, const char *buf, size_t bufLen);
 #endif
 
 #endif // _CALCIC_STDIO_h

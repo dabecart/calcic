@@ -39,6 +39,10 @@ class TAC(ABC):
 
     def createChild(self, assemblerType: Type[T], *args) -> T:
         return assemblerType(*args, parentTAC=self)
+
+    def addDebugInformation(self, astElem: AST, insts: list[TACInstruction]):
+        if globalContext.addDebugInfo:
+            self.createChild(TACDebugInfo, astElem, insts)
     
     def makeCast(self, innerDeclaratorType: DeclaratorType, innerValue: TACValue, 
                  castDeclaratorType: DeclaratorType, insts: list[TACInstruction]):
@@ -166,7 +170,7 @@ class TAC(ABC):
                             inner = self.parseTACExpression(exp.inner, insts)
     
                         # Run the Unary operation.
-                        self.createChild(TACDebugInfo, exp, insts)
+                        self.addDebugInformation(exp, insts)
                         unary = self.createChild(TACUnary, exp.unaryOperator, inner.convert(), insts)
                         # Set the value of the original variable to the unary result.
                         if exp.needsIntegerPromotion:
@@ -186,7 +190,7 @@ class TAC(ABC):
                         else:
                             delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "-1", self)
 
-                        self.createChild(TACDebugInfo, exp, insts)
+                        self.addDebugInformation(exp, insts)
                         pointerOp = self.createChild(TACAddToPointer, inner.convert(), 
                             delta, exp.typeId.declarator.getByteSize(), preDereference, insts)
                         # Set the value of the original variable to the unary result.
@@ -212,7 +216,7 @@ class TAC(ABC):
                             inner = self.makeCast(exp.originalType, preCast.convert(), TypeSpecifier.INT.toBaseType(), insts)
                             previousValue = inner.convert()
                         # Run the Unary operation.
-                        self.createChild(TACDebugInfo, exp, insts)
+                        self.addDebugInformation(exp, insts)
                         unary = self.createChild(TACUnary, exp.unaryOperator, previousValue, insts)
                         # Set the value of the original variable to the unary result.
                         if exp.needsIntegerPromotion:
@@ -240,7 +244,7 @@ class TAC(ABC):
                         # Set the value of the original variable to the unary result.
                         self.makeAssignment(preDereference.valueType, inner, preDereference, insts)
 
-                        self.createChild(TACDebugInfo, exp, insts)
+                        self.addDebugInformation(exp, insts)
 
                         # Return old.
                         return TACBaseOperand(old, exp.typeId, insts)
@@ -250,12 +254,12 @@ class TAC(ABC):
                     parsedExp = self.parseTACExpression(exp.inner, insts).convert()
                     unary = self.createChild(TACUnary, exp.unaryOperator, parsedExp, insts)
 
-                    self.createChild(TACDebugInfo, exp, insts)
+                    self.addDebugInformation(exp, insts)
 
                     return TACBaseOperand(unary.result, exp.typeId, insts)
             
             case Binary():
-                self.createChild(TACDebugInfo, exp, insts)
+                self.addDebugInformation(exp, insts)
                 binary = TACBinary(exp, instructionsList=insts, parentTAC=self)
                 # binary.result contains the value of the binary operation.
                 toStoreValue: TACValue = binary.result
@@ -286,7 +290,7 @@ class TAC(ABC):
                 # right's result.
                 lValue = self.parseTACExpression(exp.exp1, insts)
 
-                self.createChild(TACDebugInfo, exp, insts)
+                self.addDebugInformation(exp, insts)
 
                 return self.makeAssignment(exp.typeId, lValue, rValue, insts)
             
@@ -297,7 +301,7 @@ class TAC(ABC):
                 
                 conditionExp: TACValue = self.parseTACExpression(exp.condition, insts).convert()
 
-                self.createChild(TACDebugInfo, exp, insts)
+                self.addDebugInformation(exp, insts)
                 self.createChild(TACJumpIfZero, conditionExp, elseLabel, insts)
                 thenResult = self.parseTACExpression(exp.thenExp, insts).convert()
                 if exp.thenExp.typeId != TypeSpecifier.VOID.toBaseType():
@@ -333,7 +337,7 @@ class TAC(ABC):
                                                 exp.isFunctionVariadic, insts)
                     
 
-                self.createChild(TACDebugInfo, exp, insts)
+                self.addDebugInformation(exp, insts)
 
                 return TACBaseOperand(funcCall.result, exp.typeId, insts)
 
@@ -465,14 +469,14 @@ class TAC(ABC):
                     # The return instruction returns nothing.
                     retValue = TACValue(False, TypeSpecifier.VOID.toBaseType())
 
-                self.createChild(TACDebugInfo, blockItem, insts)
+                self.addDebugInformation(blockItem, insts)
                 self.createChild(TACReturn, retValue, insts)
             
             case IfStatement():
                 endIfLabel: str = TACLabel.getNewLabelName()
                 conditionExp: TACValue = self.parseTACExpression(blockItem.condition, insts).convert()
 
-                self.createChild(TACDebugInfo, blockItem, insts)
+                self.addDebugInformation(blockItem, insts)
                 if blockItem.elseStatement is None:
                     self.createChild(TACJumpIfZero, conditionExp, endIfLabel, insts)
                     self.parseTACBlockItem(blockItem.thenStatement, insts)
@@ -499,11 +503,11 @@ class TAC(ABC):
                     self.parseTACBlockItem(innerBlock, insts)
 
             case BreakStatement():
-                self.createChild(TACDebugInfo, blockItem, insts)
+                self.addDebugInformation(blockItem, insts)
                 self.createChild(TACJump, f"break_{blockItem.jumpLabel}", insts)
 
             case ContinueStatement():
-                self.createChild(TACDebugInfo, blockItem, insts)
+                self.addDebugInformation(blockItem, insts)
                 self.createChild(TACJump, f"continue_{blockItem.jumpLabel}", insts)
 
             case WhileStatement():
@@ -555,7 +559,7 @@ class TAC(ABC):
                 self.createChild(TACLabel, breakLabel, insts)
 
             case CaseStatement():
-                self.createChild(TACDebugInfo, blockItem, insts)
+                self.addDebugInformation(blockItem, insts)
 
                 # Convert negative numbers so that the "-" doesn't affect the linker.
                 numberLabel = blockItem.value.constValue.replace("-", "_neg")
@@ -564,13 +568,13 @@ class TAC(ABC):
                 self.parseTACBlockItem(blockItem.statement, insts)
 
             case DefaultStatement():
-                self.createChild(TACDebugInfo, blockItem, insts)
+                self.addDebugInformation(blockItem, insts)
 
                 self.createChild(TACLabel, f"default_{blockItem.switchLabel}", insts)
                 self.parseTACBlockItem(blockItem.statement, insts)
 
             case SwitchStatement():
-                self.createChild(TACDebugInfo, blockItem, insts)
+                self.addDebugInformation(blockItem, insts)
 
                 controlVar = self.parseTACExpression(blockItem.condition, insts).convert()
                 # Generate the JumpIfValue instructions.
@@ -598,7 +602,7 @@ class TAC(ABC):
                 self.parseTACBlockItem(blockItem.statement, insts)
 
             case GotoStatement():
-                self.createChild(TACDebugInfo, blockItem, insts)
+                self.addDebugInformation(blockItem, insts)
 
                 self.createChild(TACJump, blockItem.labelName, insts)
 
@@ -615,7 +619,7 @@ class TAC(ABC):
                 if isinstance(blockItem.initialization, SingleInitializer):
                     rightResult = self.parseTACExpression(blockItem.initialization.init, insts).convert()
 
-                    self.createChild(TACDebugInfo, blockItem, insts)
+                    self.addDebugInformation(blockItem, insts)
 
                     leftVariable = self.createChild(TACValue, False, blockItem.typeId, blockItem.identifier)
                     self.createChild(TACCopy, rightResult, leftVariable, insts)
@@ -662,7 +666,7 @@ class TAC(ABC):
                                 else:
                                     expr = self.parseTACExpression(input.init, insts).convert()
 
-                                    self.createChild(TACDebugInfo, blockItem, insts)
+                                    self.addDebugInformation(blockItem, insts)
                                     self.createChild(TACCopyToOffset, expr, leftVariable, offset, insts)
                                 
                                 offset += offsetStep
@@ -696,7 +700,7 @@ class TAC(ABC):
                                     # Normal value inside a struct.
                                     expr = self.parseTACExpression(memberInit.init, insts).convert()
 
-                                    self.createChild(TACDebugInfo, blockItem, insts)
+                                    self.addDebugInformation(blockItem, insts)
                                     self.createChild(TACCopyToOffset, expr, leftVariable, memberOffset, insts)
                                 else:
                                     raise ValueError()
@@ -727,7 +731,7 @@ class TAC(ABC):
                                     # Normal value inside an union.
                                     expr = self.parseTACExpression(memberInit.init, insts).convert()
 
-                                    self.createChild(TACDebugInfo, blockItem, insts)
+                                    self.addDebugInformation(blockItem, insts)
                                     self.createChild(TACCopyToOffset, expr, leftVariable, baseOffset, insts)
                                 else:
                                     raise ValueError()

@@ -8,15 +8,24 @@
 
 #define COMPILING_STDIO
 #include <stdio.h>
-#include <stdarg.h>
 
 int snprintf(char *s, size_t n, const char *format, ...) {
+    if(s == NULL) {
+        n = 0;
+    }
+
     va_list args;
     va_start(args, format);
-
-    long strLen = _generateFormattedString(format, args, s, n);
+    // This str will be advanced when _writeFormattedStringToString is called.
+    char *str = s;
+    // The closing null-character is not counted.
+    int retCode = (int) _formatString(format, args, _writeFormattedStringToString, &str, n);
+    
+    if(s != NULL && (retCode < n)) {
+        // Add the null terminator. This write isn't counted in the 'retCode'.
+        *str = 0;
+    }
 
     va_end(args);
-
-    return strLen;
+    return retCode;
 }
