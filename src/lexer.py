@@ -148,9 +148,21 @@ class Token:
     def __repr__(self) -> str:
         return self.__str__()
     
-    def getPosition(self) -> str:
+    def getPositionString(self) -> str:
         return f"{self.file}:{self.line}:{self.col}"
-    
+
+    # Used to compare tokens to have them sorted in a list.
+    @property
+    def pos(self):
+        return (self.line, self.col)
+
+    def getLineInFile(self) -> str:
+        with open(self.file, 'r') as file:
+            for i, line in enumerate(file):
+                if i == (self.line - 1):
+                    return line
+        return f"Couldn't read line {self.line} of file {self.file}"
+
     def parseIntegerToken(self) -> int:
             if self.id == "character":
                 # Returns the ASCII value.

@@ -15,6 +15,7 @@ import enum
 from typing import Type, TypeVar
 
 from src.TAC import *
+from src.debug_info import *
 from src.calcic_types import *
 from src.builtin.builtin_functions_TAC import *
 from src.x64.types_x64 import *
@@ -758,16 +759,19 @@ class AssemblerFunction(AssemblyAST):
 
         # Convert the function's TAC instructions into assembler instructions.
         for inst in self.function.instructions:
-            # Add a comment between instructions to know what each block of assembler instructions 
-            # is doing. Skip labels.
-            if not isinstance(inst, TACLabel):
-                self.createInst(COMMENT, inst.print())
+            # # Add a comment between instructions to know what each block of assembler instructions 
+            # # is doing. Skip labels.
+            # if not isinstance(inst, TACLabel):
+            #     self.createInst(COMMENT, inst.print())
 
             if isinstance(inst, TACBuiltInFunction):
                 self.convertBuiltInTAC(inst)
                 continue
 
             match inst:
+                case TACDebugInfo():
+                    self.createInst(COMMENT, f"{inst.loc}\n")
+
                 case TACReturn():
                     if inst.result.valueType != TypeSpecifier.VOID.toBaseType():
                         self.intRegArgs, self.doubleRegArgs, self.returnInStack = self.classifyReturnValue(inst.result)

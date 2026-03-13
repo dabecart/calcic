@@ -20,6 +20,7 @@ from typing import ClassVar, TypeVar, overload
 
 from src.lexer import Token 
 from src.calcic_types import *
+from src.debug_info import *
 from src.global_context import globalContext
 
 # Used to generate the verbose output.
@@ -293,7 +294,7 @@ class Context:
                 if label.gotoToken is None:
                     raise ValueError(f"Missing declaration of label {label.originalName}")
                 else:
-                    raise ValueError(f"{label.gotoToken.getPosition()} Missing declaration of label {label.originalName}")
+                    raise ValueError(f"{label.gotoToken.getPositionString()} Missing declaration of label {label.originalName}")
 
     # Use it to return the most recent struct, union or enum.
     STRUCT_ORDER: int = 0
@@ -415,10 +416,18 @@ class AST(ABC):
         super().__init__()
         self.tokens = tokens
         self.context = context if context is not None else Context()
-        # AST containing this AST node.
+        # AST containing this node.
         self.parent = parentAST
-        # Last parsed token inside this AST.
-        self.lastToken: None|Token = None
+        # Children of this node.
+        self.children: list[AST] = []
+        # Tokens belonging to the AST. They don't belong to the children, but they do to the parent.
+        self.composingTokens: list[Token] = []
+
+        # Add this node to the children of the parent.
+        if self.parent is not None:
+            self.parent.children.append(self)
+
+        # Parse the AST. This may create new AST nodes.
         self.parse(*args)
 
     @abstractmethod
@@ -429,34 +438,75 @@ class AST(ABC):
     def print(self, padding: int) -> str:
         pass
 
-    # Returns the last token found on the current AST. If it does not exist it searches recursively
-    # through the parents.
-    def getLastChild(self) -> Token|None:
-        if self.lastToken is not None:
-            if isinstance(self.lastToken, Token):
-                return self.lastToken
+    # Returns the first token found on the current AST. If it has children, it will search for the 
+    # first token in the children. If the AST has tokens of its own, it will use them too in the 
+    # comparation.
+    # If the node doesn't have children nor tokens of its own, it returns None.
+    def getOpeningToken(self) -> Token|None:
+        openingToken: Token|None = None
+
+        if len(self.composingTokens) > 0:
+            # We'll suppose that tokens are inserted in order when parsing.
+            openingToken = self.composingTokens[0]
+        
+        for child in self.children:
+            childToken = child.getOpeningToken()
+
+            # Compare the position of the tokens to decide which will go at the start.
+            if (openingToken is None) or (childToken is not None and childToken.pos < openingToken.pos):
+                openingToken = childToken
+
+        return openingToken
+
+    # Returns the last token found on the current AST. If it has children, it will search for the 
+    # latest token in the children. If the AST has tokens of its own, it will use them too in the 
+    # comparation.
+    # If the node doesn't have children nor tokens of its own, it returns None.
+    def getClosingToken(self) -> Token|None:
+        closingToken: Token|None = None
+
+        if len(self.composingTokens) > 0:
+            # We'll suppose that tokens are inserted in order when parsing.
+            closingToken = self.composingTokens[-1]
+        
+        for child in self.children:
+            childToken = child.getClosingToken()
+
+            # Compare the position of the tokens to decide which will go at the start.
+            if (closingToken is None) or (childToken is not None and childToken.pos > closingToken.pos):
+                closingToken = childToken
+
+        return closingToken
+
+    # Used to print runtime errors.
+    def getLastConsumedToken(self) -> Token|None:
+        if len(self.composingTokens) > 0:
+            if isinstance(self.composingTokens[-1], Token):
+                return self.composingTokens[-1]
             raise ValueError("Found an invalid type in the getLastChild function")
         if self.parent is not None:
-            return self.parent.getLastChild()
+            return self.parent.getLastConsumedToken()
         
         return None
     
     def pop(self) -> Token:
         tok = self.tokens.pop(0)
-        self.lastToken = tok
+        self.composingTokens.append(tok)
         return tok
 
     def raiseError(self, msg: str):
-        lastToken = self.getLastChild()
+        lastToken = self.getLastConsumedToken()
+
         if lastToken is not None:
-            raise ValueError(f"{lastToken.getPosition()} {msg}")
+            errorMsg = f"{lastToken.getPositionString()} {msg}"
+            raise ValueError(errorMsg)
         else:
             raise ValueError(msg)
         
     def raiseWarning(self, msg: str):
-        lastToken = self.getLastChild()
+        lastToken = self.getLastConsumedToken()
         if lastToken is not None:
-            print(f"{lastToken.getPosition()} Warning: {msg}")
+            print(f"{lastToken.getPositionString()} Warning: {msg}")
         else:
             print(f"Warning: {msg}")
 
@@ -468,21 +518,38 @@ class AST(ABC):
     def expect(self, *expectedIDs: str) -> Token:
         # If there are no remaining tokens on the list, go to the parent, get the line location and print the error.
         if not self.tokens:
-            lastToken = self.getLastChild()
+            lastToken = self.getLastConsumedToken()
             if lastToken is not None:
-                raise ValueError(f"{lastToken.getPosition()} Expected {' or '.join(expectedIDs)} after {lastToken.value}")
+                raise ValueError(f"{lastToken.getPositionString()} Expected {' or '.join(expectedIDs)} after {lastToken.value}")
             else:
                 raise ValueError(f"Expected {' or '.join(expectedIDs)} but no token was found")
 
         tok = self.peek()
         if tok.id not in expectedIDs:
             raise ValueError(
-                f"{tok.getPosition()} Expected {' or '.join(expectedIDs)} but found {tok.id}"
+                f"{tok.getPositionString()} Expected {' or '.join(expectedIDs)} but found {tok.value}"
             )
 
         self.pop()
         return tok
     
+    def getDebugLocationInfo(self) -> DebugLocator:
+        ret = DebugLocator(astName = self.__class__.__name__)
+        
+        startTok = self.getOpeningToken()
+        if startTok is not None:
+            ret.file = startTok.file
+            ret.lineStart = startTok.line
+            ret.colStart = startTok.col
+
+        endTok = self.getClosingToken()
+        if endTok is not None:
+            ret.file = endTok.file
+            ret.lineEnd = endTok.line
+            ret.colEnd = endTok.col
+
+        return ret
+
     @overload
     def createChild(self, childType: type[TStmt], *args) -> TStmt: ...
     @overload
@@ -509,9 +576,10 @@ class AST(ABC):
             ret = self._parseInitializer(*args)
         else:
             ret = childType(self.tokens, self.context, self, *args)
+
         # Once created, set the last token of the parent to be the last token parsed by the child.
-        if ret.lastToken is not None:
-            self.lastToken = ret.lastToken
+        if len(ret.composingTokens) > 0:
+            self.composingTokens.extend(ret.composingTokens)
         return ret
 
     def _parseStatement(self) -> Statement:
@@ -731,7 +799,7 @@ class AST(ABC):
             case "identifier":
                 if tok.value in self.context.identifierMap is not None:
                     # Remove the token.
-                    self.pop()
+                    tok = self.pop()
                     
                     ctx = self.context.identifierMap[tok.value]
                     if ctx.identifierType == IdentifierType.VARIABLE and \
@@ -740,11 +808,18 @@ class AST(ABC):
                         ret = constVal
                     else:
                         ret = self.createChild(Variable, tok.value)
+                        ret.composingTokens.append(tok)
 
                 elif globalContext.isBuiltInFunctionByIdentifier(tok.value) and self.peek(1).id == "(":
                     # TODO: This is a bit hacky but it's good enough for built-in functions which 
                     # cannot have their declarations in C (like va_arg or __asm__).
                     ret = globalContext.createBuiltInFunction(self, tok.value)
+
+                else:
+                    if self.peek(1).id == "(":
+                        self.raiseError(f"Function {tok.value} is not declared")
+                    else:
+                        self.raiseError(f"Variable {tok.value} is not defined in this scope")
 
             case "(":
                 self.expect("(")
@@ -801,9 +876,11 @@ class AST(ABC):
                     info: DeclaratorInformation = declarator.process(declType)
 
                     if isinstance(info.type, FunctionDeclaratorType):
-                        ret.addDeclaration(self.createChild(FunctionDeclaration, storageClass, info)) 
-                        if self.lastToken is not None and self.lastToken.id == "}":
-                            # When a function is defined, the declaration list is closed.
+                        funcDecl = self.createChild(FunctionDeclaration, storageClass, info)
+                        ret.addDeclaration(funcDecl)
+                        if funcDecl.body is not None: 
+                            # When a function is defined, the declaration list is closed. A function
+                            # is defined when it has a body.
                             break
                     else:
                         ret.addDeclaration(self.createChild(VariableDeclaration, storageClass, info))
@@ -1809,22 +1886,27 @@ class ForStatement(Statement):
 
         # When parsing the header, enter a new context.
         with self.context.newContext():
+            self.init: list[AST] = []
             tok = self.peek()
             if self.isTokenAnIdentifierType(tok):
-                self.init = self.createChild(VariableDeclaration)
-                if self.init.storageClass is not None:
-                    self.raiseError(f"Cannot have storage class")
-            elif tok.id == ";":
-                self.init = None
-            else:
-                self.init = self.createChild(Exp).preconvertExpression()
-            
-            self.expect(";")
+                _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
 
+                while True:
+                    declarator = self.createChild(TopDeclarator)
+                    info: DeclaratorInformation = declarator.process(declType)
+                    self.init.append(self.createChild(VariableDeclaration, None, info))
+                        
+                    # Parsing the declaration list.
+                    nextToken = self.expect(",", ";")
+                    if nextToken.id == ";":
+                        break
+            elif tok.id != ";":
+                self.init.append(self.createChild(Exp).preconvertExpression())
+                self.expect(";")
+
+            self.condition = None
             tok = self.peek()
-            if tok.id == ";":
-                self.condition = None
-            else:
+            if tok.id != ";":
                 self.condition = self.createChild(Exp).preconvertExpression()
                 if not self.condition.typeId.isScalar():
                     self.raiseError(f"Expected a scalar expression, received {self.condition.typeId}")
@@ -1832,12 +1914,9 @@ class ForStatement(Statement):
             self.expect(";")
 
             tok = self.peek()
-            match tok.id:
-                # TODO: this is temporal. 
-                case ")":
-                    self.post = None
-                case _:
-                    self.post = self.createChild(Exp).preconvertExpression()
+            self.post = None
+            if tok.id != ")":
+                self.post = self.createChild(Exp).preconvertExpression()
             self.expect(")")
 
             with self.context.enterLoop() as self.loopTag:
@@ -1850,7 +1929,8 @@ class ForStatement(Statement):
             ret += f'{pad}- Init: None\n'
         else:
             ret += f'{pad}- Init:\n'
-            ret += self.init.print(padding + PADDING_INCREMENT)
+            for init in self.init:
+                ret += init.print(padding + PADDING_INCREMENT)
 
         if self.condition is None:
             ret += f'{pad}- Condition: None\n'
@@ -3535,6 +3615,9 @@ class UnaryOperator(enum.Enum):
 
 class Unary(Exp):
     def parse(self, operator: UnaryOperator, inner: Exp):
+        # Add 'inner' to the children.
+        self.children.append(inner)
+
         self.unaryOperator: UnaryOperator = operator
         isLvalueAssignable = inner.isLvalueAssignable()
         self.inner: Exp = inner.preconvertExpression()
@@ -3788,6 +3871,9 @@ class Binary(Exp):
                 self.raiseError(f"Operand types {exp1.typeId} and {exp2.typeId} are incompatible")
 
     def parse(self, op: BinaryOperator, exp1: Exp, exp2: Exp):
+        # Add both input expressions to the children.
+        self.children.extend((exp1, exp2))
+
         isLvalueAssignable = exp1.isLvalueAssignable()
 
         self.exp1 = exp1.preconvertExpression()
@@ -4080,6 +4166,9 @@ class Binary(Exp):
 
 class Assignment(Exp):
     def parse(self, exp1: Exp, exp2: Exp):
+        # Add both input expressions to the children.
+        self.children.extend((exp1, exp2))
+    
         if not exp1.isLvalueAssignable():
             self.raiseError("Left expression must be a modifiable lvalue")
 
@@ -4118,6 +4207,9 @@ class Assignment(Exp):
     
 class TernaryConditional(Exp):
     def parse(self, condition: Exp, thenExp: Exp, elseExp: Exp):
+        # Add expressions to the children.
+        self.children.extend((condition, thenExp, elseExp))
+
         self.condition = condition.preconvertExpression()
         if not self.condition.typeId.isScalar():
             self.raiseError(f"Expected a scalar expression, received {self.condition.typeId}")

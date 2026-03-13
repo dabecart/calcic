@@ -411,7 +411,8 @@ class ControlFlowNode:
                     reachingCopies -= copiesToRemove
 
                 case TACReturn() | TACLabel() | \
-                     TACJump() | TACJumpIfZero() | TACJumpIfNotZero() | TACJumpIfValue():
+                     TACJump() | TACJumpIfZero() | TACJumpIfNotZero() | TACJumpIfValue() | \
+                     TACDebugInfo():
                     continue
 
                 case TACBuiltInFunction():
@@ -530,7 +531,7 @@ class ControlFlowNode:
                 if isReplaceable:
                     return TACCopyFromOffset(newSrc, inst.byteOffset, inst.dst, [])
 
-            case TACJump() | TACLabel() | TACGetAddress():
+            case TACJump() | TACLabel() | TACGetAddress() | TACDebugInfo():
                 # TACGetAddress uses the address of the source and not the value; therefore, the
                 # source cannot be substituted.
                 pass
@@ -677,7 +678,7 @@ class ControlFlowNode:
                     # The function address must also be alive.
                     liveVariables.add(inst.funcAddress)
 
-                case TACLabel() | TACJump():
+                case TACLabel() | TACJump() | TACDebugInfo():
                     continue
 
                 case TACBuiltInFunction():
