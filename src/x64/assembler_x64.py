@@ -15,6 +15,7 @@ import enum
 from typing import Type, TypeVar
 
 from src.TAC import *
+from src.debug_info import *
 from src.calcic_types import *
 from src.builtin.builtin_functions_TAC import *
 from src.x64.types_x64 import *
@@ -70,8 +71,7 @@ class AssemblyAST(ABC):
 
     def fromTACValue(self, tacValue: TACValue, offset: int = 0) -> AssemblerOperand:
         if tacValue.isConstant:
-            # First, check if the constant is defined inside the AssemblerStaticConstant.CONSTANTS 
-            # array.
+            # Check if the constant is defined inside the AssemblerStaticConstant.CONSTANTS array.
             found: AssemblerStaticConstant|None = AssemblerStaticConstant.CONSTANTS_MAP.get(tacValue.constantValue)
             if found is not None:
                 return Data(AssemblyType.fromTAC(tacValue.valueType), found.identifier, 0, self)
@@ -79,9 +79,13 @@ class AssemblyAST(ABC):
             # In x64, decimal numbers are stored into memory and cannot be used as immediate.
             if tacValue.valueType.isDecimal():
                 doubleConstant = AssemblerStaticConstant.newSimpleConstant(
-                    tacValue.valueType, tacValue.print())
+                    tacValue.valueType, tacValue.print(), isGlobal=False)
                 return Data(AssemblyType.fromTAC(tacValue.valueType), doubleConstant.identifier, 0, self)
             
+            # Functions behave like Data constants.
+            if isinstance(tacValue.valueType, FunctionDeclaratorType):
+                return Data(AssemblyType.QUADWORD, tacValue.constantValue, 0, self)
+
             return Immediate(tacValue, self)
         else:
             if isinstance(tacValue.valueType, ArrayDeclaratorType) or \
@@ -200,19 +204,25 @@ class AssemblerProgram(AssemblyAST):
 
         for topLevel in self.program.topLevel:
             match topLevel:
-                case TACConstantVariable():
-                    AssemblerStaticConstant.newComplexConstant(
-                        topLevel.valueType, topLevel.identifier, topLevel.initialization)
-                
                 case TACStaticVariable():
-                    topLevelAssembly = self.createChild(
-                        AssemblerStaticVariable, 
-                        AssemblyType.fromTAC(topLevel.valueType),
-                        topLevel.isGlobal,
-                        topLevel.identifier,
-                        topLevel.initialization
-                    )
-                    self.programDefs.append(topLevelAssembly)
+                    if topLevel.isReadOnly:
+                        # Create a 'section .rodata' constant.
+                        AssemblerStaticConstant.newComplexConstant(
+                            topLevel.valueType,
+                            topLevel.identifier,
+                            topLevel.isGlobal,
+                            topLevel.initialization
+                        )
+                    else:
+                        # Create a 'section .data' constant.
+                        topLevelAssembly = self.createChild(
+                            AssemblerStaticVariable, 
+                            AssemblyType.fromTAC(topLevel.valueType),
+                            topLevel.isGlobal,
+                            topLevel.identifier,
+                            topLevel.initialization
+                        )
+                        self.programDefs.append(topLevelAssembly)
 
                 case TACFunction():
                     topLevelAssembly = self.createChild(AssemblerFunction, topLevel)
@@ -229,12 +239,36 @@ class AssemblerProgram(AssemblyAST):
 
     def emitCode(self) -> str:
         ret = ""
+        if not globalContext.useGCCLibraries and globalContext.generateExecutable:
+            # The _start entry point has to be manually added.
+            ret = """
+	.text
+	.globl	_start
+_start:
+	pushq	%rbp
+	movq	%rsp, %rbp
+	subq	$16, %rsp
+	movl	$0, %eax
+	call	main@PLT
+	movl	%eax, -4(%rbp)
+	movl	-4(%rbp), %eax
+	
+    # Perform a syscall "exit" (code 60).
+	movl %eax, %edi 
+	movl $60, %eax
+	syscall
+	ret
+
+"""
+
         for func in self.programDefs:
             ret += func.emitCode() + "\n"
 
         # Emit the constant section.
         ret += "\t.section\t.rodata\n"
         for constant in AssemblerStaticConstant.CONSTANTS:
+            if constant.isGlobal:
+                ret += f"\t.globl {constant.identifier}\n"
             ret += constant.emitCode() + "\n"
         ret += '\t.section .note.GNU-stack,"",@progbits\n'
         return ret
@@ -318,7 +352,8 @@ class AssemblerStaticConstant(AssemblyAST):
 
     # Utility to generate constants during the assembly stage.
     @staticmethod
-    def newSimpleConstant(valueType: DeclaratorType, initialization: str, alignment: int|None = None) -> AssemblerStaticConstant:
+    def newSimpleConstant(valueType: DeclaratorType, initialization: str, isGlobal: bool,
+                          alignment: int|None = None) -> AssemblerStaticConstant:
         asmbType = AssemblyType.fromTAC(valueType)
         initializationList: list[tuple[str, str]] = [(asmbType.getDataSectionName(), initialization)]
 
@@ -334,20 +369,25 @@ class AssemblerStaticConstant(AssemblyAST):
         if alignment is None:
             alignment = asmbType.alignment
 
-        ret = AssemblerStaticConstant(valueType, identifier, initializationList, alignment)
+        ret = AssemblerStaticConstant(valueType, identifier, isGlobal, initializationList, alignment)
         AssemblerStaticConstant.CONSTANTS_MAP[identifier] = ret
         AssemblerStaticConstant.CONSTANTS.append(ret)
         return ret
 
     # Utility to generate assembly code for C constants.
     @staticmethod
-    def newComplexConstant(valueType: DeclaratorType, identifier: str, 
+    def newComplexConstant(valueType: DeclaratorType, identifier: str, isGlobal: bool,
                            initialization: list[Constant], alignment: int|None = None) -> AssemblerStaticConstant:
         initializationList: list[tuple[str, str]] = []
         for const in initialization:
-            initializationList.append(
-                (AssemblyType.fromTAC(const.typeId).getDataSectionName(), const.constValue)
-            )
+            if isinstance(const, ZeroPaddingInitializer):
+                sectionName = 'zero'
+                constValue = str(const.byteCount)
+            else:
+                sectionName = AssemblyType.fromTAC(const.typeId).getDataSectionName()
+                constValue = const.constValue
+
+            initializationList.append((sectionName, constValue))
 
         for prevConst in AssemblerStaticConstant.CONSTANTS_MAP.values():
             if prevConst.valueType == valueType and \
@@ -362,23 +402,26 @@ class AssemblerStaticConstant(AssemblyAST):
         if alignment is None:
             alignment = AssemblyType.fromTAC(valueType).alignment
 
-        ret = AssemblerStaticConstant(valueType, identifier, initializationList, alignment)
+        ret = AssemblerStaticConstant(valueType, identifier, isGlobal, initializationList, alignment)
         AssemblerStaticConstant.CONSTANTS_MAP[identifier] = ret
         AssemblerStaticConstant.CONSTANTS.append(ret)
         return ret
 
     # "initialization" is a list of (data section name, value)
-    def __init__(self, valueType: DeclaratorType, identifier: str, initialization: list[tuple[str, str]], 
+    def __init__(self, valueType: DeclaratorType, identifier: str, isGlobal: bool, 
+                 initialization: list[tuple[str, str]], 
                  alignment: int, parentAST: AssemblyAST | None = None) -> None:
         self.valueType = valueType
         self.identifier = identifier
+        self.isGlobal = isGlobal
         self.initialization = initialization
         self.alignment = alignment
     
         super().__init__(parentAST)
 
     def copy(self) -> AssemblerStaticConstant:
-        return AssemblerStaticConstant(self.valueType, self.identifier, self.initialization, self.alignment, self.parent)
+        return AssemblerStaticConstant(
+            self.valueType, self.identifier, self.isGlobal, self.initialization, self.alignment, self.parent)
 
     def firstPass(self):
         pass
@@ -716,16 +759,19 @@ class AssemblerFunction(AssemblyAST):
 
         # Convert the function's TAC instructions into assembler instructions.
         for inst in self.function.instructions:
-            # Add a comment between instructions to know what each block of assembler instructions 
-            # is doing. Skip labels.
-            if not isinstance(inst, TACLabel):
-                self.createInst(COMMENT, inst.print())
+            # # Add a comment between instructions to know what each block of assembler instructions 
+            # # is doing. Skip labels.
+            # if not isinstance(inst, TACLabel):
+            #     self.createInst(COMMENT, inst.print())
 
             if isinstance(inst, TACBuiltInFunction):
                 self.convertBuiltInTAC(inst)
                 continue
 
             match inst:
+                case TACDebugInfo():
+                    self.createInst(COMMENT, f"{inst.loc}\n")
+
                 case TACReturn():
                     if inst.result.valueType != TypeSpecifier.VOID.toBaseType():
                         self.intRegArgs, self.doubleRegArgs, self.returnInStack = self.classifyReturnValue(inst.result)
@@ -792,11 +838,11 @@ class AssemblerFunction(AssemblyAST):
                                 # when working with double numbers.
                                 if inst.result.valueType == TypeSpecifier.DOUBLE.toBaseType():
                                     negZero = AssemblerStaticConstant.newSimpleConstant(
-                                        TypeSpecifier.DOUBLE.toBaseType(), "-0.0", 16)
+                                        TypeSpecifier.DOUBLE.toBaseType(), "-0.0", False, 16)
                                     negZeroData = Data(AssemblyType.DOUBLE, negZero.identifier, 0, self)
                                 else:
                                     negZero = AssemblerStaticConstant.newSimpleConstant(
-                                        TypeSpecifier.FLOAT.toBaseType(), "-0.0", 16)
+                                        TypeSpecifier.FLOAT.toBaseType(), "-0.0", False, 16)
                                     negZeroData = Data(AssemblyType.FLOAT, negZero.identifier, 0, self)
 
                                 self.createInst(MOV, exp.assemblyType, exp, dest)
@@ -1055,7 +1101,7 @@ class AssemblerFunction(AssemblyAST):
                 case TACLabel():
                     self.createInst(LABEL, inst.identifier)
 
-                case TACFunctionCall():
+                case TACFunctionCall() | TACIndirectFunctionCall():
                     returnIntRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
                     returnDoubleRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
                     self.returnInStack: bool = False
@@ -1147,7 +1193,15 @@ class AssemblerFunction(AssemblyAST):
                                         Register(AssemblyType.BYTE, REG.AX))
 
                     # Emit the call instruction.
-                    self.createInst(CALL, inst.identifier)
+                    if isinstance(inst, TACIndirectFunctionCall):
+                        funcAddrs = self.fromTACValue(inst.funcAddress)
+                        self.createInst(MOV,
+                                        AssemblyType.QUADWORD,
+                                        funcAddrs, 
+                                        Register(funcAddrs.assemblyType, REG.AX))
+                        self.createInst(CALL, Register(funcAddrs.assemblyType, REG.AX))
+                    else:
+                        self.createInst(CALL, inst.identifier)
 
                     # Readjust the stack pointer.
                     deallocBytes = 8 * len(stackArgs) + stackPadding
@@ -1565,6 +1619,56 @@ class AssemblerFunction(AssemblyAST):
                                           Memory(va_list_inner_struct, REG.AX, 0),
                                           va_list_inner_struct)
                 self.instructions.extend(copyInst)
+
+            case TACBuiltIn_asm():
+                # Move the register inputs to their registers. Calculate the immediate 
+                # representation of immediate inputs.
+                for input, inputValue in zip(tac.asmAST.inputs, tac.inValues):
+                    src = self.fromTACValue(inputValue)
+
+                    if input.ioType == BuiltIn_asmIOType.REGISTER:
+                        try:
+                            register: REG = REG[input.args]
+                        except:
+                            tac.asmAST.raiseError(f"Invalid input register {input.args}")
+
+                        self.createInst(MOV,
+                                        src.assemblyType,
+                                        src,
+                                        Register(src.assemblyType, register))
+
+                    elif input.ioType == BuiltIn_asmIOType.IMMEDIATE:
+                        if not isinstance(src, Immediate):
+                            input.exp.raiseError("Not an immediate value")
+
+                        input.setAsmbRepresentation(src.emitCode())
+                    
+                    else:
+                        raise ValueError()
+
+                # Write the given assembly code.
+                self.createInst(CODE, tac.asmAST.generateAssemblyCode())
+
+                # Move the outputs from the registers to the temporary output variables.
+                for output, outputValue in zip(tac.asmAST.outputs, tac.outValues):
+                    dst = self.fromTACValue(outputValue)
+
+                    if output.ioType == BuiltIn_asmIOType.REGISTER:
+                        try:
+                            register: REG = REG[output.args]
+                        except:
+                            tac.asmAST.raiseError(f"Invalid output register {output.args}")
+
+                        self.createInst(MOV,
+                                        dst.assemblyType,
+                                        Register(dst.assemblyType, register),
+                                        dst)
+                    
+                    else:
+                        raise ValueError()
+
+            case _:
+                raise ValueError(f"Unexpected built-in TAC {tac}")
 
     def secondPass(self):
         for inst in self.instructions:
@@ -2134,20 +2238,29 @@ class PUSH(AssemblerInstruction):
         return f"Push({self.operand})\n"
     
 class CALL(AssemblerInstruction):
-    def __init__(self, funcIdentifier: str, parentAST: AssemblyAST | None = None) -> None:
-        self.funcIdentifier = funcIdentifier
+    def __init__(self, callArgument: str|Register, parentAST: AssemblyAST | None = None) -> None:
+        self.callArgument = callArgument
         super().__init__(parentAST)
 
     def emitCode(self) -> str:
-        if self.funcIdentifier in TACFunction.functions:
-            return f"\tcall\t{self.funcIdentifier}\n"
+        if isinstance(self.callArgument, str):
+            # Offset call.
+            if self.callArgument in TACFunction.functions:
+                return f"\tcall\t{self.callArgument}\n"
+            else:
+                # If the function is not defined in the code, maybe it's located somewhere else.
+                # Add @PLT to link it externally. 
+                return f"\tcall\t{self.callArgument}@PLT\n"
+            
+        elif isinstance(self.callArgument, Register):
+            # Indirect call.
+            return f"\tcall\t*{self.callArgument.emitCode()}\n"
+        
         else:
-            # If the function is not defined in the code, maybe it's located somewhere else.
-            # Add @PLT to link it externally. 
-            return f"\tcall\t{self.funcIdentifier}@PLT\n"
+            raise ValueError()
     
     def print(self) -> str:
-        return f'Call({self.funcIdentifier})\n'
+        return f'Call({self.callArgument})\n'
 
 class RET(AssemblerInstruction):
     def __init__(self, parentAST: AssemblyAST | None = None) -> None:
@@ -2594,6 +2707,18 @@ class COMMENT(AssemblerInstruction):
 
     def print(self) -> str:
         return f"\n# {self.comment}"
+
+# Writes raw code into the assembly output.
+class CODE(AssemblerInstruction):
+    def __init__(self, asmbCode: str, parentAST: AssemblyAST | None = None) -> None:
+        self.asmbCode = asmbCode
+        super().__init__(parentAST)
+
+    def emitCode(self) -> str:
+        return self.asmbCode
+
+    def print(self) -> str:
+        return f"\n# __asm__\n{self.asmbCode}"
 
 """
 OPERANDS

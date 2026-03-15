@@ -20,6 +20,7 @@ from typing import ClassVar, TypeVar, overload
 
 from src.lexer import Token 
 from src.calcic_types import *
+from src.debug_info import *
 from src.global_context import globalContext
 
 # Used to generate the verbose output.
@@ -63,6 +64,7 @@ class FunctionIdentifier:
     name: str
     arguments: list[ParameterInformation]
     variadic: bool
+    funcType: DeclaratorType
     returnType: DeclaratorType
     storageClass: StorageClass|None
     isGlobal: bool
@@ -75,13 +77,8 @@ class StaticVariableContext:
     mangledName: str
     # True if it has external linkage.
     isGlobal: bool
+    isReadOnly: bool
     tentative: bool
-    initialization: list[Constant]
-
-@dataclass
-class ConstantVariableContext:
-    name: str
-    idType: DeclaratorType
     initialization: list[Constant]
 
 @dataclass
@@ -130,11 +127,8 @@ class Context:
     variablesMap: dict[str, VariableIdentifier]              = field(default_factory=dict)
     # Stores the attributes of functions. Key is the original name (function names aren't mangled).
     functionMap: dict[str, FunctionIdentifier]               = field(default_factory=dict)
-    # Stores the attributes of variables which are stored on the .data section. Key is the original 
-    # name.
+    # Stores the attributes of static variables.
     staticVariablesMap: dict[str, StaticVariableContext]     = field(default_factory=dict)
-    # Stores the attributes of variables which are stored on the .rodata section.
-    constantVariablesMap: dict[str, ConstantVariableContext] = field(default_factory=dict)
     # Contains the declarators of the typedef, keyed by the mangled identifier.
     typedefMap: dict[str, TypedefContext]                    = field(default_factory=dict)
 
@@ -300,7 +294,7 @@ class Context:
                 if label.gotoToken is None:
                     raise ValueError(f"Missing declaration of label {label.originalName}")
                 else:
-                    raise ValueError(f"{label.gotoToken.getPosition()} Missing declaration of label {label.originalName}")
+                    raise ValueError(f"{label.gotoToken.getPositionString()} Missing declaration of label {label.originalName}")
 
     # Use it to return the most recent struct, union or enum.
     STRUCT_ORDER: int = 0
@@ -422,10 +416,18 @@ class AST(ABC):
         super().__init__()
         self.tokens = tokens
         self.context = context if context is not None else Context()
-        # AST containing this AST node.
+        # AST containing this node.
         self.parent = parentAST
-        # Last parsed token inside this AST.
-        self.lastToken: None|Token = None
+        # Children of this node.
+        self.children: list[AST] = []
+        # Tokens belonging to the AST. They don't belong to the children, but they do to the parent.
+        self.composingTokens: list[Token] = []
+
+        # Add this node to the children of the parent.
+        if self.parent is not None:
+            self.parent.children.append(self)
+
+        # Parse the AST. This may create new AST nodes.
         self.parse(*args)
 
     @abstractmethod
@@ -436,34 +438,75 @@ class AST(ABC):
     def print(self, padding: int) -> str:
         pass
 
-    # Returns the last token found on the current AST. If it does not exist it searches recursively
-    # through the parents.
-    def getLastChild(self) -> Token|None:
-        if self.lastToken is not None:
-            if isinstance(self.lastToken, Token):
-                return self.lastToken
+    # Returns the first token found on the current AST. If it has children, it will search for the 
+    # first token in the children. If the AST has tokens of its own, it will use them too in the 
+    # comparation.
+    # If the node doesn't have children nor tokens of its own, it returns None.
+    def getOpeningToken(self) -> Token|None:
+        openingToken: Token|None = None
+
+        if len(self.composingTokens) > 0:
+            # We'll suppose that tokens are inserted in order when parsing.
+            openingToken = self.composingTokens[0]
+        
+        for child in self.children:
+            childToken = child.getOpeningToken()
+
+            # Compare the position of the tokens to decide which will go at the start.
+            if (openingToken is None) or (childToken is not None and childToken.pos < openingToken.pos):
+                openingToken = childToken
+
+        return openingToken
+
+    # Returns the last token found on the current AST. If it has children, it will search for the 
+    # latest token in the children. If the AST has tokens of its own, it will use them too in the 
+    # comparation.
+    # If the node doesn't have children nor tokens of its own, it returns None.
+    def getClosingToken(self) -> Token|None:
+        closingToken: Token|None = None
+
+        if len(self.composingTokens) > 0:
+            # We'll suppose that tokens are inserted in order when parsing.
+            closingToken = self.composingTokens[-1]
+        
+        for child in self.children:
+            childToken = child.getClosingToken()
+
+            # Compare the position of the tokens to decide which will go at the start.
+            if (closingToken is None) or (childToken is not None and childToken.pos > closingToken.pos):
+                closingToken = childToken
+
+        return closingToken
+
+    # Used to print runtime errors.
+    def getLastConsumedToken(self) -> Token|None:
+        if len(self.composingTokens) > 0:
+            if isinstance(self.composingTokens[-1], Token):
+                return self.composingTokens[-1]
             raise ValueError("Found an invalid type in the getLastChild function")
         if self.parent is not None:
-            return self.parent.getLastChild()
+            return self.parent.getLastConsumedToken()
         
         return None
     
     def pop(self) -> Token:
         tok = self.tokens.pop(0)
-        self.lastToken = tok
+        self.composingTokens.append(tok)
         return tok
 
     def raiseError(self, msg: str):
-        lastToken = self.getLastChild()
+        lastToken = self.getLastConsumedToken()
+
         if lastToken is not None:
-            raise ValueError(f"{lastToken.getPosition()} {msg}")
+            errorMsg = f"{lastToken.getPositionString()} {msg}"
+            raise ValueError(errorMsg)
         else:
             raise ValueError(msg)
         
     def raiseWarning(self, msg: str):
-        lastToken = self.getLastChild()
+        lastToken = self.getLastConsumedToken()
         if lastToken is not None:
-            print(f"{lastToken.getPosition()} Warning: {msg}")
+            print(f"{lastToken.getPositionString()} Warning: {msg}")
         else:
             print(f"Warning: {msg}")
 
@@ -475,21 +518,38 @@ class AST(ABC):
     def expect(self, *expectedIDs: str) -> Token:
         # If there are no remaining tokens on the list, go to the parent, get the line location and print the error.
         if not self.tokens:
-            lastToken = self.getLastChild()
+            lastToken = self.getLastConsumedToken()
             if lastToken is not None:
-                raise ValueError(f"{lastToken.getPosition()} Expected {' or '.join(expectedIDs)} after {lastToken.value}")
+                raise ValueError(f"{lastToken.getPositionString()} Expected {' or '.join(expectedIDs)} after {lastToken.value}")
             else:
                 raise ValueError(f"Expected {' or '.join(expectedIDs)} but no token was found")
 
         tok = self.peek()
         if tok.id not in expectedIDs:
             raise ValueError(
-                f"{tok.getPosition()} Expected {' or '.join(expectedIDs)} but found {tok.id}"
+                f"{tok.getPositionString()} Expected {' or '.join(expectedIDs)} but found {tok.value}"
             )
 
         self.pop()
         return tok
     
+    def getDebugLocationInfo(self) -> DebugLocator:
+        ret = DebugLocator(astName = self.__class__.__name__)
+        
+        startTok = self.getOpeningToken()
+        if startTok is not None:
+            ret.file = startTok.file
+            ret.lineStart = startTok.line
+            ret.colStart = startTok.col
+
+        endTok = self.getClosingToken()
+        if endTok is not None:
+            ret.file = endTok.file
+            ret.lineEnd = endTok.line
+            ret.colEnd = endTok.col
+
+        return ret
+
     @overload
     def createChild(self, childType: type[TStmt], *args) -> TStmt: ...
     @overload
@@ -516,9 +576,10 @@ class AST(ABC):
             ret = self._parseInitializer(*args)
         else:
             ret = childType(self.tokens, self.context, self, *args)
+
         # Once created, set the last token of the parent to be the last token parsed by the child.
-        if ret.lastToken is not None:
-            self.lastToken = ret.lastToken
+        if len(ret.composingTokens) > 0:
+            self.composingTokens.extend(ret.composingTokens)
         return ret
 
     def _parseStatement(self) -> Statement:
@@ -657,10 +718,19 @@ class AST(ABC):
                 ret = self.createChild(Subscript, ret)
             elif postTok.id == ".":
                 # Structure/union dot.
+                self.pop()
                 ret = self.createChild(Dot, ret)
             elif postTok.id == "->":
                 # Pointer structure/union arrow.
+                self.pop()
                 ret = self.createChild(Arrow, ret)
+            elif postTok.id == "(":
+                # Function call.
+                if isinstance(ret, Variable) and \
+                   globalContext.isBuiltInFunctionByIdentifier(ret.originalIdentifier):
+                    ret = globalContext.createBuiltInFunction(self, ret.originalIdentifier)
+                else:
+                    ret = self.createChild(FunctionCall, ret)
             else:
                 # No postfix.
                 break
@@ -712,16 +782,24 @@ class AST(ABC):
 
             case "string":
                 ret = self.createChild(String)
+                
+                # This string is being used inside an expression. Therefore, the content of the string
+                # should be stored in the .rodata section (constants section) first, then use its value
+                # as a reference.
+                self.context.staticVariablesMap[ret.identifier] = StaticVariableContext(
+                    storageClass=None,
+                    idType=ret.typeId,
+                    mangledName=ret.identifier,
+                    isGlobal=False,
+                    isReadOnly=True,
+                    tentative=False,
+                    initialization=ret.toConstantsList()
+                )
 
             case "identifier":
-                if self.peek(1).id == "(":
-                    if globalContext.isBuiltInFunctionByIdentifier(tok.value):
-                        ret = globalContext.createBuiltInFunction(self, tok.value)
-                    else:
-                        ret = self.createChild(FunctionCall)
-                elif tok.value in self.context.identifierMap is not None:
+                if tok.value in self.context.identifierMap is not None:
                     # Remove the token.
-                    self.pop()
+                    tok = self.pop()
                     
                     ctx = self.context.identifierMap[tok.value]
                     if ctx.identifierType == IdentifierType.VARIABLE and \
@@ -730,6 +808,18 @@ class AST(ABC):
                         ret = constVal
                     else:
                         ret = self.createChild(Variable, tok.value)
+                        ret.composingTokens.append(tok)
+
+                elif globalContext.isBuiltInFunctionByIdentifier(tok.value) and self.peek(1).id == "(":
+                    # TODO: This is a bit hacky but it's good enough for built-in functions which 
+                    # cannot have their declarations in C (like va_arg or __asm__).
+                    ret = globalContext.createBuiltInFunction(self, tok.value)
+
+                else:
+                    if self.peek(1).id == "(":
+                        self.raiseError(f"Function {tok.value} is not declared")
+                    else:
+                        self.raiseError(f"Variable {tok.value} is not defined in this scope")
 
             case "(":
                 self.expect("(")
@@ -786,9 +876,11 @@ class AST(ABC):
                     info: DeclaratorInformation = declarator.process(declType)
 
                     if isinstance(info.type, FunctionDeclaratorType):
-                        ret.addDeclaration(self.createChild(FunctionDeclaration, storageClass, info)) 
-                        if self.lastToken is not None and self.lastToken.id == "}":
-                            # When a function is defined, the declaration list is closed.
+                        funcDecl = self.createChild(FunctionDeclaration, storageClass, info)
+                        ret.addDeclaration(funcDecl)
+                        if funcDecl.body is not None: 
+                            # When a function is defined, the declaration list is closed. A function
+                            # is defined when it has a body.
                             break
                     else:
                         ret.addDeclaration(self.createChild(VariableDeclaration, storageClass, info))
@@ -877,18 +969,20 @@ class AST(ABC):
                 typeSet.add(tok.id)
                 
             elif tok.id in Token.TYPE_QUALIFIER:
+                # Duplicated type qualifiers are valid.
                 match tok.id:
                     case "const":
-                        # Duplicated const keywords are valid.
                         typeQualifiers.const = True
+                    case "volatile":
+                        typeQualifiers.volatile = True
                     case _:
-                        self.raiseError(f"Invalid specifier: {tok.id}")
+                        self.raiseError(f"Invalid type qualifier: {tok.id}")
                 
                 self.pop()
 
             elif tok.id in Token.STORAGE_QUALIFIER:
                 if not expectsStorageClass:
-                    self.raiseError("Invalid storage class")
+                    self.raiseError("Invalid storage qualifier")
                 if storageClass is not None:
                     self.raiseError(f"Variable already defined as {storageClass.value}")
                 match tok.id:
@@ -923,7 +1017,7 @@ class AST(ABC):
 
             # If it's none of that, raise an error.
             tok = self.pop()
-            self.raiseError(f"Expected a type, not {tok.value}")
+            self.raiseError(f"{tok.value} is not a valid type")
 
         if {"signed", "unsigned"} <= typeSet:
             self.raiseError("Variable declared as signed and unsigned at the same time")
@@ -1074,9 +1168,13 @@ class AST(ABC):
                 # Start with .L so that the linker "hides" this constant.
                 constantName: str = self.context.mangleIdentifier(".Lstr")
 
-                self.context.constantVariablesMap[constantName] = ConstantVariableContext(
-                    name=constantName,
+                self.context.staticVariablesMap[constantName] = StaticVariableContext(
+                    storageClass=None,
                     idType=strAST.typeId,
+                    mangledName=constantName,
+                    isGlobal=False,
+                    isReadOnly=True,
+                    tentative=False,
                     initialization=strAST.toConstantsList()
                 )
                 
@@ -1212,13 +1310,33 @@ class FunctionParameterDeclarator(DeclaratorAST):
         else:
             self.isEllipsis = False
             _, self.declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
-            self.decl = self.createChild(TopDeclarator)
+
+            self.decl: TopDeclarator|TopAbstractDeclarator|None = None
+            self.isAnonymous: bool = True 
+            if self.peek().id not in (",", ")"):
+                # Function parameters can be anonymous during declaration. Try to parse a normal 
+                # declarator first, and if it fails, try with an anonymous declarator.
+                try:
+                    # Use a copy of the current tokens, in case it fails.
+                    tokensCopy = list(self.tokens)
+                    self.decl = TopDeclarator(tokensCopy, self.context, self)
+                    self.tokens.clear()
+                    self.tokens.extend(tokensCopy)
+                    # Normal declarator was succesful, the parameter is not anonymous.
+                    self.isAnonymous = False
+                except:
+                    self.decl = self.createChild(TopAbstractDeclarator)
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
-        info = self.decl.process(baseType)
-        info.type = info.type.decay()
-        if info.type == TypeSpecifier.VOID.toBaseType():
-            self.raiseError("A parameter must not have void type")
+        if self.decl is None:
+            info = DeclaratorInformation(".anonymous.", baseType, [])
+        else:
+            info = self.decl.process(baseType)
+            info.type = info.type.decay()
+            if info.type == TypeSpecifier.VOID.toBaseType():
+                self.raiseError("A parameter must not have void type")
+        
+        info.isAnonymous = self.isAnonymous
         return info
 
 class DirectDeclarator(DeclaratorAST):
@@ -1238,7 +1356,8 @@ class DirectDeclarator(DeclaratorAST):
             if self.peek().id == "void" and self.peek(1).id == ")":
                 self.pop()
             elif self.peek().id == ")":
-                # C99 says that a function with no arguments needs 'void' as argument.
+                # C99 says that a function with no arguments needs 'void' as argument, but we'll 
+                # relax this rule and leave it as optional.
                 pass
             else:
                 while True:
@@ -1280,19 +1399,16 @@ class DirectDeclarator(DeclaratorAST):
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
         if self.isFunctionDeclarator:
-            simpleDecl = self.simple.process(baseType)
-            if isinstance(simpleDecl.type, (BaseDeclaratorType, PointerDeclaratorType)):
-                funcParams: list[ParameterInformation] = []
-                for param in self.paramDeclarators:
-                    paramInfo: DeclaratorInformation = param.process(param.declType)
-                    if isinstance(paramInfo.type, FunctionDeclaratorType):
-                        self.raiseError("Function pointers aren't supported as parameters")
-                    funcParams.append(ParameterInformation(paramInfo.type, paramInfo.name))
-                
-                funcDecl = FunctionDeclaratorType(funcParams, simpleDecl.type, self.hasEllipsis)
-                return DeclaratorInformation(simpleDecl.name, funcDecl, funcDecl.params)
-            else:
-                self.raiseError("Not implemented")
+            if isinstance(baseType, (ArrayDeclaratorType, FunctionDeclaratorType)):
+                self.raiseError(f"Functions cannot return {baseType}")
+
+            funcParams: list[ParameterInformation] = []
+            for param in self.paramDeclarators:
+                paramInfo: DeclaratorInformation = param.process(param.declType)
+                funcParams.append(ParameterInformation(paramInfo.type, paramInfo.name, isAnonymous=paramInfo.isAnonymous))
+            
+            funcDecl = FunctionDeclaratorType(funcParams, baseType, self.hasEllipsis)
+            return self.simple.process(funcDecl)
 
         elif self.isArrayDeclarator:
             if not baseType.isComplete():
@@ -1312,10 +1428,15 @@ class TopDeclarator(DeclaratorAST):
             self.pop()
             self.isPointer = True
 
-            self.isConstantPointer = False
-            while self.peek().id == "const":
-                self.isConstantPointer = True
-                self.pop()
+            self.pointerQualifier = TypeQualifier()
+            while self.peek().id in Token.TYPE_QUALIFIER:
+                qualifier = self.pop().id
+                if qualifier == "const":
+                    self.pointerQualifier.const = True
+                elif qualifier == "volatile":
+                    self.pointerQualifier.volatile = True
+                else:
+                    raise ValueError()
 
             self.decl = self.createChild(TopDeclarator)
         else:
@@ -1324,7 +1445,7 @@ class TopDeclarator(DeclaratorAST):
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
         if self.isPointer:
-            baseType = PointerDeclaratorType(baseType, TypeQualifier(self.isConstantPointer))
+            baseType = PointerDeclaratorType(baseType, self.pointerQualifier)
         ret = self.decl.process(baseType)
         return ret 
 
@@ -1341,35 +1462,6 @@ class AbstractDeclaratorAST(AST):
 
     def print(self, padding: int) -> str:
         return ""
-
-class TopAbstractDeclarator(AbstractDeclaratorAST):
-    def parse(self, *args):
-        if self.peek().id == "*":
-            self.pop()
-
-            self.isPointer = True
-            self.isConstantPointer = False
-            while self.peek().id == "const":
-                self.isConstantPointer = True
-                self.pop()
-
-            try:
-                self.decl = self.createChild(TopAbstractDeclarator)
-            except:
-                self.decl = None
-        else:
-            self.decl = self.createChild(BaseAbstractDeclarator)
-            self.isPointer = False
-
-    def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
-        if self.isPointer:
-            baseType = PointerDeclaratorType(baseType, TypeQualifier(self.isConstantPointer))
-            if self.decl is None:
-                return DeclaratorInformation("", baseType, [])
-        
-        if self.decl is not None:
-            return self.decl.process(baseType)
-        self.raiseError("No declaration inside TopAbstractDeclarator")
 
 class BaseAbstractDeclarator(AbstractDeclaratorAST):
     def parse(self, *args):
@@ -1425,6 +1517,145 @@ class BaseAbstractDeclarator(AbstractDeclaratorAST):
 
         return DeclaratorInformation("", retType, [])
 
+class SimpleAbstractDeclarator(DeclaratorAST):
+    def parse(self, *args):
+        self.hasNested = False
+        
+        if self.peek().id == "(":
+            # Ambiguity resolution: '(' could be a nested abstract declarator 
+            # or the start of function parameters. Try to parse it as nested first.
+            tokensCopy = list(self.tokens)
+            self.pop()
+            
+            if self.peek().id != ")":
+                try:
+                    self.declarator = self.createChild(TopAbstractDeclarator)
+                    self.expect(")")
+                    self.hasNested = True
+                except:
+                    # Failed to parse as an abstract declarator (likely a parameter list).
+                    # Restore tokens and leave as an empty simple abstract declarator.
+                    self.tokens.clear()
+                    self.tokens.extend(tokensCopy)
+            else:
+                # An empty '()' unambiguously belongs to function parameters.
+                self.tokens.clear()
+                self.tokens.extend(tokensCopy)
+
+    def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
+        if self.hasNested:
+            return self.declarator.process(baseType)
+        else:
+            return DeclaratorInformation(".anonymous.", baseType, [])
+
+class DirectAbstractDeclarator(DeclaratorAST):
+    def parse(self, *args):
+        self.simple = self.createChild(SimpleAbstractDeclarator)
+        self.isFunctionDeclarator = False
+        self.isArrayDeclarator = False
+
+        nextTok = self.peek()
+        if nextTok.id == "(":
+            self.isFunctionDeclarator = True
+            self.hasEllipsis = False
+            self.paramDeclarators: list[FunctionParameterDeclarator] = []
+
+            self.pop()
+
+            if self.peek().id == "void" and self.peek(1).id == ")":
+                self.pop()
+            elif self.peek().id == ")":
+                # Relaxed C99 rule for empty argument lists
+                pass
+            else:
+                while True:
+                    param = self.createChild(FunctionParameterDeclarator)
+
+                    if param.isEllipsis:
+                        if len(self.paramDeclarators) < 1:
+                            self.raiseError("Variadic function requires a minimum of one named argument")
+
+                        self.hasEllipsis = True
+                        break
+                    else:
+                        self.paramDeclarators.append(param)
+                        if self.peek().id == ",":
+                            self.pop()
+                        else:
+                            break
+            
+            self.expect(")")
+        elif nextTok.id == "[":
+            self.isArrayDeclarator = True
+            self.arrayDimensions: list[int] = []
+
+            while self.peek().id == "[":
+                self.pop()
+
+                if self.peek().id == "]":
+                    self.raiseError("Variable length arrays not implemented")
+
+                arrayDim = self.parseConstantFromType(TypeSpecifier.LONG.toBaseType(), strict=True)[0]
+                dim = int(arrayDim.constValue)
+                if dim <= 0:
+                    self.raiseError("Array dimension must be greater than zero")
+                
+                self.expect("]")
+
+                self.arrayDimensions.insert(0, dim)
+
+    def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
+        if self.isFunctionDeclarator:
+            if isinstance(baseType, (ArrayDeclaratorType, FunctionDeclaratorType)):
+                self.raiseError(f"Functions cannot return {baseType}")
+        
+            funcParams: list[ParameterInformation] = []
+            for param in self.paramDeclarators:
+                paramInfo: DeclaratorInformation = param.process(param.declType)
+                funcParams.append(ParameterInformation(paramInfo.type, paramInfo.name, isAnonymous=paramInfo.isAnonymous))
+            
+            funcDecl = FunctionDeclaratorType(funcParams, baseType, self.hasEllipsis)
+            return self.simple.process(funcDecl)
+
+        elif self.isArrayDeclarator:
+            if not baseType.isComplete():
+                self.raiseError("Cannot create array of an incomplete type")
+            
+            arrayDecl = ArrayDeclaratorType(baseType, self.arrayDimensions[0])
+            for dim in self.arrayDimensions[1:]:
+                arrayDecl = ArrayDeclaratorType(arrayDecl, dim)
+            return self.simple.process(arrayDecl)
+
+        else:
+            return self.simple.process(baseType)
+        
+class TopAbstractDeclarator(DeclaratorAST):
+    def parse(self, *args):
+        if self.peek().id == "*":
+            self.pop()
+            self.isPointer = True
+
+            self.pointerQualifier = TypeQualifier()
+            while self.peek().id in Token.TYPE_QUALIFIER:
+                qualifier = self.pop().id
+                if qualifier == "const":
+                    self.pointerQualifier.const = True
+                elif qualifier == "volatile":
+                    self.pointerQualifier.volatile = True
+                else:
+                    raise ValueError()
+
+            self.decl = self.createChild(TopAbstractDeclarator)
+        else:
+            self.decl = self.createChild(DirectAbstractDeclarator)
+            self.isPointer = False
+
+    def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
+        if self.isPointer:
+            baseType = PointerDeclaratorType(baseType, self.pointerQualifier)
+        ret = self.decl.process(baseType)
+        return ret
+    
 class Program(AST):
     def parse(self, *args):
         self.topLevel: list[Declaration] = []
@@ -1484,8 +1715,11 @@ class ReturnStatement(Statement):
 
                 # Check if the return value needs a cast. It will depend on the return type of the 
                 # enclosing function.
-                if encFuncCtx.returnType != self.exp.typeId:
+                if encFuncCtx.returnType != self.exp.typeId.unqualified():
                     self.exp = self.createChild(Cast, encFuncCtx.returnType, self.exp, True).preconvertExpression()
+            else:
+                if self.peek().id != ";":
+                    self.raiseError("Return with a value in void function")
 
             self.expect(";")
 
@@ -1652,22 +1886,28 @@ class ForStatement(Statement):
 
         # When parsing the header, enter a new context.
         with self.context.newContext():
+            self.init: list[AST] = []
             tok = self.peek()
             if self.isTokenAnIdentifierType(tok):
-                self.init = self.createChild(VariableDeclaration)
-                if self.init.storageClass is not None:
-                    self.raiseError(f"Cannot have storage class")
-            elif tok.id == ";":
-                self.init = None
-            else:
-                self.init = self.createChild(Exp).preconvertExpression()
-            
-            self.expect(";")
+                _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
 
-            tok = self.peek()
-            if tok.id == ";":
-                self.condition = None
+                while True:
+                    declarator = self.createChild(TopDeclarator)
+                    info: DeclaratorInformation = declarator.process(declType)
+                    self.init.append(self.createChild(VariableDeclaration, None, info))
+                        
+                    # Parsing the declaration list.
+                    nextToken = self.expect(",", ";")
+                    if nextToken.id == ";":
+                        break
             else:
+                if tok.id != ";":
+                    self.init.append(self.createChild(Exp).preconvertExpression())
+                self.expect(";")
+
+            self.condition = None
+            tok = self.peek()
+            if tok.id != ";":
                 self.condition = self.createChild(Exp).preconvertExpression()
                 if not self.condition.typeId.isScalar():
                     self.raiseError(f"Expected a scalar expression, received {self.condition.typeId}")
@@ -1675,12 +1915,9 @@ class ForStatement(Statement):
             self.expect(";")
 
             tok = self.peek()
-            match tok.id:
-                # TODO: this is temporal. 
-                case ")":
-                    self.post = None
-                case _:
-                    self.post = self.createChild(Exp).preconvertExpression()
+            self.post = None
+            if tok.id != ")":
+                self.post = self.createChild(Exp).preconvertExpression()
             self.expect(")")
 
             with self.context.enterLoop() as self.loopTag:
@@ -1693,7 +1930,8 @@ class ForStatement(Statement):
             ret += f'{pad}- Init: None\n'
         else:
             ret += f'{pad}- Init:\n'
-            ret += self.init.print(padding + PADDING_INCREMENT)
+            for init in self.init:
+                ret += init.print(padding + PADDING_INCREMENT)
 
         if self.condition is None:
             ret += f'{pad}- Condition: None\n'
@@ -1914,16 +2152,20 @@ class FunctionDeclaration(Declaration):
         self.context.addFunctionIdentifier(self)
 
         # Parse the function's argument list.
-        self.argumentList: list[ParameterInformation] = info.type.params
+        self.argumentList: list[ParameterInformation] = self.typeId.params
         # Names of the variables after being mangled.
         self.definedArgumentList : list[ParameterInformation] = []
         
         # Can't have two variables passed to a function with the same name.
-        argNames: list[str] = []
+        argNames: set[str] = set()
+        anonymousArgument: bool = False
         for arg in self.argumentList:
-            if arg.name in argNames:
-                self.raiseError(f"Redefinition of argument {arg.name}")
-            argNames.append(arg.name)
+            if arg.isAnonymous:
+                anonymousArgument = True
+            else:
+                if arg.name in argNames:
+                    self.raiseError(f"Redefinition of argument {arg.name}")
+                argNames.add(arg.name)
 
         if self.identifier in self.context.functionMap:
             # Check the arguments of the function.
@@ -1933,18 +2175,19 @@ class FunctionDeclaration(Declaration):
 
             # Check the types of the arguments. The names and qualifiers do not need to be the same. 
             for ctxVar, var in zip(ctxArgs, self.argumentList):
-                if ctxVar.type.unqualify() != var.type.unqualify():
+                if ctxVar.type.unqualified() != var.type.unqualified():
                     self.raiseError(f"{var.name} should be {ctxVar.type}, not {var.type}")
         else:
             # Add the function information to the current context.
             self.context.functionMap[self.identifier] = FunctionIdentifier(
-                name=self.identifier,
-                arguments=self.argumentList,
-                variadic=info.type.variadic,
-                returnType=self.returnType,
-                storageClass=self.storageClass,
-                isGlobal=self.isGlobal,
-                alreadyDefined=False
+                name            = self.identifier,
+                arguments       = self.argumentList,
+                variadic        = info.type.variadic,
+                funcType        = self.typeId,
+                returnType      = self.returnType,
+                storageClass    = self.storageClass,
+                isGlobal        = self.isGlobal,
+                alreadyDefined  = False
             )
 
         self.body: list[AST]|None = None
@@ -1956,6 +2199,9 @@ class FunctionDeclaration(Declaration):
             if info.type.returnDeclarator != TypeSpecifier.VOID.toBaseType() and \
                not info.type.returnDeclarator.isComplete():
                 self.raiseError("Cannnot define a function with an incomplete return type")
+
+            if anonymousArgument:
+                self.raiseError("Cannot have anonymous arguments in a function definition")
 
             # Check if the function is already defined.
             if self.context.functionMap[self.identifier].alreadyDefined:
@@ -2081,6 +2327,7 @@ class VariableDeclaration(Declaration):
                         idType=self.typeId,
                         storageClass=self.storageClass,
                         isGlobal=True,
+                        isReadOnly=self.typeId.getTypeQualifiers().const,
                         tentative=False,
                         initialization=[]
                     )
@@ -2105,6 +2352,7 @@ class VariableDeclaration(Declaration):
                     idType=self.typeId,
                     storageClass=self.storageClass,
                     isGlobal=False,
+                    isReadOnly=self.typeId.getTypeQualifiers().const,
                     tentative=False,
                     initialization=self.initialization
                 )
@@ -2172,6 +2420,7 @@ class VariableDeclaration(Declaration):
                 idType=self.typeId,
                 storageClass=self.storageClass,
                 isGlobal=self.isGlobal,
+                isReadOnly=self.typeId.getTypeQualifiers().const,
                 tentative=tentative,
                 initialization=self.initialization # type: ignore
             )
@@ -2193,31 +2442,45 @@ class VariableDeclaration(Declaration):
             ret += f"{pad})\n"
             return ret
 
-class StructMemberDeclaration(AST):
+@dataclass
+class MemberInformation:
+    typeId: DeclaratorType
+    name: str
+    # The offset gets written in StructDeclaration. It is not used by UnionDeclaration.
+    offset: int = -1
+
+class MemberDeclaration(AST):
     def parse(self, *args):
+        self.declarations: list[MemberInformation] = []
+
         _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
-        declarator = self.createChild(TopDeclarator)
-        info: DeclaratorInformation = declarator.process(declType)
+        
+        while True:
+            declarator = self.createChild(TopDeclarator)
+            info: DeclaratorInformation = declarator.process(declType)
 
-        self.typeId = info.type
-        self.name = info.name
-        # The offset gets written in StructDeclaration.
-        self.offset: int = -1
+            if not info.type.isComplete():
+                self.raiseError("Cannot use incomplete type inside a member declaration")
+            
+            decl = MemberInformation(info.type, info.name)
+            self.declarations.append(decl)
 
-        if not self.typeId.isComplete():
-            self.raiseError("Cannot use incomplete type inside a struct declaration")
-
-        self.expect(";")
+            nextToken = self.expect(",", ";")
+            if nextToken.id == ";":
+                break
 
     def print(self, padding: int) -> str:
         pad = " " * padding
-        return f'{pad}{self.typeId} {self.name}'
+        ret = ""
+        for decl in self.declarations:
+            ret += f'{pad}{decl.typeId} {decl.name}'
+        return ret
 
 class StructDeclaration(Declaration):
     ANONYMOUS_STRUCT_COUNT: int = 0
 
     def parse(self):
-        self.members: list[StructMemberDeclaration] = []
+        self.members: list[MemberInformation] = []
         self.byteSize: int = -1
         self.alignment: int = -1
 
@@ -2279,23 +2542,26 @@ class StructDeclaration(Declaration):
 
             # Must always have at least one member.
             while True:
-                decl = self.createChild(StructMemberDeclaration)
-                declAlignment = decl.typeId.getAlignment()
-                decl.offset = declAlignment * math.ceil(self.byteSize / declAlignment)
+                # This may contain multiple declarations of the same base type.
+                decls = self.createChild(MemberDeclaration).declarations
 
-                # The name of the declaration must not be repeated.
-                for mem in self.members:
-                    if mem.name == decl.name:
-                        self.raiseError(f"Duplicated member with name {decl.name}")
-                self.members.append(decl)
+                for decl in decls:
+                    declAlignment = decl.typeId.getAlignment()
+                    decl.offset = declAlignment * math.ceil(self.byteSize / declAlignment)
 
-                # The alignment of the structure must be the greatest alignment of it members.
-                if declAlignment > self.alignment:
-                    self.alignment = declAlignment
+                    # The name of the declaration must not be repeated.
+                    for mem in self.members:
+                        if mem.name == decl.name:
+                            self.raiseError(f"Duplicated member with name {decl.name}")
+                    self.members.append(decl)
 
-                # Add the size of the member plus the offset added between the current member and the
-                # previous one.
-                self.byteSize += decl.typeId.getByteSize() + (decl.offset - self.byteSize)
+                    # The alignment of the structure must be the greatest alignment of it members.
+                    if declAlignment > self.alignment:
+                        self.alignment = declAlignment
+
+                    # Add the size of the member plus the offset added between the current member and the
+                    # previous one.
+                    self.byteSize += decl.typeId.getByteSize() + (decl.offset - self.byteSize)
 
                 if self.peek().id == "}":
                     break
@@ -2320,7 +2586,7 @@ class StructDeclaration(Declaration):
 
     def membersToParamInfo(self) -> list[ParameterInformation]:
         return [
-            ParameterInformation(member.typeId, member.name, member.offset)
+            ParameterInformation(member.typeId, member.name, offset=member.offset)
             for member in self.members
         ]
 
@@ -2335,29 +2601,11 @@ class StructDeclaration(Declaration):
             ret =f'{pad}Struct({self.typeId})\n'
         return ret
 
-class UnionMemberDeclaration(AST):
-    def parse(self, *args):
-        _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
-        declarator = self.createChild(TopDeclarator)
-        info: DeclaratorInformation = declarator.process(declType)
-
-        self.typeId = info.type
-        self.name = info.name
-
-        if not self.typeId.isComplete():
-            self.raiseError("Cannot use incomplete type inside an enum declaration")
-
-        self.expect(";")
-
-    def print(self, padding: int) -> str:
-        pad = " " * padding
-        return f'{pad}{self.typeId} {self.name}'
-
 class UnionDeclaration(Declaration):
     ANONYMOUS_UNION_COUNT: int = 0
 
     def parse(self):
-        self.members: list[UnionMemberDeclaration] = []
+        self.members: list[MemberInformation] = []
         self.byteSize: int = -1
         self.alignment: int = -1
 
@@ -2420,23 +2668,26 @@ class UnionDeclaration(Declaration):
 
             # Must always have at least one member.
             while True:
-                decl = self.createChild(UnionMemberDeclaration)
-                declAlignment = decl.typeId.getAlignment()
-                declSize = decl.typeId.getByteSize()
+                # This may contain multiple declarations of the same base type.
+                decls = self.createChild(MemberDeclaration).declarations
 
-                # The name of the declaration must not be repeated.
-                for mem in self.members:
-                    if mem.name == decl.name:
-                        self.raiseError(f"Duplicated member with name {decl.name}")
-                self.members.append(decl)
+                for decl in decls:
+                    declAlignment = decl.typeId.getAlignment()
+                    declSize = decl.typeId.getByteSize()
 
-                # The alignment of the union must be the greatest alignment of it members.
-                if declAlignment > self.alignment:
-                    self.alignment = declAlignment
+                    # The name of the declaration must not be repeated.
+                    for mem in self.members:
+                        if mem.name == decl.name:
+                            self.raiseError(f"Duplicated member with name {decl.name}")
+                    self.members.append(decl)
 
-                # The size of the union is the size of the biggest member.
-                if declSize > self.byteSize:
-                    self.byteSize = declSize
+                    # The alignment of the union must be the greatest alignment of it members.
+                    if declAlignment > self.alignment:
+                        self.alignment = declAlignment
+
+                    # The size of the union is the size of the biggest member.
+                    if declSize > self.byteSize:
+                        self.byteSize = declSize
 
                 if self.peek().id == "}":
                     break
@@ -2462,7 +2713,7 @@ class UnionDeclaration(Declaration):
     def membersToParamInfo(self) -> list[ParameterInformation]:
         # Offsets in union are all 0.
         return [
-            ParameterInformation(member.typeId, member.name, 0)
+            ParameterInformation(member.typeId, member.name, offset=0)
             for member in self.members
         ]
 
@@ -2705,11 +2956,10 @@ class Exp(AST):
         return False
     
     def preconvertExpression(self) -> Exp:
-        # If self is not an array, return it normally.
         ret = self
 
-        # If an array is inputted in an expression, add an AddressOf operation beforehand. 
-        if isinstance(self.typeId, ArrayDeclaratorType):
+        # If an array or a function is input in an expression, add an AddressOf operation beforehand. 
+        if isinstance(self.typeId, (ArrayDeclaratorType, FunctionDeclaratorType)):
             # This will return pointer to array...
             ret = self.createChild(AddressOf, self)
             # In our case, we want to "decay" the array. We're not really taking the address of the
@@ -2720,13 +2970,6 @@ class Exp(AST):
         # This expression is going to be evaluated, it cannot be an incomplete type (except void).
         if ret.typeId != TypeSpecifier.VOID.toBaseType() and not ret.typeId.isComplete():
             self.raiseError(f"Incomplete type {ret.typeId} is not allowed")
-
-        # When converting from lValue to rValue the qualifiers (const, volatile) of a variable get 
-        # stripped. This does not happen for pointers!
-        if isinstance(ret.typeId, BaseDeclaratorType):
-            newDecl = ret.typeId.copy()
-            newDecl.qualifiers = TypeQualifier()
-            ret.typeId = newDecl
 
         return ret
     
@@ -2740,8 +2983,14 @@ class Exp(AST):
     def getCommonType(self, exp1: Exp, exp2: Exp) -> DeclaratorType|None:
         if isinstance(exp1.typeId, (PointerDeclaratorType, ArrayDeclaratorType)) or \
            isinstance(exp2.typeId, (PointerDeclaratorType, ArrayDeclaratorType)):
-            if exp1.typeId == exp2.typeId:
-                return exp1.typeId
+            if isinstance(exp1.typeId, (PointerDeclaratorType, ArrayDeclaratorType)) and \
+               isinstance(exp2.typeId, (PointerDeclaratorType, ArrayDeclaratorType)) and \
+               exp1.typeId.declarator.unqualified() == exp2.typeId.declarator.unqualified():
+                # Join the declarators of both expressions.
+                declTypeQualifiers = exp1.typeId.declarator.getTypeQualifiers().union(exp2.typeId.declarator.getTypeQualifiers())
+                ret = exp1.typeId.declarator.copy()
+                ret.setTypeQualifiers(declTypeQualifiers)
+                return PointerDeclaratorType(ret)
             elif exp1.isNullPointer():
                 return exp2.typeId
             elif exp2.isNullPointer():
@@ -2759,11 +3008,11 @@ class Exp(AST):
             # Arrays can be converted to pointers.
             if isinstance(exp1.typeId, ArrayDeclaratorType) and isinstance(exp2.typeId, PointerDeclaratorType) and \
                exp1.typeId.decay() == exp2.typeId:
-                return exp2.typeId
+                return exp2.typeId.unqualified()
 
             if isinstance(exp2.typeId, ArrayDeclaratorType) and isinstance(exp1.typeId, PointerDeclaratorType) and \
                exp2.typeId.decay() == exp1.typeId:
-                return exp1.typeId
+                return exp1.typeId.unqualified()
 
             return None
         elif isinstance(exp1.typeId, BaseDeclaratorType) and isinstance(exp2.typeId, BaseDeclaratorType):
@@ -3090,6 +3339,10 @@ class String(Exp):
         # Add +1 for the null terminator.
         self.typeId = ArrayDeclaratorType(TypeSpecifier.CHAR.toBaseType(), len(self.value) + 1)
 
+        # This identifier can be set if the string is used by the program. Start with .L so its 
+        # hidden.
+        self.identifier: str = self.context.mangleIdentifier(".Lstr")
+
     def staticEval(self) -> StaticEvalValue:
         # TODO: change to pointer name
         return StaticEvalValue(StaticEvalType.POINTER, self.value)
@@ -3148,16 +3401,24 @@ EXPRESSIONS
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 """
 class Variable(Exp):
-    def parse(self, variableName: str):
+    def parse(self, originalName: str):
         # This variable is inside the identifierMap, verified at _parsePrimaryExpression.
-        ctxVar = self.context.identifierMap[variableName]
+        ctxVar = self.context.identifierMap[originalName]
         
         # Get the type of variable from the identifier.
-        if ctxVar.mangledName not in self.context.variablesMap:
-            self.raiseError("Internal error")
+        if ctxVar.identifierType == IdentifierType.VARIABLE:
+            if ctxVar.mangledName not in self.context.variablesMap:
+                self.raiseError("Internal error")
 
-        self.typeId = self.context.variablesMap[ctxVar.mangledName].idType
-        self.originalIdentifier: str = variableName
+            self.typeId = self.context.variablesMap[ctxVar.mangledName].idType
+        
+        elif ctxVar.identifierType == IdentifierType.FUNCTION:
+            if ctxVar.originalName not in self.context.functionMap:
+                self.raiseError("Internal error")
+
+            self.typeId = self.context.functionMap[ctxVar.originalName].funcType
+
+        self.originalIdentifier: str = originalName
         self.identifier: str = ctxVar.mangledName
 
     def staticEval(self) -> StaticEvalValue:
@@ -3185,8 +3446,8 @@ class Cast(Exp):
         isSourcePointer = isinstance(srcType, PointerDeclaratorType)
         isCastPointer = isinstance(castType, PointerDeclaratorType)
 
-        isSourceVoidPointer = isSourcePointer and srcType.declarator.unqualify() == TypeSpecifier.VOID.toBaseType()
-        isCastVoidPointer = isCastPointer and castType.declarator.unqualify() == TypeSpecifier.VOID.toBaseType()
+        isSourceVoidPointer = isSourcePointer and srcType.declarator.unqualified() == TypeSpecifier.VOID.toBaseType()
+        isCastVoidPointer = isCastPointer and castType.declarator.unqualified() == TypeSpecifier.VOID.toBaseType()
         hasAllQualifiers = isSourcePointer and isCastPointer and (castType.declarator.getTypeQualifiers().contains(srcType.declarator.getTypeQualifiers()))
 
         toVoidPointerType = isSourcePointer and not isSourceVoidPointer and isCastVoidPointer and hasAllQualifiers
@@ -3200,7 +3461,7 @@ class Cast(Exp):
         # the type pointed to by the cast type has all the qualifiers of the type pointed to by the
         # source type.
         validPointers = isSourcePointer and isCastPointer and \
-            (srcType.declarator.unqualify() == castType.declarator.unqualify()) and \
+            (srcType.declarator.unqualified() == castType.declarator.unqualified()) and \
             hasAllQualifiers
         
         ret = bothArith or voidPointerCheck or fromNullPointer or validPointers
@@ -3211,12 +3472,12 @@ class Cast(Exp):
             self.raiseError(f"Cannot implicitly cast from ({self.inner.typeId}) to ({self.typeId})")
 
         # ISO rule C99 6.5.4.2.
-        if not self.typeId.isScalar() and self.typeId.unqualify() != TypeSpecifier.VOID.toBaseType():
+        if not self.typeId.isScalar() and self.typeId.unqualified() != TypeSpecifier.VOID.toBaseType():
             self.raiseError(f"Cannot cast from {self.inner.typeId} to {self.typeId}")
 
         # Check if the types are the same but differ on their qualifiers. In this case, the cast is 
         # always permitted.
-        if self.inner.typeId.unqualify() == self.typeId.unqualify():
+        if self.inner.typeId.unqualified() == self.typeId.unqualified():
             return
 
         # Cannot cast a decimal to a pointer.
@@ -3355,6 +3616,9 @@ class UnaryOperator(enum.Enum):
 
 class Unary(Exp):
     def parse(self, operator: UnaryOperator, inner: Exp):
+        # Add 'inner' to the children.
+        self.children.append(inner)
+
         self.unaryOperator: UnaryOperator = operator
         isLvalueAssignable = inner.isLvalueAssignable()
         self.inner: Exp = inner.preconvertExpression()
@@ -3588,7 +3852,7 @@ class Binary(Exp):
         # Subtract can operate with arithmetic types, with a pointer first and integer second, or 
         # with two pointers of the same type.
         elif op == BinaryOperator.SUBTRACT:
-            if isExp1Pointer and isExp2Pointer and exp1.typeId != exp2.typeId:
+            if isExp1Pointer and isExp2Pointer and exp1.typeId.unqualified() != exp2.typeId.unqualified():
                 self.raiseError("Both expressions must have the same pointer type")
 
             if not isExp1PointerComplete:
@@ -3608,6 +3872,9 @@ class Binary(Exp):
                 self.raiseError(f"Operand types {exp1.typeId} and {exp2.typeId} are incompatible")
 
     def parse(self, op: BinaryOperator, exp1: Exp, exp2: Exp):
+        # Add both input expressions to the children.
+        self.children.extend((exp1, exp2))
+
         isLvalueAssignable = exp1.isLvalueAssignable()
 
         self.exp1 = exp1.preconvertExpression()
@@ -3652,10 +3919,10 @@ class Binary(Exp):
 
             if self.compoundBinary:
                 # The return type of a compound operation, is the lvalue's type.
-                self.typeId = self.exp1OriginalType
+                self.typeId = self.exp1OriginalType.unqualified()
             else:
                 # x << y has type of x.
-                self.typeId = self.exp1.typeId
+                self.typeId = self.exp1.typeId.unqualified()
 
         elif self.binaryOperator == BinaryOperator.SUM:
             isExp1Pointer = isinstance(exp1.typeId, (PointerDeclaratorType, ArrayDeclaratorType))
@@ -3669,33 +3936,33 @@ class Binary(Exp):
                     self.raiseError(f"No common type of {self.exp1.typeId} and {self.exp2.typeId}")
 
                 self.castType = commonType
-                if self.exp1.typeId != commonType:
+                if self.exp1.typeId.unqualified() != commonType:
                     self.exp1 = self.createChild(Cast, commonType, self.exp1).preconvertExpression()
                     self.exp1IsCasted = True
-                if self.exp2.typeId != commonType:
+                if self.exp2.typeId.unqualified() != commonType:
                     self.exp2 = self.createChild(Cast, commonType, self.exp2).preconvertExpression()
 
                 if self.compoundBinary:
                     # The return type of a compound operation, is the lvalue's type.
-                    self.typeId = self.exp1OriginalType
+                    self.typeId = self.exp1OriginalType.unqualified()
                 else:
                     # Arithmetic expressions will return the common type.
                     self.typeId = commonType
 
             elif isExp1Pointer and not isExp2Pointer:
                 # Pointer sum: Convert exp2 to a long.
-                if self.exp2.typeId != TypeSpecifier.LONG.toBaseType():
+                if self.exp2.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
                     self.exp2 = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.exp2).preconvertExpression()
                 # The result is a pointer.
-                self.typeId = self.exp1.typeId
+                self.typeId = self.exp1.typeId.unqualified()
                 self.castType = self.typeId
                 
             elif isExp2Pointer and not isExp1Pointer:
                 # Pointer sum: Convert exp1 to a long.
-                if self.exp1.typeId != TypeSpecifier.LONG.toBaseType():
+                if self.exp1.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
                     self.exp1 = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.exp1).preconvertExpression()
                 # The result is a pointer.
-                self.typeId = self.exp2.typeId
+                self.typeId = self.exp2.typeId.unqualified()
                 self.castType = self.typeId
 
         elif self.binaryOperator == BinaryOperator.SUBTRACT:
@@ -3710,25 +3977,25 @@ class Binary(Exp):
                     self.raiseError(f"No common type of {self.exp1.typeId} and {self.exp2.typeId}")
 
                 self.castType = commonType
-                if self.exp1.typeId != commonType:
+                if self.exp1.typeId.unqualified() != commonType:
                     self.exp1 = self.createChild(Cast, commonType, self.exp1).preconvertExpression()
                     self.exp1IsCasted = True
-                if self.exp2.typeId != commonType:
+                if self.exp2.typeId.unqualified() != commonType:
                     self.exp2 = self.createChild(Cast, commonType, self.exp2).preconvertExpression()
 
                 if self.compoundBinary:
                     # The return type of a compound operation, is the lvalue's type.
-                    self.typeId = self.exp1OriginalType
+                    self.typeId = self.exp1OriginalType.unqualified()
                 else:
                     # Arithmetic expressions will return the common type.
                     self.typeId = commonType
 
             elif isExp1Pointer and not isExp2Pointer:
                 # Pointer subtraction: Convert exp2 to a long.
-                if self.exp2.typeId != TypeSpecifier.LONG.toBaseType():
+                if self.exp2.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
                     self.exp2 = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.exp2).preconvertExpression()
                 # The result is a pointer.
-                self.typeId = self.exp1.typeId
+                self.typeId = self.exp1.typeId.unqualified()
                 self.castType = self.typeId
 
             elif isExp2Pointer and isExp1Pointer:
@@ -3741,32 +4008,54 @@ class Binary(Exp):
             commonType = self.getCommonType(self.exp1, self.exp2)
             if commonType is None:
                 self.raiseError(f"No common type of {self.exp1.typeId} and {self.exp2.typeId}")
-            
+
+            if self.binaryOperator in (BinaryOperator.EQUAL, BinaryOperator.NOT_EQUAL):
+                # Section 6.5.9: Equality operators, constraints.
+                # - Both operands have real type.
+                bothArith = self.exp1.typeId.isArithmetic() and self.exp2.typeId.isArithmetic()
+                # - Both operands are pointers to qualified or unqualified versions of compatible 
+                # types. 
+                bothPointers = isinstance(self.exp1.typeId, PointerDeclaratorType) and \
+                               isinstance(self.exp2.typeId, PointerDeclaratorType) and \
+                               commonType is not None
+                # - One operand is a pointer and the other is a null pointer.
+                exp2Null = isinstance(self.exp1.typeId, PointerDeclaratorType) and \
+                           self.exp2.isNullPointer()
+                exp1Null = isinstance(self.exp2.typeId, PointerDeclaratorType) and \
+                           self.exp1.isNullPointer()
+                if not bothArith and not bothPointers and not exp2Null and not exp1Null:
+                    self.raiseError(f"Invalid expression: {self.exp1.typeId} {self.binaryOperator.value} {self.exp2.typeId}")
+
+            elif self.binaryOperator.isComparison():
+                # Section 6.5.8: Relational operators, constraints.
+                # - Both operands have real type.
+                bothArith = self.exp1.typeId.isArithmetic() and self.exp2.typeId.isArithmetic()
+                # - Both operands are pointers to qualified or unqualified versions of compatible 
+                # types. 
+                bothPointers = isinstance(self.exp1.typeId, PointerDeclaratorType) and \
+                               isinstance(self.exp2.typeId, PointerDeclaratorType) and \
+                               commonType is not None and \
+                               not self.exp1.isNullPointer() and not self.exp2.isNullPointer() and \
+                               self.exp1.typeId.declarator.unqualified() == self.exp2.typeId.declarator.unqualified()
+                if not bothArith and not bothPointers:
+                    self.raiseError(f"Invalid expression: {self.exp1.typeId} {self.binaryOperator.value} {self.exp2.typeId}")
+
             # The resulting type used when operating both terms. 
             # This field is used on compound operations in the TAC section.
             self.castType = commonType
 
             match commonType:
-                case BaseDeclaratorType():
-                    if self.exp1.typeId != commonType:
+                case BaseDeclaratorType() | PointerDeclaratorType():
+                    if self.exp1.typeId.unqualified() != commonType:
                         self.exp1 = self.createChild(Cast, commonType, self.exp1).preconvertExpression()
                         self.exp1IsCasted = True
-                    if self.exp2.typeId != commonType:
+                    if self.exp2.typeId.unqualified() != commonType:
                         self.exp2 = self.createChild(Cast, commonType, self.exp2).preconvertExpression()
-
-                case PointerDeclaratorType() | ArrayDeclaratorType():
-                    if self.binaryOperator in (BinaryOperator.EQUAL, BinaryOperator.NOT_EQUAL):
-                        # Only == and != allows implicit castings of pointers.
-                        if self.exp1.typeId != commonType:
-                            self.exp1 = self.createChild(Cast, commonType, self.exp1).preconvertExpression()
-                            self.exp1IsCasted = True
-                        if self.exp2.typeId != commonType:
-                            self.exp2 = self.createChild(Cast, commonType, self.exp2).preconvertExpression()
 
                 case _:
                     self.raiseError(f"Binary operation not supported for {commonType}")
 
-            if self.exp1.typeId != commonType or self.exp2.typeId != commonType:
+            if self.exp1.typeId.unqualified() != commonType or self.exp2.typeId.unqualified() != commonType:
                 self.raiseError(f"Invalid expression: {self.exp1.typeId} {self.binaryOperator.value} {self.exp2.typeId}")
 
             # Now, both expressions should have the same type.
@@ -3775,7 +4064,7 @@ class Binary(Exp):
                 self.typeId = BaseDeclaratorType(TypeSpecifier.INT)
             elif self.compoundBinary:
                 # The return type of a compound operation, is the lvalue's type.
-                self.typeId = self.exp1OriginalType
+                self.typeId = self.exp1OriginalType.unqualified()
             else:
                 # Arithmetic expressions will return the common type.
                 self.typeId = commonType
@@ -3878,6 +4167,9 @@ class Binary(Exp):
 
 class Assignment(Exp):
     def parse(self, exp1: Exp, exp2: Exp):
+        # Add both input expressions to the children.
+        self.children.extend((exp1, exp2))
+    
         if not exp1.isLvalueAssignable():
             self.raiseError("Left expression must be a modifiable lvalue")
 
@@ -3895,13 +4187,13 @@ class Assignment(Exp):
 
         self.exp2 = exp2.preconvertExpression()
 
-        if self.exp2.typeId != self.exp1.typeId:
+        if self.exp2.typeId.unqualified() != self.exp1.typeId.unqualified():
             # If the types aren't the same, cast exp2 to exp1's type.
             # This is an implicit cast.
             self.exp2 = self.createChild(Cast, self.exp1.typeId, self.exp2, True).preconvertExpression()
         
-        # The return type of the assignment is exp1's type.
-        self.typeId = self.exp1.typeId
+        # The return type of the assignment is exp1's unqualified type.
+        self.typeId = self.exp1.typeId.unqualified()
 
     def staticEval(self) -> StaticEvalValue:
         raise ValueError()
@@ -3916,6 +4208,9 @@ class Assignment(Exp):
     
 class TernaryConditional(Exp):
     def parse(self, condition: Exp, thenExp: Exp, elseExp: Exp):
+        # Add expressions to the children.
+        self.children.extend((condition, thenExp, elseExp))
+
         self.condition = condition.preconvertExpression()
         if not self.condition.typeId.isScalar():
             self.raiseError(f"Expected a scalar expression, received {self.condition.typeId}")
@@ -3928,12 +4223,12 @@ class TernaryConditional(Exp):
         if commonType is None:
             self.raiseError(f"No common type of {self.thenExp.typeId} and {self.elseExp.typeId}")
 
-        if self.thenExp.typeId != commonType:
+        if self.thenExp.typeId.unqualified() != commonType:
             self.thenExp = self.createChild(Cast, commonType, self.thenExp).preconvertExpression()
-        if self.elseExp.typeId != commonType:
+        if self.elseExp.typeId.unqualified() != commonType:
             self.elseExp = self.createChild(Cast, commonType, self.elseExp).preconvertExpression()
         # The return value has the same common type.
-        self.typeId = commonType
+        self.typeId = commonType.unqualified()
 
     def staticEval(self) -> StaticEvalValue:
         conditionEval = self.condition.staticEval()
@@ -3955,25 +4250,36 @@ class TernaryConditional(Exp):
         return ret
     
 class FunctionCall(Exp):
-    def parse(self, *args):
-        self.funcIdentifier = self.expect("identifier").value
+    def parse(self, funcExpression: Exp):
+        self.funcExpression = funcExpression
+        self.isIndirect = False
 
-        if self.funcIdentifier not in self.context.identifierMap:
-            self.raiseError(f"Function {self.funcIdentifier} is not declared")
+        if isinstance(self.funcExpression.typeId, FunctionDeclaratorType):
+            # Normal function.
+            funcType = self.funcExpression.typeId
+            
+            if not isinstance(self.funcExpression, Variable):
+                self.raiseError("This should be a Variable")
+
+            self.funcIdentifier = self.funcExpression.originalIdentifier
+
         else:
-            # The function could be obscured by a variable. Search in the identifier map.
-            if self.funcIdentifier not in self.context.identifierMap:
-                self.raiseError(f"Identifier {self.funcIdentifier} is not declared")
+            self.funcExpression = self.funcExpression.preconvertExpression()
+            
+            if isinstance(self.funcExpression.typeId, PointerDeclaratorType) and \
+               isinstance(self.funcExpression.typeId.declarator, FunctionDeclaratorType):
+                # Pointer to function.
+                funcType = self.funcExpression.typeId.declarator
+                self.isIndirect = True
 
-            if self.context.identifierMap[self.funcIdentifier].identifierType != IdentifierType.FUNCTION:
-                self.raiseError(f"{self.funcIdentifier} is not a function")
+            else:
+                self.raiseError(f"Expected a function or a pointer to a function, received {self.funcExpression.typeId}")
+
+        self.typeId = funcType.returnDeclarator
+        self.isFunctionVariadic = funcType.variadic
+        funcArgs = funcType.params
 
         self.expect("(")
-
-        funcCtx = self.context.functionMap[self.funcIdentifier]
-        self.typeId = funcCtx.returnType
-        self.isFunctionVariadic = funcCtx.variadic
-
         self.argumentList: list[Exp] = []
         
         if self.peek().id != ")":
@@ -3981,27 +4287,27 @@ class FunctionCall(Exp):
             while True:
                 argExp: Exp = self.createChild(Exp).preconvertExpression()
                 
-                if argumentIndex < len(funcCtx.arguments):
+                if argumentIndex < len(funcArgs):
                     # See if this argument needs a cast before being passed to the function.
-                    if argExp.typeId != funcCtx.arguments[argumentIndex].type:
+                    if argExp.typeId.unqualified() != funcArgs[argumentIndex].type:
                         argExp = self.createChild(Cast, 
-                                                  funcCtx.arguments[argumentIndex].type, 
+                                                  funcArgs[argumentIndex].type, 
                                                   argExp, True
                                                 ).preconvertExpression()
                 else:
-                    if funcCtx.variadic:
+                    if self.isFunctionVariadic:
                         # Variadic arguments get promoted:
                         # - integer types smaller than int, get promoted to int.
                         # - float gets promoted to double.
                         if argExp.typeId.isInteger():
                             argExp = argExp.checkIntegerPromotion()
-                        elif argExp.typeId == TypeSpecifier.FLOAT.toBaseType():
+                        elif argExp.typeId.unqualified() == TypeSpecifier.FLOAT.toBaseType():
                             argExp = self.createChild(Cast, 
                                                       TypeSpecifier.DOUBLE.toBaseType(), 
                                                       argExp, True
                                                     ).preconvertExpression()
                     else:
-                        self.raiseError(f"Too many arguments, expected {len(funcCtx.arguments)}")
+                        self.raiseError(f"Too many arguments, expected {len(funcArgs)}")
 
                 self.argumentList.append(argExp)
 
@@ -4014,8 +4320,8 @@ class FunctionCall(Exp):
         self.expect(")")
 
         passedArgsLen = len(self.argumentList)
-        funcDeclLen = len(funcCtx.arguments)
-        if funcCtx.variadic:
+        funcDeclLen = len(funcArgs)
+        if self.isFunctionVariadic:
             if passedArgsLen < funcDeclLen:
                 self.raiseError(f"Expected {funcDeclLen} arguments at least, received {passedArgsLen}")
         else:
@@ -4027,7 +4333,7 @@ class FunctionCall(Exp):
 
     def print(self, padding: int) -> str:
         pad = " " * padding
-        ret  = f'{pad}{self.typeId} FunctionCall: {self.funcIdentifier}(\n'
+        ret  = f'{pad}{self.typeId} FunctionCall: {self.funcExpression}(\n'
         if len(self.argumentList) > 0:
             for exp in self.argumentList:
                 ret += exp.print(padding + PADDING_INCREMENT)
@@ -4107,7 +4413,7 @@ class Subscript(Exp):
         if not self.index.typeId.isInteger():
             self.raiseError("Index must be an integer")
 
-        if self.index.typeId != TypeSpecifier.LONG.toBaseType():
+        if self.index.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
             self.index = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.index, True)
 
         # Get inner type.
@@ -4152,7 +4458,6 @@ class Dot(Exp):
            self.leftExp.typeId.baseType.name not in ("STRUCT", "UNION"):
             self.raiseError(f"Expected an struct or union, received {self.leftExp.typeId}")
 
-        self.expect(".")
         self.member: str = self.expect("identifier").value
 
         self.memberInfo: ParameterInformation|None = self.leftExp.typeId.baseType.getMember(self.member)
@@ -4203,7 +4508,6 @@ class Arrow(Exp):
            self.leftExp.typeId.declarator.baseType.name not in ("STRUCT", "UNION"):
             self.raiseError(f"Expected a pointer to struct or union, received {self.leftExp.typeId}")
 
-        self.expect("->")
         self.member = self.expect("identifier").value
 
         # Check the type.
@@ -4307,7 +4611,7 @@ class SingleInitializer(Initializer):
         
         # Store the original type. Needed for strict initializers.
         self.precastType = self.init.typeId
-        if self.init.typeId != expectedType:
+        if self.init.typeId.unqualified() != expectedType.unqualified():
             self.init = self.createChild(Cast, expectedType, self.init, True)
 
     def staticEval(self) -> list[StaticEvalValue]:

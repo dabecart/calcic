@@ -14,6 +14,7 @@ from typing import Type, TypeVar
 
 from src.parser import *
 from src.calcic_types import *
+from src.debug_info import *
 from src.global_context import globalContext
 
 T = TypeVar("T", bound="TAC")
@@ -38,6 +39,10 @@ class TAC(ABC):
 
     def createChild(self, assemblerType: Type[T], *args) -> T:
         return assemblerType(*args, parentTAC=self)
+
+    def addDebugInformation(self, astElem: AST, insts: list[TACInstruction]):
+        if globalContext.addDebugInfo:
+            self.createChild(TACDebugInfo, astElem, insts)
     
     def makeCast(self, innerDeclaratorType: DeclaratorType, innerValue: TACValue, 
                  castDeclaratorType: DeclaratorType, insts: list[TACInstruction]):
@@ -143,22 +148,14 @@ class TAC(ABC):
                 return TACBaseOperand(val, exp.typeId, insts)
             
             case String():
-                # This string is being used inside an expression. Therefore, the content of the string
-                # should be stored in the .rodata section (constants section) first, then use its value
-                # as a reference. Start with .L so its hidden.
-                constantName: str = exp.context.mangleIdentifier(".Lstr")
-
-                exp.context.constantVariablesMap[constantName] = ConstantVariableContext(
-                    name=constantName,
-                    idType=exp.typeId,
-                    initialization=exp.toConstantsList()
-                )
-
-                stringConstant = self.createChild(TACValue, True, exp.typeId, constantName)
+                stringConstant = self.createChild(TACValue, True, exp.typeId, exp.identifier)
                 return TACBaseOperand(stringConstant, exp.typeId, insts)
             
             case Variable():
-                val = self.createChild(TACValue, False, exp.typeId, exp)
+                if isinstance(exp.typeId, FunctionDeclaratorType):
+                    val = self.createChild(TACValue, True, exp.typeId, exp.originalIdentifier)
+                else:
+                    val = self.createChild(TACValue, False, exp.typeId, exp)
                 return TACBaseOperand(val, exp.typeId, insts)
 
             case Unary():
@@ -173,6 +170,7 @@ class TAC(ABC):
                             inner = self.parseTACExpression(exp.inner, insts)
     
                         # Run the Unary operation.
+                        self.addDebugInformation(exp, insts)
                         unary = self.createChild(TACUnary, exp.unaryOperator, inner.convert(), insts)
                         # Set the value of the original variable to the unary result.
                         if exp.needsIntegerPromotion:
@@ -182,6 +180,7 @@ class TAC(ABC):
                             self.makeAssignment(unary.result.valueType, inner, unary.result, insts)
                         # Return the recently operated expression.
                         return TACBaseOperand(unary.result, exp.typeId, insts)
+                    
                     elif isinstance(exp.typeId, (PointerDeclaratorType, ArrayDeclaratorType)):
                         inner = self.parseTACExpression(exp.inner, insts)
                         # Increment/decrement the pointer.
@@ -191,12 +190,14 @@ class TAC(ABC):
                         else:
                             delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "-1", self)
 
+                        self.addDebugInformation(exp, insts)
                         pointerOp = self.createChild(TACAddToPointer, inner.convert(), 
                             delta, exp.typeId.declarator.getByteSize(), preDereference, insts)
                         # Set the value of the original variable to the unary result.
                         self.makeAssignment(pointerOp.result.valueType, inner, pointerOp.result, insts)
                         # Return the recently operated expression.
                         return TACBaseOperand(pointerOp.result, exp.typeId, insts)
+
                     else:
                         raise ValueError("not implemented")
 
@@ -215,6 +216,7 @@ class TAC(ABC):
                             inner = self.makeCast(exp.originalType, preCast.convert(), TypeSpecifier.INT.toBaseType(), insts)
                             previousValue = inner.convert()
                         # Run the Unary operation.
+                        self.addDebugInformation(exp, insts)
                         unary = self.createChild(TACUnary, exp.unaryOperator, previousValue, insts)
                         # Set the value of the original variable to the unary result.
                         if exp.needsIntegerPromotion:
@@ -224,6 +226,7 @@ class TAC(ABC):
                             self.makeAssignment(unary.result.valueType, inner, unary.result, insts)
                         # Return old.
                         return TACBaseOperand(old, exp.typeId, insts)
+
                     elif isinstance(exp.typeId, (PointerDeclaratorType, ArrayDeclaratorType)):
                         inner = self.parseTACExpression(exp.inner, insts)
                         # Save the old value.
@@ -240,6 +243,9 @@ class TAC(ABC):
                             delta, exp.typeId.declarator.getByteSize(), preDereference, insts)
                         # Set the value of the original variable to the unary result.
                         self.makeAssignment(preDereference.valueType, inner, preDereference, insts)
+
+                        self.addDebugInformation(exp, insts)
+
                         # Return old.
                         return TACBaseOperand(old, exp.typeId, insts)
                     else:
@@ -247,9 +253,13 @@ class TAC(ABC):
                 else:
                     parsedExp = self.parseTACExpression(exp.inner, insts).convert()
                     unary = self.createChild(TACUnary, exp.unaryOperator, parsedExp, insts)
+
+                    self.addDebugInformation(exp, insts)
+
                     return TACBaseOperand(unary.result, exp.typeId, insts)
             
             case Binary():
+                self.addDebugInformation(exp, insts)
                 binary = TACBinary(exp, instructionsList=insts, parentTAC=self)
                 # binary.result contains the value of the binary operation.
                 toStoreValue: TACValue = binary.result
@@ -279,6 +289,9 @@ class TAC(ABC):
                 # Then assign to the left side of the assignment (which should be a variable) the 
                 # right's result.
                 lValue = self.parseTACExpression(exp.exp1, insts)
+
+                self.addDebugInformation(exp, insts)
+
                 return self.makeAssignment(exp.typeId, lValue, rValue, insts)
             
             case TernaryConditional():
@@ -288,6 +301,7 @@ class TAC(ABC):
                 
                 conditionExp: TACValue = self.parseTACExpression(exp.condition, insts).convert()
 
+                self.addDebugInformation(exp, insts)
                 self.createChild(TACJumpIfZero, conditionExp, elseLabel, insts)
                 thenResult = self.parseTACExpression(exp.thenExp, insts).convert()
                 if exp.thenExp.typeId != TypeSpecifier.VOID.toBaseType():
@@ -312,9 +326,19 @@ class TAC(ABC):
                     argValues.append(argVal)
 
                 # Call the function.
-                funcCall = self.createChild(TACFunctionCall, 
-                                            exp.funcIdentifier, exp.typeId, argValues, 
-                                            exp.isFunctionVariadic, insts)
+                if exp.isIndirect:
+                    funcBody = self.parseTACExpression(exp.funcExpression, insts).convert()
+                    funcCall = self.createChild(TACIndirectFunctionCall, 
+                                                funcBody, exp.typeId, argValues, 
+                                                exp.isFunctionVariadic, insts)
+                else:
+                    funcCall = self.createChild(TACFunctionCall, 
+                                                exp.funcIdentifier, exp.typeId, argValues, 
+                                                exp.isFunctionVariadic, insts)
+                    
+
+                self.addDebugInformation(exp, insts)
+
                 return TACBaseOperand(funcCall.result, exp.typeId, insts)
 
             case Cast():
@@ -445,12 +469,14 @@ class TAC(ABC):
                     # The return instruction returns nothing.
                     retValue = TACValue(False, TypeSpecifier.VOID.toBaseType())
 
+                self.addDebugInformation(blockItem, insts)
                 self.createChild(TACReturn, retValue, insts)
             
             case IfStatement():
                 endIfLabel: str = TACLabel.getNewLabelName()
                 conditionExp: TACValue = self.parseTACExpression(blockItem.condition, insts).convert()
 
+                self.addDebugInformation(blockItem, insts)
                 if blockItem.elseStatement is None:
                     self.createChild(TACJumpIfZero, conditionExp, endIfLabel, insts)
                     self.parseTACBlockItem(blockItem.thenStatement, insts)
@@ -477,9 +503,11 @@ class TAC(ABC):
                     self.parseTACBlockItem(innerBlock, insts)
 
             case BreakStatement():
+                self.addDebugInformation(blockItem, insts)
                 self.createChild(TACJump, f"break_{blockItem.jumpLabel}", insts)
 
             case ContinueStatement():
+                self.addDebugInformation(blockItem, insts)
                 self.createChild(TACJump, f"continue_{blockItem.jumpLabel}", insts)
 
             case WhileStatement():
@@ -510,10 +538,11 @@ class TAC(ABC):
                 continueLabel = f"continue_{blockItem.loopTag}"
                 breakLabel = f"break_{blockItem.loopTag}"
 
-                if isinstance(blockItem.init, Declaration):
-                    self.parseTACBlockItem(blockItem.init, insts)
-                elif isinstance(blockItem.init, Exp):
-                    self.parseTACExpression(blockItem.init, insts).convert()
+                for init in blockItem.init:
+                    if isinstance(init, Declaration):
+                        self.parseTACBlockItem(init, insts)
+                    elif isinstance(init, Exp):
+                        self.parseTACExpression(init, insts).convert()
 
                 self.createChild(TACLabel, startLabel, insts)
                 if blockItem.condition is not None:
@@ -530,6 +559,8 @@ class TAC(ABC):
                 self.createChild(TACLabel, breakLabel, insts)
 
             case CaseStatement():
+                self.addDebugInformation(blockItem, insts)
+
                 # Convert negative numbers so that the "-" doesn't affect the linker.
                 numberLabel = blockItem.value.constValue.replace("-", "_neg")
                 labelName = f"case_{numberLabel}_{blockItem.switchLabel}"
@@ -537,10 +568,14 @@ class TAC(ABC):
                 self.parseTACBlockItem(blockItem.statement, insts)
 
             case DefaultStatement():
+                self.addDebugInformation(blockItem, insts)
+
                 self.createChild(TACLabel, f"default_{blockItem.switchLabel}", insts)
                 self.parseTACBlockItem(blockItem.statement, insts)
 
             case SwitchStatement():
+                self.addDebugInformation(blockItem, insts)
+
                 controlVar = self.parseTACExpression(blockItem.condition, insts).convert()
                 # Generate the JumpIfValue instructions.
                 for caseSt in blockItem.caseList:
@@ -567,6 +602,8 @@ class TAC(ABC):
                 self.parseTACBlockItem(blockItem.statement, insts)
 
             case GotoStatement():
+                self.addDebugInformation(blockItem, insts)
+
                 self.createChild(TACJump, blockItem.labelName, insts)
 
             case DeclarationList():
@@ -581,6 +618,9 @@ class TAC(ABC):
 
                 if isinstance(blockItem.initialization, SingleInitializer):
                     rightResult = self.parseTACExpression(blockItem.initialization.init, insts).convert()
+
+                    self.addDebugInformation(blockItem, insts)
+
                     leftVariable = self.createChild(TACValue, False, blockItem.typeId, blockItem.identifier)
                     self.createChild(TACCopy, rightResult, leftVariable, insts)
                 elif isinstance(blockItem.initialization, CompoundInitializer):
@@ -625,6 +665,8 @@ class TAC(ABC):
                                     declareUnion(offset, subArrayType, input)
                                 else:
                                     expr = self.parseTACExpression(input.init, insts).convert()
+
+                                    self.addDebugInformation(blockItem, insts)
                                     self.createChild(TACCopyToOffset, expr, leftVariable, offset, insts)
                                 
                                 offset += offsetStep
@@ -657,6 +699,8 @@ class TAC(ABC):
                                 elif isinstance(memberInit, SingleInitializer):
                                     # Normal value inside a struct.
                                     expr = self.parseTACExpression(memberInit.init, insts).convert()
+
+                                    self.addDebugInformation(blockItem, insts)
                                     self.createChild(TACCopyToOffset, expr, leftVariable, memberOffset, insts)
                                 else:
                                     raise ValueError()
@@ -686,6 +730,8 @@ class TAC(ABC):
                                 elif isinstance(memberInit, SingleInitializer):
                                     # Normal value inside an union.
                                     expr = self.parseTACExpression(memberInit.init, insts).convert()
+
+                                    self.addDebugInformation(blockItem, insts)
                                     self.createChild(TACCopyToOffset, expr, leftVariable, baseOffset, insts)
                                 else:
                                     raise ValueError()
@@ -835,7 +881,8 @@ class TACProgram(TAC):
             if staticVar.tentative:
                 # Set to zero by default.
                 topLevelDecl = self.createChild(
-                    TACStaticVariable, staticVar.idType, staticVar.mangledName, staticVar.isGlobal, 
+                    TACStaticVariable, staticVar.idType, staticVar.mangledName, 
+                    staticVar.isGlobal, staticVar.isReadOnly,
                     [ZeroPaddingInitializer([], None, None, staticVar.idType, staticVar.idType.getByteSize())])
             elif len(staticVar.initialization) == 0:
                 # This must be an extern variable initialized somewhere else.
@@ -843,24 +890,16 @@ class TACProgram(TAC):
                 # but do not add it to the topLevel TAC list.
                 self.createChild(
                     TACStaticVariable, staticVar.idType, 
-                    staticVar.mangledName, staticVar.isGlobal, [])
-                continue
-            elif staticVar.idType.getTypeQualifiers().const:
-                # If the variable is constant, do something similar to above. 
-                self.createChild(
-                    TACStaticVariable, staticVar.idType, 
-                    staticVar.mangledName, staticVar.isGlobal, [])
-                # Add its value to the constant variables.
-                self.program.context.constantVariablesMap[staticVar.mangledName] = ConstantVariableContext(
-                    name=staticVar.mangledName,
-                    idType=staticVar.idType,
-                    initialization=staticVar.initialization
-                )
+                    staticVar.mangledName, staticVar.isGlobal, staticVar.isReadOnly, [])
                 continue
             else:
                 topLevelDecl = self.createChild(
-                    TACStaticVariable, staticVar.idType, staticVar.mangledName, 
-                    staticVar.isGlobal, staticVar.initialization)
+                    TACStaticVariable, 
+                    staticVar.idType, 
+                    staticVar.mangledName, 
+                    staticVar.isGlobal, 
+                    staticVar.isReadOnly,
+                    staticVar.initialization)
             
             self.topLevel.append(topLevelDecl)
         
@@ -878,13 +917,6 @@ class TACProgram(TAC):
         for fun in generateProcessList(self.program.topLevel):
             topLevelDecl = self.createChild(TACFunction, fun)
             self.topLevel.append(topLevelDecl)
-
-        # Finally, once all instructions have been processed, create the constants section. Push 
-        # them on top of everything as they need to be processed first on the assembly stage.
-        for const in self.program.context.constantVariablesMap.values():
-            topLevelDecl = self.createChild(
-                TACConstantVariable, const.idType, const.name, const.initialization)
-            self.topLevel.insert(0, topLevelDecl)
 
     def print(self) -> str:
         ret = ""
@@ -905,11 +937,12 @@ class TACTopLevel(TAC):
 class TACStaticVariable(TACTopLevel):
     staticVariables: dict[str, TACStaticVariable] = {}
 
-    def __init__(self, valueType: DeclaratorType, identifier: str, isGlobal: bool,
+    def __init__(self, valueType: DeclaratorType, identifier: str, isGlobal: bool, isReadOnly: bool,
                  initialization: list[Constant], parentTAC: TAC | None = None) -> None:
         self.valueType = valueType
         self.identifier = identifier
         self.isGlobal = isGlobal
+        self.isReadOnly = isReadOnly
         self.initialization = initialization
         super().__init__(parentTAC)
 
@@ -925,28 +958,6 @@ class TACStaticVariable(TACTopLevel):
         ret += f"{toprint}"
         return ret
     
-class TACConstantVariable(TACTopLevel):
-    constantVariables: dict[str, TACConstantVariable] = {}
-
-    def __init__(self, valueType: DeclaratorType, identifier: str, initialization: list[Constant], 
-                 parentTAC: TAC | None = None) -> None:
-        self.valueType = valueType
-        self.identifier = identifier
-        self.initialization = initialization
-        super().__init__(parentTAC)
-
-        # Add the static variable to the list for easy finding on the assembler stage.
-        TACConstantVariable.constantVariables[identifier] = self
-
-    def parse(self):
-        pass
-
-    def print(self) -> str:
-        ret  = f"--- ({self.valueType}) {self.identifier} ---\n"
-        toprint = ''.join([str(x) for x in self.initialization])
-        ret += f"{toprint}"
-        return ret
-
 class TACFunction(TACTopLevel):
     functions: dict[str, TACFunction] = {}
 
@@ -1020,6 +1031,10 @@ class TACInstruction(TAC):
                 return (True, copy.src)
         
         return (False, operand)
+    
+    @abstractmethod
+    def isDeadStore(self) -> bool:
+        pass
 
 class TACReturn(TACInstruction):
     def __init__(self, retValue: TACValue, 
@@ -1033,6 +1048,9 @@ class TACReturn(TACInstruction):
 
     def print(self) -> str:
         return f"Return({self.result})\n"
+
+    def isDeadStore(self) -> bool:
+        return False
 
 # Converts from int to long.
 class TACSignExtend(TACInstruction):
@@ -1050,6 +1068,14 @@ class TACSignExtend(TACInstruction):
     def print(self) -> str:
         return f"SignExtend({self.exp}, {self.result})\n"
 
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACZeroExtend(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1064,6 +1090,14 @@ class TACZeroExtend(TACInstruction):
 
     def print(self) -> str:
         return f"ZeroExtend({self.exp}, {self.result})\n"
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
 
 class TACDecimalToDecimal(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
@@ -1084,6 +1118,14 @@ class TACDecimalToDecimal(TACInstruction):
     def print(self) -> str:
         return f"DecimalToDecimal({self.exp}, {self.result})\n"
 
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACDecimalToInt(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1098,7 +1140,15 @@ class TACDecimalToInt(TACInstruction):
 
     def print(self) -> str:
         return f"DecimalToInt({self.exp}, {self.result})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACDecimalToUInt(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1114,6 +1164,14 @@ class TACDecimalToUInt(TACInstruction):
     def print(self) -> str:
         return f"DecimalToUInt({self.exp}, {self.result})\n"
     
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACIntToDecimal(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1129,6 +1187,14 @@ class TACIntToDecimal(TACInstruction):
     def print(self) -> str:
         return f"IntToDecimal({self.exp}, {self.result})\n"
     
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACUIntToDecimal(TACInstruction):
     def __init__(self, value: TACValue, castType: DeclaratorType,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1143,6 +1209,15 @@ class TACUIntToDecimal(TACInstruction):
 
     def print(self) -> str:
         return f"UIntToDecimal({self.exp}, {self.result})\n"
+
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
 
 # Converts from long to int.
 class TACTruncate(TACInstruction):
@@ -1160,6 +1235,14 @@ class TACTruncate(TACInstruction):
     def print(self) -> str:
         return f"Truncate({self.exp}, {self.result})\n"
 
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACUnary(TACInstruction):
     def __init__(self, operator: UnaryOperator, value: TACValue,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1174,7 +1257,15 @@ class TACUnary(TACInstruction):
 
     def print(self) -> str:
         return f"Unary({self.operator.name}, {self.exp}, {self.result})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACBinary(TACInstruction):
     def __init__(self, *args, 
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1357,7 +1448,16 @@ class TACBinary(TACInstruction):
 
     def print(self) -> str:
         return f"Binary({self.operator.name}, {self.exp1}, {self.exp2}, {self.result})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.exp1.valueType.getTypeQualifiers().volatile and \
+               not self.exp2.valueType.getTypeQualifiers().volatile and \
+               not self.result.valueType.getTypeQualifiers().volatile and \
+               self.result not in self.liveVariables
+
 class TACCopy(TACInstruction):
     def __init__(self, src: TACValue, dst: TACValue,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1379,6 +1479,14 @@ class TACCopy(TACInstruction):
     def print(self) -> str:
         return f"Copy({self.src}, {self.dst})\n"
     
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.src.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACGetAddress(TACInstruction):
     def __init__(self, src: TACValue, dst: TACValue,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1392,6 +1500,14 @@ class TACGetAddress(TACInstruction):
     def print(self) -> str:
         return f"GetAddress({self.src}, {self.dst})\n"
 
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.src.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACLoad(TACInstruction):
     def __init__(self, srcPointer: TACValue, dst: TACValue,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1404,7 +1520,15 @@ class TACLoad(TACInstruction):
 
     def print(self) -> str:
         return f"Load({self.src}, {self.dst})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.src.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACStore(TACInstruction):
     def __init__(self, src: TACValue, dstPointer: TACValue,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1417,6 +1541,11 @@ class TACStore(TACInstruction):
 
     def print(self) -> str:
         return f"Store({self.src}, {self.dst})\n"
+
+    def isDeadStore(self) -> bool:
+        # We don't know if the destination of the store is dear or not, so we should never delete 
+        # TACStore instructions.
+        return False
 
 class TACAddToPointer(TACInstruction):
     def __init__(self, pointer: TACValue, index: TACValue, scale: int, dst: TACValue,
@@ -1436,7 +1565,15 @@ class TACAddToPointer(TACInstruction):
 
     def print(self) -> str:
         return f"AddToPointer({self.pointer} + {self.index}*{self.scale}, {self.dst})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.pointer.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACCopyToOffset(TACInstruction):
     def __init__(self, src: TACValue, dst: TACValue, byteOffset: int,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1450,7 +1587,15 @@ class TACCopyToOffset(TACInstruction):
 
     def print(self) -> str:
         return f"CopyToOffset({self.src}, {self.dst} + {self.byteOffset})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.src.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACCopyFromOffset(TACInstruction):
     def __init__(self, src: TACValue, byteOffset: int, dst: TACValue, 
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1465,6 +1610,14 @@ class TACCopyFromOffset(TACInstruction):
     def print(self) -> str:
         return f"CopyFromOffset({self.src} + {self.byteOffset}, {self.dst})\n"
 
+    def isDeadStore(self) -> bool:
+        # If it affects a volatile variable, this instruction cannot be deleted.
+        # Do not remove instructions which modify volatile variables.
+        # If the result is not in the live variables, it is a dead store and can be deleted.
+        return not self.src.valueType.getTypeQualifiers().volatile and \
+               not self.dst.valueType.getTypeQualifiers().volatile and \
+               self.dst not in self.liveVariables
+
 class TACJump(TACInstruction):
     def __init__(self, target: str,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1476,6 +1629,9 @@ class TACJump(TACInstruction):
 
     def print(self) -> str:
         return f"Jump({self.target})\n"
+
+    def isDeadStore(self) -> bool:
+        return False
 
 class TACJumpIfValue(TACInstruction):
     def __init__(self, condition: TACValue, value: TACValue, target: str,
@@ -1491,6 +1647,9 @@ class TACJumpIfValue(TACInstruction):
     def print(self) -> str:
         return f"JumpIfValue({self.condition}, {self.value}, {self.target})\n"    
 
+    def isDeadStore(self) -> bool:
+        return False
+
 class TACJumpIfZero(TACInstruction):
     def __init__(self, condition: TACValue, target: str,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1503,7 +1662,10 @@ class TACJumpIfZero(TACInstruction):
 
     def print(self) -> str:
         return f"JumpIfZero({self.condition}, {self.target})\n"
-    
+
+    def isDeadStore(self) -> bool:
+        return False
+
 class TACJumpIfNotZero(TACInstruction):
     def __init__(self, condition: TACValue, target: str,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1516,6 +1678,9 @@ class TACJumpIfNotZero(TACInstruction):
 
     def print(self) -> str:
         return f"JumpIfNotZero({self.condition}, {self.target})\n"
+
+    def isDeadStore(self) -> bool:
+        return False
 
 class TACLabel(TACInstruction):
     LABEL_COUNT: int = 0
@@ -1537,7 +1702,10 @@ class TACLabel(TACInstruction):
         identifier: str = f"label{TACLabel.LABEL_COUNT}"
         TACLabel.LABEL_COUNT += 1
         return identifier
-    
+
+    def isDeadStore(self) -> bool:
+        return False
+
 class TACFunctionCall(TACInstruction):
     def __init__(self, identifier: str, returnType: DeclaratorType, arguments: list[TACValue], isVariadic: bool,
                  instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
@@ -1554,3 +1722,46 @@ class TACFunctionCall(TACInstruction):
     def print(self) -> str:
         argList = ', '.join([arg.print() for arg in self.arguments])
         return f"FunctionCall: {self.identifier}({argList}) -> {self.result}\n"
+    
+    def isDeadStore(self) -> bool:
+        # We cannot eliminate function calls as they may affect other parts of the code.
+        return False
+
+class TACIndirectFunctionCall(TACInstruction):
+    def __init__(self, funcAddress: TACValue, returnType: DeclaratorType, arguments: list[TACValue], 
+                 isVariadic: bool,
+                 instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
+        self.funcAddress = funcAddress
+        self.returnType = returnType
+        self.arguments = arguments
+        self.isVariadic = isVariadic
+        super().__init__(instructionsList, parentTAC)
+
+    def parse(self) -> TACValue:
+        # After the function execution, this is where the return value will be stored.
+        return TACValue(False, self.returnType)
+
+    def print(self) -> str:
+        argList = ', '.join([arg.print() for arg in self.arguments])
+        return f"IndirectFunctionCall: {self.funcAddress}({argList}) -> {self.result}\n"
+    
+    def isDeadStore(self) -> bool:
+        # We cannot eliminate function calls as they may affect other parts of the code.
+        return False
+    
+class TACDebugInfo(TACInstruction):
+    def __init__(self, sourceAST: AST,
+                 instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
+        self.loc = sourceAST.getDebugLocationInfo()
+        super().__init__(instructionsList, parentTAC)
+
+    def parse(self) -> TACValue:
+        # Dummy return.
+        return TACValue(False, TypeSpecifier.VOID.toBaseType())
+
+    def print(self) -> str:
+        return f"DebugInfo: {self.loc}"
+    
+    def isDeadStore(self) -> bool:
+        # This TAC is not processed nor optimized.
+        return False

@@ -50,6 +50,10 @@ class TACBuiltInFunction(TACInstruction):
     def anotateLiveVariables(self, liveVariables: set[TACValue], aliased: set[TACValue]):
         pass
 
+    def isDeadStore(self) -> bool:
+        # We cannot eliminate function calls as they may affect other parts of the code.
+        return False
+
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 <stdargs.h>
@@ -227,3 +231,66 @@ class TACBuiltIn_va_copy(TACBuiltInFunction):
     def anotateLiveVariables(self, liveVariables: set[TACValue], aliased: set[TACValue]):
         # Both dest and src are alive before the call to va_start.
         liveVariables |= {self.param_dest, self.param_src}
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+<stddef.h>
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+class TACBuiltIn_offsetof(TACBuiltInFunction):
+    @staticmethod
+    def fromAST(ast: BuiltIn_offsetof, insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
+        # Replace offsetof by a constant.
+        offset = TACValue(True, ast.typeId, str(ast.memberOffset))
+        return TACBaseOperand(offset, offset.valueType, insts)
+
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Custom macros.
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+class TACBuiltIn_asm(TACBuiltInFunction):
+    def __init__(self, asmAST: BuiltIn_asm, 
+                 instructionsList: list[TACInstruction], parentTAC: TAC | None = None) -> None:
+        self.asmAST = asmAST
+        super().__init__(instructionsList, parentTAC)
+        # Now create the assignments: tempValues -> outputs.
+        for output, tempVal in zip(self.asmAST.outputs, self.outValues):
+            dst = self.parseTACExpression(output.exp, self.insts)
+            self.makeAssignment(dst.processedType, dst, tempVal, self.insts)
+
+    def parse(self) -> TACValue:
+        # The output values are saved in temporary variables. After all of them have been saved, 
+        # these variables are assigned to the relative outputs.
+        self.outValues: list[TACValue] = []
+        for output in self.asmAST.outputs:
+            self.outValues.append(TACValue(False, output.exp.typeId))
+
+        # Parse the input expressions. 
+        self.inValues: list[TACValue] = []
+        for input in self.asmAST.inputs:
+            self.inValues.append(self.parseTACExpression(input.exp, self.insts).convert())
+
+        return TACValue(False, TypeSpecifier.VOID.toBaseType())
+
+    def printBuiltIn(self) -> str:
+        return f"__asm__\n"
+    
+    @staticmethod
+    def fromAST(ast: BuiltIn_asm, insts: list[TACInstruction], parent: TAC) -> TACExpressionResult:
+        func = parent.createChild(TACBuiltIn_asm, ast, insts)
+        return TACBaseOperand(func.result, ast.typeId, insts)
+
+    def anotateReachingCopies(self, copies: set[TACCopy], aliased: set[TACValue]):
+        # This will probably affect reaching copies, but we'll suppose the programmer know what is
+        # doing when including raw assembly in C code.
+        pass
+
+    def rewriteWithReachingCopies(self) -> TACInstruction|None:
+        return self
+
+    def anotateLiveVariables(self, liveVariables: set[TACValue], aliased: set[TACValue]):
+        # Input variables are alive. Output variables are killed, but they get annotated on the 
+        # assignment instructions (created at the constructor of this class).
+        liveVariables |= set(self.inValues)

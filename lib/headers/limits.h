@@ -5,7 +5,7 @@
  * types, as defined in Section 7.10 of the C99 standard.
  * 
  * This library is part of the calcic compiler, written by @dabecart. 2026.
- **************************************************************************************************/
+***************************************************************************************************/
 
 #ifndef _CALCIC_LIMITS_h
 #define _CALCIC_LIMITS_h

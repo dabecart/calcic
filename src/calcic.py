@@ -11,22 +11,16 @@ import argparse
 import subprocess
 import os
 import traceback
-import enum
 import sys
 from pathlib import Path
 
 from src import lexer, parser, TAC
 from src import TAC_optimizer as optimizer
 from src.builtin.builtin_functions import BuiltInFunctions
-from src.global_context import globalContext
+from src.global_context import globalContext, TargetArchitectures
 
 from src.x64 import builtin_types_x64
 from src.x64 import assembler_x64
-
-USE_GCC_LIBRARIES: bool = False
-
-class TargetArchitectures(enum.Enum):
-    x64 = "x64"
 
 def splitCombinedArguments(argv, initialValues: set):
     processedArgs = []
@@ -67,7 +61,12 @@ def main() -> None:
     argParser.add_argument("-l",
                            type=str,
                            help="Link a library.",
-                           dest="library")
+                           dest="library",
+                           action="append")
+    argParser.add_argument("-g",
+                           help="Generate debug information.",
+                           action="store_true",
+                           dest="debug")
     argParser.add_argument("-v", "--verbose",
                            help="Prints insightful information.",
                            action="store_true")
@@ -82,6 +81,9 @@ def main() -> None:
                            dest="architecture",
                            choices=[e.value for e in TargetArchitectures],
                            default=TargetArchitectures.x64.value)
+    argParser.add_argument("--nostdlib",
+                           help="Do not include the calcic libc to the generated program.",
+                           action="store_true")
 
     # Test options.
     argParser.add_argument('--lex',
@@ -116,6 +118,19 @@ def main() -> None:
     inputFile: str = args.input_file
     inputFileBasename: str = inputFile.rsplit(".", 1)[0]
 
+    # Libraries folder.
+    calcicFolder = Path(__file__).parent.parent.resolve()
+    libPath = calcicFolder / "lib"
+
+    # When generating an object (.o), do not add the entry point. Only do it when generating an 
+    # executable.
+    globalContext.generateExecutable = not args.generate_object
+    
+    if args.optimize > 0 and args.debug:
+        print(f"Cannot optimize program and generate debug information.", file=sys.stderr)
+        exit(1)
+    globalContext.addDebugInfo = args.debug
+
     """
     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     PREPROCESSOR
@@ -123,11 +138,9 @@ def main() -> None:
     """
     # Use the calcic standard libraries and not the GCC's.
     preprocessCommand = ["gcc", "-E", inputFile, "-o", f"{inputFileBasename}.i"]
-    if not USE_GCC_LIBRARIES:
-        # Set the lib folder as a system directory for the preprocessor.
-        calcicFolder = Path(__file__).parent.parent.resolve()
-        libPath = calcicFolder / "lib"
-        preprocessCommand += ["-nostdinc", "-isystem", str(libPath)]
+    if not globalContext.useGCCLibraries:
+        # Set the lib/headers folder as a system directory for the preprocessor.
+        preprocessCommand += ["-nostdinc", "-isystem", str(libPath / "headers")]
     
     preprocessStatus = subprocess.run(preprocessCommand)
     retCode = preprocessStatus.returncode
@@ -173,6 +186,8 @@ def main() -> None:
         match TargetArchitectures(args.architecture):
             case TargetArchitectures.x64:
                 builtin_types_x64.BuiltInTypes_x64(context)
+            case _:
+                raise ValueError()
         
         # Parse the program.
         program = parser.Program(tokens, context)
@@ -250,9 +265,9 @@ def main() -> None:
         match TargetArchitectures(args.architecture):
             case TargetArchitectures.x64:
                 assemblyProgram = assembler_x64.AssemblerProgram(tacProgram)
-        
-        # if args.verbose:
-        #     print(f"Assembler:\n{assemblyProgram}")
+            case _:
+                raise ValueError()
+            
     except Exception as e:
         print(f"Assembler exception:\n{e}", file=sys.stderr)
         if args.verbose:
@@ -291,12 +306,23 @@ def main() -> None:
         exeOutput = args.output
 
     assemblyCommand: list[str] = ["gcc", f"{inputFileBasename}.s", "-o", exeOutput]
+
+    if not args.nostdlib and globalContext.useCalcicSTDLibraries:
+        # Include the calcic standard libraries.
+        libBuildObject: str = str(libPath / "calcic_libc.o")
+        if not os.path.exists(libBuildObject):
+            raise ValueError(f"Expected file: {libBuildObject}. Please, build the calcic libraries.")
+        assemblyCommand.insert(1, libBuildObject)
+
     if args.generate_object:
         assemblyCommand.append("-c")
     if args.library:
         for lib in args.library:
             assemblyCommand.append("-l")
             assemblyCommand.append(lib)
+    if not globalContext.useGCCLibraries:
+        assemblyCommand.append("-nostdlib")
+        assemblyCommand.append("-fno-builtin")
             
     assemblyStatus = subprocess.run(assemblyCommand)
     retCode = assemblyStatus.returncode

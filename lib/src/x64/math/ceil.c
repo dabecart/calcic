@@ -1,0 +1,23 @@
+/***************************************************************************************************
+ * ceil.c
+ * 
+ * This function is part of the <math.h> standard library. Optimized for the x64 architecture, using 
+ * SSE4.1 instructions.
+ * 
+ * This library is part of the calcic compiler, written by @dabecart. 2026.
+***************************************************************************************************/
+
+#include <math.h>
+
+double ceil(double x) {
+    double result;
+    
+    __asm__ ("\t"
+        "roundsd   $2, %%xmm0, %%xmm0\n"    // Mode 2: Round towards +inf
+
+        : "r:XMM0" (result)
+        : "r:XMM0" (x)
+    );
+
+    return result;
+}

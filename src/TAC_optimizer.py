@@ -363,14 +363,16 @@ class ControlFlowNode:
                     # instruction is to transfer data between types and this would create two 
                     # separate variables.
                     # char and signed char are different types in the parser, but not here.
+                    # Do not pass reaching copies if any of the two operands are volatile.
                     sameTypes = inst.src.valueType == inst.dst.valueType
                     bothPointers = isinstance(inst.src.valueType, PointerDeclaratorType) and isinstance(inst.dst.valueType, PointerDeclaratorType)
                     charTuple = (TypeSpecifier.CHAR.toBaseType(), TypeSpecifier.SIGNED_CHAR.toBaseType())
                     bothChars = inst.src.valueType in charTuple and inst.dst.valueType in charTuple
-                    if sameTypes or bothPointers or bothChars:
+                    anyVolatile = inst.src.valueType.getTypeQualifiers().volatile or inst.dst.valueType.getTypeQualifiers().volatile
+                    if (sameTypes or bothPointers or bothChars) and not anyVolatile:
                         reachingCopies.add(inst)
                 
-                case TACFunctionCall():
+                case TACFunctionCall() | TACIndirectFunctionCall():
                     # Instead of analyzing the behavior of the function being called and how it 
                     # affects the reaching copies of aliased variables, whenever a function call is 
                     # made, all reaching copies related with aliased variables will get killed.
@@ -409,7 +411,8 @@ class ControlFlowNode:
                     reachingCopies -= copiesToRemove
 
                 case TACReturn() | TACLabel() | \
-                     TACJump() | TACJumpIfZero() | TACJumpIfNotZero() | TACJumpIfValue():
+                     TACJump() | TACJumpIfZero() | TACJumpIfNotZero() | TACJumpIfValue() | \
+                     TACDebugInfo():
                     continue
 
                 case TACBuiltInFunction():
@@ -469,7 +472,22 @@ class ControlFlowNode:
                     ret = TACFunctionCall(inst.identifier, inst.returnType, newArguments, inst.isVariadic, [])
                     ret.result = inst.result
                     return ret
+
+            case TACIndirectFunctionCall():
+                isReplaceable, newFuncAddrs = inst.replaceOperand(inst.funcAddress)
+
+                newArguments: list[TACValue] = []
+                for arg in inst.arguments:
+                    isArgumentReplaceable, newArgument = inst.replaceOperand(arg)
+                    
+                    isReplaceable = isReplaceable or isArgumentReplaceable
+                    newArguments.append(newArgument)
                 
+                if isReplaceable:
+                    ret = TACIndirectFunctionCall(newFuncAddrs, inst.returnType, newArguments, inst.isVariadic, [])
+                    ret.result = inst.result
+                    return ret
+
             case TACJumpIfZero() | TACJumpIfNotZero():
                 isReplaceable, newCondition = inst.replaceOperand(inst.condition)
                 if isReplaceable:
@@ -513,7 +531,7 @@ class ControlFlowNode:
                 if isReplaceable:
                     return TACCopyFromOffset(newSrc, inst.byteOffset, inst.dst, [])
 
-            case TACJump() | TACLabel() | TACGetAddress():
+            case TACJump() | TACLabel() | TACGetAddress() | TACDebugInfo():
                 # TACGetAddress uses the address of the source and not the value; therefore, the
                 # source cannot be substituted.
                 pass
@@ -646,7 +664,21 @@ class ControlFlowNode:
                     # as they may be needed inside.
                     liveVariables |= aliasedVariables
 
-                case TACLabel() | TACJump():
+                case TACIndirectFunctionCall():
+                    if inst.result in liveVariables:
+                        liveVariables.remove(inst.result)
+
+                    for arg in inst.arguments:
+                        if not arg.isConstant:
+                            liveVariables.add(arg)
+
+                    # We'll suppose that all aliased variables will be live before a function call,
+                    # as they may be needed inside.
+                    liveVariables |= aliasedVariables
+                    # The function address must also be alive.
+                    liveVariables.add(inst.funcAddress)
+
+                case TACLabel() | TACJump() | TACDebugInfo():
                     continue
 
                 case TACBuiltInFunction():
@@ -657,37 +689,12 @@ class ControlFlowNode:
         
         self.liveVariables = liveVariables
 
-    def _isDeadStore(self, inst: TACInstruction) -> bool:
-        match inst:
-            case TACFunctionCall() | TACBuiltInFunction():
-                # We cannot eliminate function calls as they may affect other parts of the code.
-                return False
-            
-            case TACStore():
-                # We don't know if the destination of the store is dear or not, so we should never
-                # delete TACStore instructions.
-                return False
-            
-            case TACUnary() | TACBinary() | TACCopy() | \
-                 TACSignExtend() | TACZeroExtend() |  TACTruncate() | \
-                 TACDecimalToDecimal() | TACDecimalToInt() | TACDecimalToUInt() | \
-                 TACIntToDecimal() | TACUIntToDecimal() | TACGetAddress() | \
-                 TACLoad() | TACAddToPointer() | TACCopyToOffset() | TACCopyFromOffset():
-                # If the result is not in the live variables, it is a dead store and can be deleted.
-                return inst.result not in inst.liveVariables
-                
-            case TACJump() | TACJumpIfValue() | TACJumpIfZero() | TACJumpIfValue() | \
-                TACJumpIfNotZero() | TACLabel() | TACReturn():
-                return False
-
-        raise ValueError(f"Invalid check for dead store in instruction {type(inst)}")
-
     def applyLiveVariables(self):
         # If an instruction is a dead store, remove it.
         newInstructions = [
             inst
             for inst in self.instructions
-            if not self._isDeadStore(inst)
+            if not inst.isDeadStore()
         ]
         self.instructions = newInstructions
 
