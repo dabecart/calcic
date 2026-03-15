@@ -12,6 +12,7 @@ import enum
 
 from src.calcic_types import *
 from src.builtin.builtin_types import BuiltInTypes
+from src.debug_info import *
 
 class TargetArchitectures(enum.Enum):
     x64 = "x64"
@@ -32,6 +33,7 @@ class GlobalContext:
 
     # Debug information.
     addDebugInfo: bool                                      = False
+    debugInfo: ProgramDebugInfo                             = field(default_factory=lambda: ProgramDebugInfo())
 
 globalContext = GlobalContext()
 

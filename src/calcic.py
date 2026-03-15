@@ -18,6 +18,7 @@ from src import lexer, parser, TAC
 from src import TAC_optimizer as optimizer
 from src.builtin.builtin_functions import BuiltInFunctions
 from src.global_context import globalContext, TargetArchitectures
+from src.debug_info import *
 
 from src.x64 import builtin_types_x64
 from src.x64 import assembler_x64
@@ -129,8 +130,14 @@ def main() -> None:
     if args.optimize > 0 and args.debug:
         print(f"Cannot optimize program and generate debug information.", file=sys.stderr)
         exit(1)
+    
     globalContext.addDebugInfo = args.debug
-
+    if globalContext.addDebugInfo:
+        globalContext.debugInfo = ProgramDebugInfo(
+            file=inputFile,
+            compilationDirectory=os.getcwd(),
+        )
+        
     """
     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     PREPROCESSOR

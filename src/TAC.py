@@ -615,6 +615,23 @@ class TAC(ABC):
                 # top level of the program).
                 if blockItem.identifier in blockItem.context.staticVariablesMap:
                     return
+                
+                # Add the variable declaration to the debug information.
+                firstVarDeclTok = blockItem.getOpeningToken()
+                if firstVarDeclTok is None:
+                    raise ValueError()
+                
+                varDebugInfo = VariableDebugInformation(
+                    name=blockItem.originalIdentifier,
+                    file=firstVarDeclTok.file,
+                    declLine=firstVarDeclTok.line,
+                    declCol=firstVarDeclTok.col,
+                    idType=blockItem.typeId,
+
+                    mangledIdentifier=blockItem.identifier,
+                    memoryLocation=0
+                )
+                globalContext.debugInfo.subprocesses[-1].innerVariables.append(varDebugInfo)
 
                 if isinstance(blockItem.initialization, SingleInitializer):
                     rightResult = self.parseTACExpression(blockItem.initialization.init, insts).convert()
@@ -978,6 +995,19 @@ class TACFunction(TACTopLevel):
         # Convert the function's body into a list of instructions.
         if self.funDecl.body is None:
             raise ValueError("Unexpected None in a body function")
+
+        # This starts a new subprocess.
+        firstFunTok = self.funDecl.getOpeningToken()
+        if firstFunTok is None:
+            raise ValueError()
+        subprocessInfo = SubprocessDebugInfo(
+            name=self.funDecl.identifier,
+            file=firstFunTok.file,
+            declLine=firstFunTok.line,
+            declCol=firstFunTok.col,
+            returnType=self.funDecl.returnType
+        )
+        globalContext.debugInfo.subprocesses.append(subprocessInfo)
 
         for block in self.funDecl.body:
             self.parseTACBlockItem(block, self.instructions)

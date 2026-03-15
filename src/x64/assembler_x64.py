@@ -94,7 +94,21 @@ class AssemblyAST(ABC):
                 return PseudoMemory(AssemblyType.fromTAC(tacValue.valueType), tacValue.print(), offset, self)
             
             return Pseudo(tacValue, self)
-        
+
+    def convertFromPseudo(self, var) -> Memory|Data: # var is an AssemblerOperand
+        if isinstance(var, Pseudo):
+            if var.name in TACStaticVariable.staticVariables:
+                return Data(var.assemblyType, var.name, 0, var.parent)
+            else:
+                return Memory.convertToStackVariable(var)
+        elif isinstance(var, PseudoMemory):
+            if var.name in TACStaticVariable.staticVariables:
+                return Data(var.assemblyType, var.name, var.offset, var.parent)
+            else:
+                return Memory.convertToStackMemory(var)
+
+        return var
+
     def copyBytes(self, src: AssemblerOperand, dst: AssemblerOperand, asmbType: AssemblyType) -> list[AssemblerInstruction]:
         # Basic MOV instruction.
         if not isinstance(src, (Memory, PseudoMemory)) or not isinstance(dst, (Memory, PseudoMemory)):
@@ -196,8 +210,6 @@ class AssemblerProgram(AssemblyAST):
     def __init__(self, program: TACProgram, parentAST: AssemblyAST | None = None) -> None:
         self.program = program
         super().__init__(parentAST)
-        self.secondPass()
-        self.thirdPass()
 
     def firstPass(self):
         self.programDefs: list[AssemblyAST] = []
@@ -230,6 +242,10 @@ class AssemblerProgram(AssemblyAST):
 
                 case _:
                     raise ValueError(f"Invalid type {topLevel} in top level instructions")
+
+        self.debugSection: DebugSection|None = None
+        if globalContext.addDebugInfo:
+            self.debugSection = DebugSection(self)
 
     def secondPass(self):
         pass
@@ -271,6 +287,10 @@ _start:
                 ret += f"\t.globl {constant.identifier}\n"
             ret += constant.emitCode() + "\n"
         ret += '\t.section .note.GNU-stack,"",@progbits\n'
+
+        if self.debugSection is not None:
+            ret += self.debugSection.emitCode()
+
         return ret
 
     def print(self) -> str:
@@ -1740,20 +1760,6 @@ class AssemblerInstruction(AssemblyAST):
     def print(self) -> str:
         pass
 
-    def convertFromPseudo(self, var): # var is an AssemblerOperand
-        if isinstance(var, Pseudo):
-            if var.name in TACStaticVariable.staticVariables:
-                return Data(var.assemblyType, var.name, 0, var.parent)
-            else:
-                return Memory.convertToStackVariable(var)
-        elif isinstance(var, PseudoMemory):
-            if var.name in TACStaticVariable.staticVariables:
-                return Data(var.assemblyType, var.name, var.offset, var.parent)
-            else:
-                return Memory.convertToStackMemory(var)
-
-        return var
-
 class MOV(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, src: AssemblerOperand, dst: AssemblerOperand,
                  parentAST: AssemblyAST | None = None) -> None:
@@ -2719,7 +2725,7 @@ class CODE(AssemblerInstruction):
 
     def print(self) -> str:
         return f"\n# __asm__\n{self.asmbCode}"
-
+    
 """
 OPERANDS
 """
@@ -3043,3 +3049,31 @@ class Indexed(AssemblerOperand):
 
     def print(self) -> str:
         return f"Indexed({self.base}, {self.index}, {self.offset})"
+
+"""
+DEBUG INFORMATION
+"""
+class DebugSection(AssemblyAST):
+    def firstPass(self):
+        # All variables have been converted to memory locations. Get their offsets in the stack.
+        for subp in globalContext.debugInfo.subprocesses:
+            for var in subp.innerVariables:
+                tacVal = TACValue(False, var.idType, var.mangledIdentifier)
+                asmbPseudo = self.fromTACValue(tacVal)
+                asmbVal = self.convertFromPseudo(asmbPseudo)
+                if isinstance(asmbVal, Memory):
+                    var.memoryLocation = asmbVal.offset
+                else:
+                    raise ValueError("Cannot get memory offset for debug information")
+
+    def secondPass(self):
+        pass
+
+    def thirdPass(self):
+        pass
+
+    def emitCode(self) -> str:
+        return ""
+
+    def print(self) -> str:
+        return f"DebugInformation\n"
