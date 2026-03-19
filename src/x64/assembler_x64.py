@@ -3056,7 +3056,7 @@ DEBUG INFORMATION
 class DebugSection(AssemblyAST):
     def firstPass(self):
         # All variables have been converted to memory locations. Get their offsets in the stack.
-        for subp in globalContext.debugInfo.subprocesses:
+        for subp in debugInfo.subprograms:
             for var in subp.innerVariables:
                 tacVal = TACValue(False, var.idType, var.mangledIdentifier)
                 asmbPseudo = self.fromTACValue(tacVal)

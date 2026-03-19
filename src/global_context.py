@@ -31,9 +31,11 @@ class GlobalContext:
     isBuiltInFunctionByClass: Callable                      = lambda *args, **kwargs: None
     parseTACBuiltInFunction: Callable                       = lambda *args, **kwargs: None
 
+    # Architecture values.
+    ADDRS_SIZE: int                                         = 8
+
     # Debug information.
     addDebugInfo: bool                                      = False
-    debugInfo: ProgramDebugInfo                             = field(default_factory=lambda: ProgramDebugInfo())
 
 globalContext = GlobalContext()
 

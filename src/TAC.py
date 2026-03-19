@@ -631,7 +631,7 @@ class TAC(ABC):
                     mangledIdentifier=blockItem.identifier,
                     memoryLocation=0
                 )
-                globalContext.debugInfo.subprocesses[-1].innerVariables.append(varDebugInfo)
+                debugInfo.subprograms[-1].innerVariables.append(varDebugInfo)
 
                 if isinstance(blockItem.initialization, SingleInitializer):
                     rightResult = self.parseTACExpression(blockItem.initialization.init, insts).convert()
@@ -1000,14 +1000,15 @@ class TACFunction(TACTopLevel):
         firstFunTok = self.funDecl.getOpeningToken()
         if firstFunTok is None:
             raise ValueError()
-        subprocessInfo = SubprocessDebugInfo(
+        subprocessInfo = SubprogramDebugInfo(
             name=self.funDecl.identifier,
             file=firstFunTok.file,
             declLine=firstFunTok.line,
             declCol=firstFunTok.col,
-            returnType=self.funDecl.returnType
+            returnType=self.funDecl.returnType,
+            isGlobal=self.funDecl.isGlobal
         )
-        globalContext.debugInfo.subprocesses.append(subprocessInfo)
+        debugInfo.subprograms.append(subprocessInfo)
 
         for block in self.funDecl.body:
             self.parseTACBlockItem(block, self.instructions)

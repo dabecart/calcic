@@ -133,10 +133,8 @@ def main() -> None:
     
     globalContext.addDebugInfo = args.debug
     if globalContext.addDebugInfo:
-        globalContext.debugInfo = ProgramDebugInfo(
-            file=inputFile,
-            compilationDirectory=os.getcwd(),
-        )
+        debugInfo.file = inputFile
+        debugInfo.compilationDirectory = os.getcwd()
         
     """
     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
