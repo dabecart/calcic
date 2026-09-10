@@ -21,6 +21,9 @@ from src.global_context import globalContext, TargetArchitectures
 
 from src.x64 import builtin_types_x64
 from src.x64 import assembler_x64
+from src.calci32 import builtin_types_calci32
+from src.calci32 import assembler_calci32
+import src.calcic_types
 
 def splitCombinedArguments(argv, initialValues: set):
     processedArgs = []
@@ -76,7 +79,7 @@ def main() -> None:
                            choices=range(1, optimizer.MAX_ITERATION_STEPS + 1), 
                            metavar="ITERS",
                            nargs='?', const=optimizer.MAX_ITERATION_STEPS, default=0)
-    argParser.add_argument("-march",
+    argParser.add_argument("-m", "--march",
                            help="Select the target architecture.",
                            dest="architecture",
                            choices=[e.value for e in TargetArchitectures],
@@ -122,6 +125,10 @@ def main() -> None:
     calcicFolder = Path(__file__).parent.parent.resolve()
     libPath = calcicFolder / "lib"
 
+    # Set the architecture of the global context.
+    arch = TargetArchitectures(args.architecture)
+    globalContext.setArchitecture(arch)
+
     # When generating an object (.o), do not add the entry point. Only do it when generating an 
     # executable.
     globalContext.generateExecutable = not args.generate_object
@@ -130,6 +137,8 @@ def main() -> None:
         print(f"Cannot optimize program and generate debug information.", file=sys.stderr)
         exit(1)
     globalContext.addDebugInfo = args.debug
+
+    src.calcic_types.CALCIC_ADDRS_LEN = globalContext.addressByteLen
 
     """
     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -183,9 +192,11 @@ def main() -> None:
         context = parser.Context()
         
         # Add built-in types to the context before parsing.
-        match TargetArchitectures(args.architecture):
+        match arch:
             case TargetArchitectures.x64:
                 builtin_types_x64.BuiltInTypes_x64(context)
+            case TargetArchitectures.calci32:
+                builtin_types_calci32.BuiltInTypes_calci32(context)
             case _:
                 raise ValueError()
         
@@ -262,11 +273,13 @@ def main() -> None:
     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     """
     try:
-        match TargetArchitectures(args.architecture):
+        match arch:
             case TargetArchitectures.x64:
                 assemblyProgram = assembler_x64.AssemblerProgram(tacProgram)
+            case TargetArchitectures.calci32:
+                assemblyProgram = assembler_calci32.AssemblerProgram(tacProgram)
             case _:
-                raise ValueError()
+                raise ValueError("Invalid architecture")
             
     except Exception as e:
         print(f"Assembler exception:\n{e}", file=sys.stderr)
@@ -305,26 +318,26 @@ def main() -> None:
     else:
         exeOutput = args.output
 
-    assemblyCommand: list[str] = ["gcc", f"{inputFileBasename}.s", "-o", exeOutput]
+    assemblerCommand: list[str] = [globalContext.linkerRoute, f"{inputFileBasename}.s", "-o", exeOutput]
 
     if not args.nostdlib and globalContext.useCalcicSTDLibraries:
         # Include the calcic standard libraries.
         libBuildObject: str = str(libPath / "calcic_libc.o")
         if not os.path.exists(libBuildObject):
             raise ValueError(f"Expected file: {libBuildObject}. Please, build the calcic libraries.")
-        assemblyCommand.insert(1, libBuildObject)
+        assemblerCommand.insert(1, libBuildObject)
 
     if args.generate_object:
-        assemblyCommand.append("-c")
+        assemblerCommand.append("-c")
     if args.library:
         for lib in args.library:
-            assemblyCommand.append("-l")
-            assemblyCommand.append(lib)
+            assemblerCommand.append("-l")
+            assemblerCommand.append(lib)
     if not globalContext.useGCCLibraries:
-        assemblyCommand.append("-nostdlib")
-        assemblyCommand.append("-fno-builtin")
+        assemblerCommand.append("-nostdlib")
+        assemblerCommand.append("-fno-builtin")
             
-    assemblyStatus = subprocess.run(assemblyCommand)
+    assemblyStatus = subprocess.run(assemblerCommand)
     retCode = assemblyStatus.returncode
     if retCode != 0:
         exit(retCode)

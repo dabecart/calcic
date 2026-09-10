@@ -39,10 +39,10 @@ class BuiltInTypes_x64:
         byteSize = 24
         alignment = 8
         members = [
-            ParameterInformation(TypeSpecifier.UINT.toBaseType(), "gp_offset", 0),
-            ParameterInformation(TypeSpecifier.UINT.toBaseType(), "fp_offset", 4),
-            ParameterInformation(PointerDeclaratorType(TypeSpecifier.VOID.toBaseType()), 'overflow_arg_area', 8),
-            ParameterInformation(PointerDeclaratorType(TypeSpecifier.VOID.toBaseType()), 'reg_save_area', 16)
+            ParameterInformation(TypeSpecifier.UINT.toBaseType(), "gp_offset", offset=0),
+            ParameterInformation(TypeSpecifier.UINT.toBaseType(), "fp_offset", offset=4),
+            ParameterInformation(PointerDeclaratorType(TypeSpecifier.VOID.toBaseType()), 'overflow_arg_area', offset=8),
+            ParameterInformation(PointerDeclaratorType(TypeSpecifier.VOID.toBaseType()), 'reg_save_area', offset=16)
         ]
         t = TypeSpecifier.STRUCT(originalIdentifier, mangledIdentifier, byteSize, alignment, members)
         self.context.addStruct(originalIdentifier, mangledIdentifier, t)

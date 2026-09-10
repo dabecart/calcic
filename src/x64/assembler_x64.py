@@ -181,7 +181,7 @@ class AssemblyAST(ABC):
 
             # Move to the LSB of the register.
             instList.append(MOV(AssemblyType.BYTE, Register(AssemblyType.BYTE, reg), dstCopy))
-            # Shift it to the left (except for the last byte of src).
+            # Shift it to the right (except for the last byte of src).
             if offset < byteCount - 1:
                 instList.append(
                     BINARY(AssemblyType.QUADWORD, 
@@ -495,6 +495,8 @@ class AssemblerStaticConstant(AssemblyAST):
 class AssemblerFunction(AssemblyAST):
     def __init__(self, function: TACFunction, parentAST: AssemblyAST | None = None) -> None:
         self.function = function
+
+        self.identifier: str = self.function.identifier
         self.instructions: list[AssemblerInstruction] = []
         super().__init__(parentAST)
         self.secondPass()
@@ -634,8 +636,6 @@ class AssemblerFunction(AssemblyAST):
     def firstPass(self):
         INT_REG_ORDER = [REG.DI, REG.SI, REG.DX, REG.CX, REG.R8, REG.R9]
         DOUBLE_REG_ORDER = [REG.XMM0, REG.XMM1, REG.XMM2, REG.XMM3, REG.XMM4, REG.XMM5, REG.XMM6, REG.XMM7]
-
-        self.identifier: str = self.function.identifier
 
         # Is the return value passed from the stack?
         self.returnInStack = \
@@ -1716,6 +1716,7 @@ class AssemblerFunction(AssemblyAST):
         for inst in self.instructions:
             ret += inst.print()
         return ret
+    
 """
 INSTRUCTIONS
 """

@@ -15,6 +15,9 @@ import struct
 import math
 from typing import TypeVar
 
+# Set from the global context inside calcic.py.
+CALCIC_ADDRS_LEN:   int = 8
+
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TYPES
@@ -163,12 +166,8 @@ class TypeSpecifier:
         return None
 
     def isSignedInt(self) -> bool:
-        match self:
-            case TypeSpecifier.CHAR | TypeSpecifier.SIGNED_CHAR | \
-                 TypeSpecifier.SHORT | TypeSpecifier.INT | TypeSpecifier.LONG:      
-                return True
-            case _:
-                return False
+        return self in (TypeSpecifier.CHAR, TypeSpecifier.SIGNED_CHAR, 
+                        TypeSpecifier.SHORT, TypeSpecifier.INT, TypeSpecifier.LONG)
             
     def isInteger(self) -> bool:
         return self in (TypeSpecifier.CHAR, TypeSpecifier.UCHAR, TypeSpecifier.SIGNED_CHAR,
@@ -316,8 +315,7 @@ class DeclaratorType(ABC):
         if isinstance(self, BaseDeclaratorType):
             return self.baseType.getByteSize()
         elif isinstance(self, PointerDeclaratorType):
-            # TODO: For 64 bit systems...
-            return 8
+            return CALCIC_ADDRS_LEN
         elif isinstance(self, ArrayDeclaratorType):
             return self.declarator.getByteSize() * self.size
 
@@ -327,8 +325,7 @@ class DeclaratorType(ABC):
         if isinstance(self, BaseDeclaratorType):
             return self.baseType.getAlignment()
         elif isinstance(self, PointerDeclaratorType):
-            # TODO: For 64 bit systems...
-            return 8
+            return CALCIC_ADDRS_LEN
         elif isinstance(self, ArrayDeclaratorType):
             # ABI says that for arrays bigger or equal to 16 bytes, the alignment is 16. 
             # return 16 if self.getByteSize() >= 16 else self.declarator.getAlignment()
@@ -759,8 +756,12 @@ class StaticEvaluation:
             inputBaseType = tinput.baseType
         elif isinstance(tinput, PointerDeclaratorType) and int(v1) == 0:
             # This is a null pointer, which can be constant folded.
-            # TODO: this is only for 64 bit systems.
-            inputBaseType = TypeSpecifier.ULONG
+            if CALCIC_ADDRS_LEN == 8:
+                inputBaseType = TypeSpecifier.ULONG
+            elif CALCIC_ADDRS_LEN == 4:
+                inputBaseType = TypeSpecifier.UINT
+            else:
+                raise ValueError()
         else:
             raise ValueError(f"Invalid input declarator {tinput} in static evaluation")
         
