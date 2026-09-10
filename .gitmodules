@@ -1,0 +1,3 @@
+[submodule "linker/calcil"]
+	path = linker/calcil
+	url = https://github.com/dabecart/calcil.git
