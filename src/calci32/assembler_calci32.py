@@ -377,8 +377,8 @@ class AssemblerStaticConstant(AssemblyAST):
                all(a == b for a,b in zip(initializationList, prevConst.initialization)):
                 return prevConst.copy()
         
-        # Start with .L as it is hidden.
-        identifier: str = f".Lconst{len(AssemblerStaticConstant.CONSTANTS_MAP)}"
+        # Start with L as it is hidden.
+        identifier: str = f"Lconst{len(AssemblerStaticConstant.CONSTANTS_MAP)}"
         # By default the alignment is calculated from the type.
         if alignment is None:
             alignment = asmbType.alignment
@@ -692,7 +692,7 @@ class AssemblerFunction(AssemblyAST):
                     exp: AssemblerOperand = self.fromTACValue(inst.exp)
                     dest: AssemblerOperand = self.fromTACValue(inst.result)
 
-                    # Move exp to OP1.
+                    # Move exp to OP1. None of the operations below change OP1.
                     self.createInst(MOVE, exp.assemblyType, exp, Register(exp.assemblyType, REG.OP1))
 
                     match inst.operator:
@@ -704,12 +704,7 @@ class AssemblerFunction(AssemblyAST):
 
                         case UnaryOperator.NEGATION:
                             if inst.result.valueType.isDecimal():
-                                # Flip the sign bit by using an XOR operation.
-                                negZero = AssemblerStaticConstant.newSimpleConstant(
-                                    TypeSpecifier.FLOAT.toBaseType(), "-0.0", False, 4)
-                                negZeroData = Data(AssemblyType.LONGWORD, negZero.identifier, 0, self)
-                                self.createInst(MOVE, negZeroData.assemblyType, negZeroData, Register(negZeroData.assemblyType, REG.OP2))
-                                self.createInst(ALU, ALUOP.XOR, dest.assemblyType, dest)
+                                raise ValueError()
 
                             else:
                                 # Use the negate ALU operation.
@@ -735,10 +730,12 @@ class AssemblerFunction(AssemblyAST):
                     exp2: AssemblerOperand = self.fromTACValue(inst.exp2)
                     dest: AssemblerOperand = self.fromTACValue(inst.result)
 
-                    # Move exp1 to OP1.
-                    self.createInst(MOVE, exp1.assemblyType, exp1, Register(exp1.assemblyType, REG.OP1))
+                    # Move exp1 to R2. Do this as the operations below would surely overwrite OP1.
+                    self.createInst(MOVE, exp1.assemblyType, exp1, Register(exp1.assemblyType, REG.R2))
                     # Move exp2 to OP2.
                     self.createInst(MOVE, exp2.assemblyType, exp2, Register(exp2.assemblyType, REG.OP2))
+                    # Move R2 to OP1.
+                    self.createInst(MOVE, exp1.assemblyType, Register(exp1.assemblyType, REG.R2), Register(exp1.assemblyType, REG.OP1))
 
                     match inst.operator:
                         case BinaryOperator.MODULUS:
@@ -776,10 +773,12 @@ class AssemblerFunction(AssemblyAST):
                     cond: AssemblerOperand = self.fromTACValue(inst.condition)
                     val: AssemblerOperand = self.fromTACValue(inst.value)
 
-                    # Move condition to OP1.
-                    self.createInst(MOVE, cond.assemblyType, cond, Register(cond.assemblyType, REG.OP1))
+                    # Move condition to R2.
+                    self.createInst(MOVE, cond.assemblyType, cond, Register(cond.assemblyType, REG.R2))
                     # Move value to OP2.
                     self.createInst(MOVE, val.assemblyType, val, Register(val.assemblyType, REG.OP2))
+                    # Move R2 to OP1.
+                    self.createInst(MOVE, exp1.assemblyType, Register(exp1.assemblyType, REG.R2), Register(exp1.assemblyType, REG.OP1))
 
                     self.createInst(ALU, ALUOP.CMP, dest.assemblyType)
 
@@ -1797,9 +1796,9 @@ class Data(AssemblerOperand):
 
     def emitCode(self) -> str:
         if self.offset == 0:
-            return f"(%rip)+{self.identifier}"
+            return f"{self.identifier}"
         else:
-            return f"(%rip)+{self.identifier}{self.offset:+}"
+            return f"{self.identifier}{self.offset:+}"
 
     def print(self) -> str:
         return f"Data({self.identifier})"
