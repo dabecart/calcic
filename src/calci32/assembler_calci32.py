@@ -11,9 +11,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import math
 import enum
-from typing import Type, TypeVar, Final
+from typing import Any, Type, TypeVar, Final
 
 from src.TAC import *
+from src.calci32.types_calci32 import AssemblyType
 from src.debug_info import *
 from src.calcic_types import *
 from src.builtin.builtin_functions_TAC import *
@@ -272,6 +273,7 @@ _start:
 
     # Infinite loop.
 _end:
+    brk
     jmp     _end
     
 """
@@ -683,6 +685,11 @@ class AssemblerFunction(AssemblyAST):
 
         # Convert the function's TAC instructions into assembler instructions.
         for inst in self.function.instructions:
+            # Add a comment between instructions to know what each block of assembler instructions 
+            # is doing. Skip labels.
+            if not isinstance(inst, TACLabel):
+                self.createInst(COMMENT, inst.print())
+
             if isinstance(inst, TACBuiltInFunction):
                 self.convertBuiltInTAC(inst)
                 continue
@@ -697,9 +704,7 @@ class AssemblerFunction(AssemblyAST):
 
                     match inst.operator:
                         case UnaryOperator.NOT:
-                            # !(x) is the same as x == 0.
-                            self.createInst(CLR, exp.assemblyType, Register(exp.assemblyType, REG.OP2))
-                            self.createInst(ALU, ALUOP.CMP, exp.assemblyType)
+                            # !(x) is the same as x == 0. The MOVE above sets the ZERO flag.
                             self.createInst(SET, ConditionCode.EQUAL, dest)
 
                         case UnaryOperator.NEGATION:
@@ -790,12 +795,8 @@ class AssemblerFunction(AssemblyAST):
                 case TACJumpIfZero():
                     cond: AssemblerOperand = self.fromTACValue(inst.condition)
 
-                    # Move condition to OP1.
-                    self.createInst(MOVE, cond.assemblyType, cond, Register(cond.assemblyType, REG.OP1))
-                    # Clear OP2.
-                    self.createInst(CLR, AssemblyType.LONGWORD, Register(AssemblyType.LONGWORD, REG.OP2))
-
-                    self.createInst(ALU, ALUOP.CMP, dest.assemblyType)
+                    # Move condition to R2, this will set the zero flag.
+                    self.createInst(MOVE, cond.assemblyType, cond, Register(cond.assemblyType, REG.R2))
 
                     if inst.condition.valueType.isDecimal():
                         raise ValueError()
@@ -805,12 +806,8 @@ class AssemblerFunction(AssemblyAST):
                 case TACJumpIfNotZero():
                     cond: AssemblerOperand = self.fromTACValue(inst.condition)
 
-                    # Move condition to OP1.
-                    self.createInst(MOVE, cond.assemblyType, cond, Register(cond.assemblyType, REG.OP1))
-                    # Clear OP2.
-                    self.createInst(CLR, AssemblyType.LONGWORD, Register(AssemblyType.LONGWORD, REG.OP2))
-
-                    self.createInst(ALU, ALUOP.CMP, dest.assemblyType)
+                    # Move condition to R2, this will set the zero flag.
+                    self.createInst(MOVE, cond.assemblyType, cond, Register(cond.assemblyType, REG.R2))
 
                     if inst.condition.valueType.isDecimal():
                         raise ValueError()
@@ -827,10 +824,10 @@ class AssemblerFunction(AssemblyAST):
                     self.createInst(MOVE,
                                     AssemblyType.LONGWORD, 
                                     self.fromTACValue(inst.src),
-                                    Register(AssemblyType.LONGWORD, REG.R0))
+                                    Register(AssemblyType.LONGWORD, REG.R2))
 
                     dst = self.fromTACValue(inst.dst)
-                    src = Memory(dst.assemblyType, REG.R0, 0)
+                    src = Memory(dst.assemblyType, REG.R2, 0)
                     movInstructions = self.copyBytes(src, dst, dst.assemblyType)
                     self.instructions.extend(movInstructions)
 
@@ -838,10 +835,10 @@ class AssemblerFunction(AssemblyAST):
                     self.createInst(MOVE, 
                                     AssemblyType.LONGWORD,
                                     self.fromTACValue(inst.dst), 
-                                    Register(AssemblyType.LONGWORD, REG.R0))
+                                    Register(AssemblyType.LONGWORD, REG.R2))
                     
                     src = self.fromTACValue(inst.src)
-                    dst = Memory(src.assemblyType, REG.R0, 0)
+                    dst = Memory(src.assemblyType, REG.R2, 0)
                     movInstructions = self.copyBytes(src, dst, src.assemblyType)
                     self.instructions.extend(movInstructions)
 
@@ -864,30 +861,30 @@ class AssemblerFunction(AssemblyAST):
                     pointer = self.fromTACValue(inst.pointer)
                     index = self.fromTACValue(inst.index)
 
-                    # Move the base address to R0.
+                    # Move the base address to R2.
                     self.createInst(MOVE, 
                                     AssemblyType.LONGWORD, 
                                     pointer, 
-                                    Register(AssemblyType.LONGWORD, REG.R0))
+                                    Register(AssemblyType.LONGWORD, REG.R2))
 
                     if isinstance(index, Immediate):
                         # The index is a constant and so is the scale. Calculate it during compilation.
                         byteOffset = int(index.value.constantValue) * inst.scale
                         self.createInst(OFS, 
-                                        Memory(AssemblyType.LONGWORD, REG.R0, byteOffset), 
+                                        Memory(AssemblyType.LONGWORD, REG.R2, byteOffset), 
                                         self.fromTACValue(inst.dst))
                     else:
                         # The index is a variable, load it into a register.
                         self.createInst(MOVE, 
                                         index.assemblyType, 
                                         index, 
-                                        Register(index.assemblyType, REG.R1))
+                                        Register(index.assemblyType, REG.R3))
 
                         self.createInst(OFS, 
                             Indexed(
                                 pointer.assemblyType, 
-                                Register(AssemblyType.LONGWORD, REG.R0), 
-                                Register(index.assemblyType, REG.R1), 
+                                Register(AssemblyType.LONGWORD, REG.R2), 
+                                Register(index.assemblyType, REG.R3), 
                                 inst.scale
                             ), self.fromTACValue(inst.dst))
 
@@ -899,29 +896,44 @@ class AssemblerFunction(AssemblyAST):
                     result = self.fromTACValue(inst.result)
 
                     if isinstance(exp, Register):
-                        exp.signExtend = True
-                        self.createInst(MOVE, result.assemblyType, exp, result)
+                        # Simply sign extend.
+                        self.createInst(MOVE, result.assemblyType, Register(exp.assemblyType, exp.reg, signExtend=True), result)
                     else:
-                        self.createInst(MOVE, exp.assemblyType, exp, Register(exp.assemblyType, REG.R0))
+                        # Store into a register whilst masking it to the input type.
+                        self.createInst(MOV, exp, Register(exp.assemblyType, REG.R2))
+                        # Transfer to another register whilst extending.
+                        self.createInst(MOV, Register(exp.assemblyType, REG.R2, signExtend=True), Register(result.assemblyType, REG.R3))
+                        # Finally, store the extended value into the result.
                         self.createInst(MOVE, 
-                            result.assemblyType, Register(result.assemblyType, REG.R0, signExtend=True), result)
+                            result.assemblyType, Register(result.assemblyType, REG.R3), result)
 
                 case TACTruncate():
                     exp = self.fromTACValue(inst.exp)
                     result = self.fromTACValue(inst.result)
-                    self.createInst(MOVE, result.assemblyType, exp, result)
+
+                    if isinstance(exp, Register):
+                        # Simply move to the result using the result type (this masks the unused bytes).
+                        self.createInst(MOVE, result.assemblyType, exp, result)
+                    else:
+                        # Store into a register whilst masking.
+                        self.createInst(MOV, exp, Register(result.assemblyType, REG.R2))
+                        # Finally, store the truncated value into the result.
+                        self.createInst(MOVE, result.assemblyType, Register(result.assemblyType, REG.R3), result)
 
                 case TACZeroExtend():
                     exp = self.fromTACValue(inst.exp)
                     result = self.fromTACValue(inst.result)
 
                     if isinstance(exp, Register):
-                        exp.signExtend = False
-                        self.createInst(MOVE, result.assemblyType, exp, result)
+                        # Simply zero extend.
+                        self.createInst(MOVE, result.assemblyType, Register(exp.assemblyType, exp.reg, signExtend=False), result)
                     else:
-                        self.createInst(MOVE, exp.assemblyType, exp, Register(exp.assemblyType, REG.R0))
-                        self.createInst(MOVE, 
-                            result.assemblyType, Register(result.assemblyType, REG.R0, signExtend=False), result)
+                        # Store into a register whilst masking it to the input type.
+                        self.createInst(MOV, exp, Register(exp.assemblyType, REG.R2))
+                        # Transfer to another register whilst zero extending.
+                        self.createInst(MOV, Register(exp.assemblyType, REG.R2, signExtend=False), Register(result.assemblyType, REG.R1))
+                        # Finally, store the extended value into the result.
+                        self.createInst(MOVE, result.assemblyType, Register(result.assemblyType, REG.R1), result)
 
                 case TACFunctionCall() | TACIndirectFunctionCall():
                     returnIntRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
@@ -977,7 +989,7 @@ class AssemblerFunction(AssemblyAST):
                         if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                             # There may be part of a struct/union returned in a register whose byte size is not 
                             # standard. For this case, allocate as 4 bytes in the stack. 
-                            offs = self.fromTACValue(TACValue(True, TypeSpecifier.LONG.toBaseType(), "4"))
+                            offs = self.fromTACValue(TACValue(True, TypeSpecifier.INT.toBaseType(), "4"))
                             self.createInst(MOVE, 
                                             AssemblyType.LONGWORD, 
                                             Register(AssemblyType.LONGWORD, REG.RSP), 
@@ -1177,24 +1189,27 @@ class MOVE(AssemblerInstruction):
             # Save the src into a temporary register and then pass it to the dst. 
             movToReg = self.createChild(MOVE, self.asmbType, 
                                         self.src, 
-                                        Register(self.asmbType, REG.R0))
+                                        Register(self.asmbType, REG.R6))
             movFromReg = self.createChild(MOVE, self.asmbType,
-                                        Register(self.asmbType, REG.R0), 
+                                        Register(self.asmbType, REG.R6), 
                                         self.dst)
+            return [movToReg, movFromReg]
+
+        if isinstance(self.dst, Register) and self.dst.reg in (REG.OP1, REG.OP2) and self.asmbType != AssemblyType.LONGWORD:
+            # Cannot move to OP1 and OP2 with different assembly types to LONGWORD.
+            # Move to a temporary register and move this register to OP1/OP2.
+            movToReg = self.createChild(MOV, self.src, Register(self.asmbType, REG.R6))
+            movFromReg = self.createChild(MOV, Register(self.asmbType, REG.R6), Register(AssemblyType.LONGWORD, self.dst.reg))
             return [movToReg, movFromReg]
 
         return [self]
 
     def emitCode(self) -> str:
-        # Set the type to that of the instruction.
-        self.src.assemblyType = self.asmbType
-        self.dst.assemblyType = self.asmbType
-
         # Switch between STO and MOV instructions.
         inst: str
         if isinstance(self.src, Register) and isinstance(self.dst, (Memory, Data)):
             inst = "sto"
-        elif isinstance(self.src, (Register, Immediate, Memory, Data)) and isinstance(self.dst, Register):
+        elif isinstance(self.src, (Register, Immediate, LabeledImmediate, Memory, Data)) and isinstance(self.dst, Register):
             inst = "mov"
         else:
             raise ValueError(f"Cannot emit code for this MOV instruction: {self.print()}")
@@ -1202,8 +1217,33 @@ class MOVE(AssemblerInstruction):
         if self.asmbType == AssemblyType.QUADWORD:
             # Use the stoq/movq instruction for 8 byte values.
             inst += "q"
+            # Move the QUAD using two LONG.
+            self.src.assemblyType = AssemblyType.LONGWORD
+            self.dst.assemblyType = AssemblyType.LONGWORD
+        else:
+            # Set the type to that of the instruction.
+            self.src.assemblyType = self.asmbType
+            self.dst.assemblyType = self.asmbType
 
         return f"\t{inst}\t{self.src.emitCode()}, {self.dst.emitCode()}\n"
+
+    def print(self) -> str:
+        return f"Mov({self.src}, {self.dst})\n"
+
+class MOV(AssemblerInstruction):
+    def __init__(self, src: AssemblerOperand, dst: AssemblerOperand, parentAST: AssemblyAST | None = None) -> None:
+
+        self.src = src
+        self.dst = dst
+
+        super().__init__(parentAST)
+
+    def secondPass(self):
+        self.src = self.convertFromPseudo(self.src)
+        self.dst = self.convertFromPseudo(self.dst)
+
+    def emitCode(self) -> str:
+        return f"\tmov\t{self.src.emitCode()}, {self.dst.emitCode()}\n"
 
     def print(self) -> str:
         return f"Mov({self.src}, {self.dst})\n"
@@ -1291,19 +1331,19 @@ class ALU(AssemblerInstruction):
         moveHighToReg = isinstance(self.dstHigh, (Memory, Data))
 
         if moveLowToReg and moveHighToReg:
-            aluOp = self.createChild(ALU, self.op, self.asmbType, Register(self.asmbType, REG.R0), Register(self.asmbType, REG.R1))
-            moveLow = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R0), self.dstLow)
-            moveHigh = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R1), self.dstHigh)
+            aluOp = self.createChild(ALU, self.op, self.asmbType, Register(self.asmbType, REG.R6), Register(self.asmbType, REG.R7))
+            moveLow = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R6), self.dstLow)
+            moveHigh = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R7), self.dstHigh)
             return [aluOp, moveLow, moveHigh]
 
         if moveLowToReg:
-            aluOp = self.createChild(ALU, self.op, self.asmbType, Register(self.asmbType, REG.R0), self.dstHigh)
-            moveLow = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R0), self.dstLow)
+            aluOp = self.createChild(ALU, self.op, self.asmbType, Register(self.asmbType, REG.R6), self.dstHigh)
+            moveLow = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R6), self.dstLow)
             return [aluOp, moveLow]
 
         if moveHighToReg:
-            aluOp = self.createChild(ALU, self.op, self.asmbType, self.dstLow, Register(self.asmbType, REG.R1))
-            moveHigh = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R1), self.dstHigh)
+            aluOp = self.createChild(ALU, self.op, self.asmbType, self.dstLow, Register(self.asmbType, REG.R7))
+            moveHigh = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R7), self.dstHigh)
             return [aluOp, moveHigh]
 
         return [self]
@@ -1339,8 +1379,8 @@ class CLR(AssemblerInstruction):
 
     def thirdPass(self) -> list[AssemblerInstruction]:
         if isinstance(self.dst, (Data, Memory)):
-            clrInst = self.createChild(CLR, Register(self.asmbType, REG.R0))
-            moveInst = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R0), self.dst)
+            clrInst = self.createChild(CLR, Register(self.asmbType, REG.R6))
+            moveInst = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R6), self.dst)
             return [clrInst, moveInst]
 
         return [self]
@@ -1356,7 +1396,7 @@ class CLR(AssemblerInstruction):
 
 class ConditionCode(enum.Enum):
     EQUAL                   = "eq "
-    NOT_EQUAL               = "neq"
+    NOT_EQUAL               = "ne "
     GREATER_SIGNED          = "gs "
     GREATER_EQUAL_SIGNED    = "ges"
     LESS_SIGNED             = "ls "
@@ -1420,8 +1460,8 @@ class SET(AssemblerInstruction):
 
     def thirdPass(self) -> list[AssemblerInstruction]:
         if isinstance(self.dst, (Data, Memory)):
-            setInst = self.createChild(SET, self.condition, Register(self.dst.assemblyType, REG.R0))
-            moveInst = self.createChild(MOVE, self.dst.assemblyType, Register(self.dst.assemblyType, REG.R0), self.dst)
+            setInst = self.createChild(SET, self.condition, Register(self.dst.assemblyType, REG.R6))
+            moveInst = self.createChild(MOVE, self.dst.assemblyType, Register(self.dst.assemblyType, REG.R6), self.dst)
             return [setInst, moveInst]
 
         return [self]
@@ -1450,7 +1490,7 @@ class OFS(AssemblerInstruction):
                  parentAST: AssemblyAST | None = None) -> None:
         
         if dst.assemblyType != AssemblyType.LONGWORD:
-            raise ValueError("OFS expects a LONGWORD as destination")
+            raise ValueError(f"OFS expects a LONGWORD as destination, received {dst.assemblyType.baseType}")
 
         self.src = src
         self.dst = dst
@@ -1461,32 +1501,44 @@ class OFS(AssemblerInstruction):
         self.dst = self.convertFromPseudo(self.dst)
 
     def thirdPass(self) -> list[AssemblerInstruction]:
-        moveSrcToReg = isinstance(self.src, (Memory, Data))
         moveDstToReg = isinstance(self.dst, (Memory, Data))
 
-        if moveSrcToReg and moveDstToReg:
-            moveSrc = self.createChild(MOVE, self.src.assemblyType, self.src, Register(self.src.assemblyType, REG.R0))
-            ofsOp = self.createChild(OFS, Register(self.src.assemblyType, REG.R0), Register(self.dst.assemblyType, REG.R1))
-            moveDst = self.createChild(MOVE, self.dst.assemblyType, Register(self.dst.assemblyType, REG.R1), self.dst)
-            return [moveSrc, ofsOp, moveDst]
+        if isinstance(self.src, Data):
+            # A data can be substituted by a simple MOV of a constant to a register (the constant is calculated from the
+            # base address of the label plus the offset).
+            if moveDstToReg:
+                moveOp = self.createChild(MOVE, AssemblyType.LONGWORD, LabeledImmediate(self.src), Register(AssemblyType.LONGWORD, REG.R7))
+                moveDst = self.createChild(MOVE, AssemblyType.LONGWORD, Register(AssemblyType.LONGWORD, REG.R7), self.dst)
+                return [moveOp, moveDst]
+            else:
+                moveOp = self.createChild(MOVE, AssemblyType.LONGWORD, LabeledImmediate(self.src), self.dst)
+                return [moveOp]
 
-        if moveSrcToReg:
-            moveSrc = self.createChild(MOVE, self.src.assemblyType, self.src, Register(self.src.assemblyType, REG.R0))
-            ofsOp = self.createChild(OFS, Register(self.src.assemblyType, REG.R0), self.dst)
-            return [moveSrc, ofsOp]
+        if isinstance(self.src, Memory):
+            # Move the index to a temporary register.
+            movIndex = self.createChild(MOVE, 
+                                        AssemblyType.LONGWORD,
+                                        self.fromTACValue(TACValue(True, TypeSpecifier.INT.toBaseType(), str(self.src.offset))),
+                                        Register(AssemblyType.LONGWORD, REG.R6))
+            # Operate using an Indexed argument.
+            newSrc = Indexed(AssemblyType.LONGWORD, self.src.register, Register(AssemblyType.LONGWORD, REG.R6), 1)
+
+            if moveDstToReg:
+                newOfs = self.createChild(OFS, newSrc, Register(AssemblyType.LONGWORD, REG.R7))
+                moveDst = self.createChild(MOVE, AssemblyType.LONGWORD, Register(AssemblyType.LONGWORD, REG.R7), self.dst)
+                return [movIndex, newOfs, moveDst]
+            else:
+                newOfs = self.createChild(OFS, newSrc, self.dst)
+                return [movIndex, newOfs]
 
         if moveDstToReg:
-            ofsOp = self.createChild(OFS, self.src, Register(self.dst.assemblyType, REG.R1))
-            moveDst = self.createChild(MOVE, self.dst.assemblyType, Register(self.dst.assemblyType, REG.R1), self.dst)
-            return [ofsOp, moveDst]
+            newOfs = self.createChild(OFS, self.src, Register(AssemblyType.LONGWORD, REG.R7))
+            moveDst = self.createChild(MOVE, AssemblyType.LONGWORD, Register(AssemblyType.LONGWORD, REG.R7), self.dst)
+            return [newOfs, moveDst]
 
         return [self]
 
     def emitCode(self) -> str:
-        if isinstance(self.src, Indexed):
-            if self.src.scale in (2, 4, 8, 16, 32, 64, 128):
-                return f"\tofs{self.src.scale}\t{self.src.emitCode()}, {self.dst.emitCode()}\n"
-
         return f"\tofs\t{self.src.emitCode()}, {self.dst.emitCode()}\n"
 
     def print(self) -> str:
@@ -1511,6 +1563,17 @@ class LABEL(AssemblerInstruction):
     def print(self) -> str:
         return f"Label({self.identifier})\n"
 
+class COMMENT(AssemblerInstruction):
+    def __init__(self, comment: str, parentAST: AssemblyAST | None = None) -> None:
+        self.comment = comment
+        super().__init__(parentAST)
+
+    def emitCode(self) -> str:
+        return f"\t# {self.comment}"
+
+    def print(self) -> str:
+        return f"\n# {self.comment}"
+
 class PSH(AssemblerInstruction):
     def __init__(self, operand: AssemblerOperand, parentAST: AssemblyAST | None = None) -> None:
         self.operand = operand
@@ -1522,8 +1585,8 @@ class PSH(AssemblerInstruction):
     def thirdPass(self) -> list[AssemblerInstruction]:
         if isinstance(self.operand, (Memory, Data)):
             # - Stack cannot have a memory address. Save the src into temporary register R0 and then push R0.
-            movToReg = self.createChild(MOVE, self.operand.assemblyType, self.operand, Register(self.operand.assemblyType, REG.R0))
-            pushFromReg = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R0))
+            movToReg = self.createChild(MOVE, self.operand.assemblyType, self.operand, Register(self.operand.assemblyType, REG.R6))
+            pushFromReg = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R6))
             return [movToReg, pushFromReg]
         
         return [self]
@@ -1541,13 +1604,8 @@ class FUN(AssemblerInstruction):
 
     def emitCode(self) -> str:
         if isinstance(self.callArgument, str):
-            # Offset call.
-            if self.callArgument in TACFunction.functions:
-                return f"\tfun\t{self.callArgument}\n"
-            else:
-                # If the function is not defined in the code, maybe it's located somewhere else.
-                # Add @PLT to link it externally. 
-                return f"\tfun\t{self.callArgument}@PLT\n"
+            # Call to the label. If the label does not exist, the linker will complain.
+            return f"\tfun\t{self.callArgument}\n"
             
         elif isinstance(self.callArgument, Register):
             # Indirect call.
@@ -1645,12 +1703,12 @@ class Register(AssemblerOperand):
 
             case AssemblyType.BYTE:
                 if self.signExtend:
-                    ret += "'s16"
+                    ret += "'s8"
                 else:
-                    ret += "'u16"
+                    ret += "'u8"
 
             case _:
-                raise ValueError(f"Cannot emit code for a register with assembly type {self.assemblyType}")
+                raise ValueError(f"Cannot emit code for a register with assembly type {self.assemblyType.baseType}")
 
         return ret
 
@@ -1677,7 +1735,21 @@ class Immediate(AssemblerOperand):
 
     def print(self) -> str:
         return f"Imm({self.value})"
-    
+
+class LabeledImmediate(AssemblerOperand):
+    def __init__(self, dataVar: Data, parentAST: AssemblyAST | None = None) -> None:
+        self.dataVar = dataVar
+        super().__init__(dataVar.assemblyType, parentAST)
+
+    def createCopy(self) -> LabeledImmediate:
+        return LabeledImmediate(self.dataVar, self.parent)
+
+    def emitCode(self) -> str:
+        return f"${self.dataVar.emitCode()}"
+
+    def print(self) -> str:
+        return f"Imm({self.dataVar.print()})"
+
 # Stores a temporary variable from TAC into an imaginary register. Used for single variables.
 class Pseudo(AssemblerOperand):
     def __init__(self, value: TACValue, parentAST: AssemblyAST | None = None) -> None:
@@ -1820,7 +1892,7 @@ class Indexed(AssemblerOperand):
         return Indexed(self.assemblyType, self.base, self.index, self.scale, self.parent)
 
     def emitCode(self) -> str:
-        return f"({self.base.emitCode()}, {self.index.emitCode()}, {self.scale})"
+        return f"{self.base.emitCode()}, {self.index.emitCode()}, ${self.scale}"
 
     def print(self) -> str:
         return f"Indexed({self.base}, {self.index}, {self.scale})"

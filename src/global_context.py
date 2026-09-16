@@ -20,7 +20,6 @@ class TargetArchitectures(enum.Enum):
 @dataclass
 class GlobalContext:
     targetArchitecture: TargetArchitectures                 = TargetArchitectures.x64
-    addressByteLen: int                                     = 8
     linkerRoute: str                                        = "gcc"
     
     useGCCLibraries: bool                                   = False
@@ -42,11 +41,14 @@ class GlobalContext:
 
         match arch:
             case TargetArchitectures.x64:
-                self.addressByteLen = 8
                 self.linkerRoute = "gcc"
             case TargetArchitectures.calci32:
-                self.addressByteLen = 4
                 self.linkerRoute = "./linker/calcil/calcil"
+
+                # TODO: remove these setters when the library classes can be compiled.
+                self.useCalcicSTDLibraries = False
+                self.useGCCLibraries = True
+
             case _:
                 raise ValueError(f"Invalid architecture: {arch}")
 

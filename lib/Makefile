@@ -35,7 +35,7 @@ $(TARGET_OBJ): $(OBJS)
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	@echo "Compiling $<"
-	$(CC) $(CFLAGS) -c $< -o $@
+	@$(CC) $(CFLAGS) -c $< -o $@
 # Convert .globl -> .weak
 	@objcopy --weaken $@
 

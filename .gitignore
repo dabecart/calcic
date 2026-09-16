@@ -1,2 +1,3 @@
 build/
 calcic_libc.o
+.vscode/

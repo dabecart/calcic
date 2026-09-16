@@ -18,12 +18,12 @@ from src import lexer, parser, TAC
 from src import TAC_optimizer as optimizer
 from src.builtin.builtin_functions import BuiltInFunctions
 from src.global_context import globalContext, TargetArchitectures
+from src.calcic_types import TypeSpecifier
 
 from src.x64 import builtin_types_x64
 from src.x64 import assembler_x64
 from src.calci32 import builtin_types_calci32
 from src.calci32 import assembler_calci32
-import src.calcic_types
 
 def splitCombinedArguments(argv, initialValues: set):
     processedArgs = []
@@ -138,8 +138,6 @@ def main() -> None:
         exit(1)
     globalContext.addDebugInfo = args.debug
 
-    src.calcic_types.CALCIC_ADDRS_LEN = globalContext.addressByteLen
-
     """
     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     PREPROCESSOR
@@ -191,12 +189,18 @@ def main() -> None:
         # Create the context.
         context = parser.Context()
         
-        # Add built-in types to the context before parsing.
+        # Add built-in types to the context before parsing. Set the ADDRESS type.
         match arch:
             case TargetArchitectures.x64:
                 builtin_types_x64.BuiltInTypes_x64(context)
+                TypeSpecifier.ARCH_INT = TypeSpecifier.LONG
+                TypeSpecifier.ARCH_UINT = TypeSpecifier.ULONG
+
             case TargetArchitectures.calci32:
                 builtin_types_calci32.BuiltInTypes_calci32(context)
+                TypeSpecifier.ARCH_INT = TypeSpecifier.INT
+                TypeSpecifier.ARCH_UINT = TypeSpecifier.UINT
+
             case _:
                 raise ValueError()
         
@@ -336,7 +340,12 @@ def main() -> None:
     if not globalContext.useGCCLibraries:
         assemblerCommand.append("-nostdlib")
         assemblerCommand.append("-fno-builtin")
-            
+
+    if args.verbose:
+        assemblerCommand.append("-v")
+        cmd = ' '.join(assemblerCommand)
+        print(f"Running assembler: {cmd}")
+    
     assemblyStatus = subprocess.run(assemblerCommand)
     retCode = assemblyStatus.returncode
     if retCode != 0:

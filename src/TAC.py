@@ -49,14 +49,14 @@ class TAC(ABC):
         if isinstance(castDeclaratorType, BaseDeclaratorType):
             castType = castDeclaratorType.baseType
         else:
-            # Pointers and functions should be taken as ulong.
-            castType = TypeSpecifier.ULONG
+            # Pointers and functions should be taken as ulong/uint.
+            castType = TypeSpecifier.ARCH_UINT
 
         if isinstance(innerDeclaratorType, BaseDeclaratorType):
             innerType = innerDeclaratorType.baseType
         else:
-            # Pointers and functions should be taken as ulong.
-            innerType = TypeSpecifier.ULONG
+            # Pointers and functions should be taken as ulong/uint.
+            innerType = TypeSpecifier.ARCH_UINT
 
         # Double casts.
         if innerType.isDecimal() and castType.isDecimal():
@@ -186,9 +186,9 @@ class TAC(ABC):
                         # Increment/decrement the pointer.
                         preDereference = TACValue(False, exp.typeId)
                         if exp.unaryOperator == UnaryOperator.PRE_INCREMENT:
-                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "1", self)
+                            delta = TACValue(True, TypeSpecifier.ARCH_INT.toBaseType(), "1", self)
                         else:
-                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "-1", self)
+                            delta = TACValue(True, TypeSpecifier.ARCH_INT.toBaseType(), "-1", self)
 
                         self.addDebugInformation(exp, insts)
                         pointerOp = self.createChild(TACAddToPointer, inner.convert(), 
@@ -236,9 +236,9 @@ class TAC(ABC):
                         # Increment/decrement the pointer.
                         preDereference = TACValue(False, exp.typeId)
                         if exp.unaryOperator == UnaryOperator.POST_INCREMENT:
-                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "1", self)
+                            delta = TACValue(True, TypeSpecifier.ARCH_INT.toBaseType(), "1", self)
                         else:
-                            delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), "-1", self)
+                            delta = TACValue(True, TypeSpecifier.ARCH_INT.toBaseType(), "-1", self)
                         pointerOp = self.createChild(TACAddToPointer, inner.convert(), 
                             delta, exp.typeId.declarator.getByteSize(), preDereference, insts)
                         # Set the value of the original variable to the unary result.
@@ -368,7 +368,7 @@ class TAC(ABC):
                         # Get the base address of the leftmost struct/union.
                         self.createChild(TACGetAddress, preDereference.value, dst, insts)
                         # Add to this address the offset bytes of the field.
-                        delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), str(preDereference.offset), self)
+                        delta = TACValue(True, TypeSpecifier.ARCH_INT.toBaseType(), str(preDereference.offset), self)
                         self.createChild(TACAddToPointer, dst, delta, 1, dst, insts)
                         return TACBaseOperand(dst, exp.typeId, insts)
                     case _:
@@ -416,7 +416,7 @@ class TAC(ABC):
                             # If the offset is 0, no need to add it to the pointer.
                             if member.offset != 0:
                                 dstPointer = self.createChild(TACValue, False, PointerDeclaratorType(exp.typeId))
-                                delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), str(member.offset), self)
+                                delta = TACValue(True, TypeSpecifier.ARCH_INT.toBaseType(), str(member.offset), self)
                                 self.createChild(TACAddToPointer, inner.value, delta, 1, dstPointer, insts)
                                 return TACDereferencedPointer(dstPointer, exp.typeId, insts)
                             else:
@@ -446,7 +446,7 @@ class TAC(ABC):
 
                     # If the offset is 0, no need to add it to the pointer.
                     if member.offset != 0:
-                        delta = TACValue(True, TypeSpecifier.LONG.toBaseType(), str(member.offset), self)
+                        delta = TACValue(True, TypeSpecifier.ARCH_INT.toBaseType(), str(member.offset), self)
                         dstPointer = self.createChild(TACValue, False, PointerDeclaratorType(exp.typeId))
                         self.createChild(TACAddToPointer, inner, delta, 1, dstPointer, insts)
                         return TACDereferencedPointer(dstPointer, exp.typeId, insts)
@@ -1416,14 +1416,14 @@ class TACBinary(TACInstruction):
                     pointer1Size = pointer1.valueType.declarator.getByteSize()
 
                     # Subtract the pointers (as integers).
-                    pointer1.valueType = TypeSpecifier.ULONG.toBaseType()
-                    pointer2.valueType = TypeSpecifier.ULONG.toBaseType()
+                    pointer1.valueType = TypeSpecifier.ARCH_UINT.toBaseType()
+                    pointer2.valueType = TypeSpecifier.ARCH_UINT.toBaseType()
                     diff = TACBinary(BinaryOperator.SUBTRACT, pointer1, pointer2, instructionsList=self.insts, parentTAC=self)
                     # Divide the difference by the size of pointer1.
                     div = TACBinary( 
                             BinaryOperator.DIVISION, 
                             diff.result, 
-                            TACValue(True, TypeSpecifier.ULONG.toBaseType(), str(pointer1Size), self),
+                            TACValue(True, TypeSpecifier.ARCH_UINT.toBaseType(), str(pointer1Size), self),
                             instructionsList=self.insts,
                             parentTAC=self
                     )

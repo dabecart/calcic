@@ -245,8 +245,7 @@ class AssemblyType:
                 byteLen, alignment, 
                 members=AssemblyType._classifyArray(tac))
         else:
-            # Both pointers and functions are quad values in 64 bit systems.
-            return AssemblyType.QUADWORD
+            return AssemblyType.LONGWORD
 
 # Common assembly types.
 AssemblyType.QUADWORD    = AssemblyType(AssemblyBaseType.QUADWORD,  8, 8, "quad",   [AssemblyClass(AssemblyClassType.INTEGER, 8)])

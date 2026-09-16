@@ -101,6 +101,10 @@ class TypeSpecifier:
     DOUBLE: TypeSpecifier
     FLOAT: TypeSpecifier
 
+    # Depending on the architecture, use one of this instead of the above.
+    ARCH_INT: TypeSpecifier
+    ARCH_UINT: TypeSpecifier
+
     @staticmethod
     def STRUCT(originalIdentifier: str, mangledIdentifier: str, byteSize: int, alignment: int, 
                members: list[ParameterInformation]) -> TypeSpecifier:

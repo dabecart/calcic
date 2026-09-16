@@ -1165,8 +1165,8 @@ class AST(ABC):
                     self.raiseError("Cannot initialize a non char pointer with a string")
 
                 strAST: String = self.createChild(String)
-                # Start with .L so that the linker "hides" this constant.
-                constantName: str = self.context.mangleIdentifier(".Lstr")
+                # We could start this with .L so that the linker "hides" this constant.
+                constantName: str = self.context.mangleIdentifier("str")
 
                 self.context.staticVariablesMap[constantName] = StaticVariableContext(
                     storageClass=None,
@@ -1388,7 +1388,7 @@ class DirectDeclarator(DeclaratorAST):
                 if self.peek().id == "]":
                     self.raiseError("Variable length arrays not implemented")
 
-                arrayDim = self.parseConstantFromType(TypeSpecifier.LONG.toBaseType(), strict=True)[0]
+                arrayDim = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType(), strict=True)[0]
                 dim = int(arrayDim.constValue)
                 if dim <= 0:
                     self.raiseError("Array dimension must be greater than zero")
@@ -1477,7 +1477,7 @@ class BaseAbstractDeclarator(AbstractDeclaratorAST):
             while self.peek().id == "[":
                 self.pop()
 
-                arrayDim = self.parseConstantFromType(TypeSpecifier.LONG.toBaseType(), strict=True)[0]
+                arrayDim = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType(), strict=True)[0]
                 dim = int(arrayDim.constValue)
                 if dim <= 0:
                     self.raiseError("Array dimension must be greater than zero")
@@ -1491,7 +1491,7 @@ class BaseAbstractDeclarator(AbstractDeclaratorAST):
             while True:
                 self.expect("[")
 
-                arrayDim = self.parseConstantFromType(TypeSpecifier.LONG.toBaseType(), strict=True)[0]
+                arrayDim = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType(), strict=True)[0]
                 dim = int(arrayDim.constValue)
                 if dim <= 0:
                     self.raiseError("Array dimension must be greater than zero")
@@ -1595,7 +1595,7 @@ class DirectAbstractDeclarator(DeclaratorAST):
                 if self.peek().id == "]":
                     self.raiseError("Variable length arrays not implemented")
 
-                arrayDim = self.parseConstantFromType(TypeSpecifier.LONG.toBaseType(), strict=True)[0]
+                arrayDim = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType(), strict=True)[0]
                 dim = int(arrayDim.constValue)
                 if dim <= 0:
                     self.raiseError("Array dimension must be greater than zero")
@@ -3339,9 +3339,9 @@ class String(Exp):
         # Add +1 for the null terminator.
         self.typeId = ArrayDeclaratorType(TypeSpecifier.CHAR.toBaseType(), len(self.value) + 1)
 
-        # This identifier can be set if the string is used by the program. Start with .L so its 
+        # This identifier can be set if the string is used by the program. We could start with .L so its 
         # hidden.
-        self.identifier: str = self.context.mangleIdentifier(".Lstr")
+        self.identifier: str = self.context.mangleIdentifier("str")
 
     def staticEval(self) -> StaticEvalValue:
         # TODO: change to pointer name
@@ -3950,17 +3950,17 @@ class Binary(Exp):
                     self.typeId = commonType
 
             elif isExp1Pointer and not isExp2Pointer:
-                # Pointer sum: Convert exp2 to a long.
-                if self.exp2.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
-                    self.exp2 = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.exp2).preconvertExpression()
+                # Pointer sum: Convert exp2 to a long/int pointer type.
+                if self.exp2.typeId.unqualified() != TypeSpecifier.ARCH_INT.toBaseType():
+                    self.exp2 = self.createChild(Cast, TypeSpecifier.ARCH_INT.toBaseType(), self.exp2).preconvertExpression()
                 # The result is a pointer.
                 self.typeId = self.exp1.typeId.unqualified()
                 self.castType = self.typeId
                 
             elif isExp2Pointer and not isExp1Pointer:
-                # Pointer sum: Convert exp1 to a long.
-                if self.exp1.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
-                    self.exp1 = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.exp1).preconvertExpression()
+                # Pointer sum: Convert exp1 to a long/int pointer type.
+                if self.exp1.typeId.unqualified() != TypeSpecifier.ARCH_INT.toBaseType():
+                    self.exp1 = self.createChild(Cast, TypeSpecifier.ARCH_INT.toBaseType(), self.exp1).preconvertExpression()
                 # The result is a pointer.
                 self.typeId = self.exp2.typeId.unqualified()
                 self.castType = self.typeId
@@ -3991,16 +3991,16 @@ class Binary(Exp):
                     self.typeId = commonType
 
             elif isExp1Pointer and not isExp2Pointer:
-                # Pointer subtraction: Convert exp2 to a long.
-                if self.exp2.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
-                    self.exp2 = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.exp2).preconvertExpression()
+                # Pointer subtraction: Convert exp2 to a long/int pointer type.
+                if self.exp2.typeId.unqualified() != TypeSpecifier.ARCH_INT.toBaseType():
+                    self.exp2 = self.createChild(Cast, TypeSpecifier.ARCH_INT.toBaseType(), self.exp2).preconvertExpression()
                 # The result is a pointer.
                 self.typeId = self.exp1.typeId.unqualified()
                 self.castType = self.typeId
 
             elif isExp2Pointer and isExp1Pointer:
-                # Pointer subtraction: the result is a long.
-                self.typeId = TypeSpecifier.LONG.toBaseType()
+                # Pointer subtraction: the result is a long/int.
+                self.typeId = TypeSpecifier.ARCH_INT.toBaseType()
                 self.castType = self.typeId
 
         else:
@@ -4128,7 +4128,7 @@ class Binary(Exp):
                 self.raiseError("Cannot compare pointers with different base addresses")
             # Compare with the indices.
             result, warning = StaticEvaluation.eval(
-                self.binaryOperator.value, TypeSpecifier.LONG, TypeSpecifier.LONG,
+                self.binaryOperator.value, TypeSpecifier.ARCH_INT, TypeSpecifier.ARCH_INT,
                 exp1Eval.pointerOffset, exp2Eval.pointerOffset
             )
             if warning:
@@ -4413,8 +4413,8 @@ class Subscript(Exp):
         if not self.index.typeId.isInteger():
             self.raiseError("Index must be an integer")
 
-        if self.index.typeId.unqualified() != TypeSpecifier.LONG.toBaseType():
-            self.index = self.createChild(Cast, TypeSpecifier.LONG.toBaseType(), self.index, True)
+        if self.index.typeId.unqualified() != TypeSpecifier.ARCH_INT.toBaseType():
+            self.index = self.createChild(Cast, TypeSpecifier.ARCH_INT.toBaseType(), self.index, True)
 
         # Get inner type.
         self.typeId = self.pointer.typeId.declarator
@@ -4540,7 +4540,7 @@ class Arrow(Exp):
 
 class SizeOf(Exp):
     def parse(self, *args):
-        self.typeId = TypeSpecifier.ULONG.toBaseType()
+        self.typeId = TypeSpecifier.ARCH_UINT.toBaseType()
 
         self.expect("sizeof")
         self.inner: Exp = self._parseUnaryExpression()
@@ -4557,7 +4557,7 @@ class SizeOf(Exp):
 
 class SizeOfType(Exp):
     def parse(self, *args):
-        self.typeId = TypeSpecifier.ULONG.toBaseType()
+        self.typeId = TypeSpecifier.ARCH_UINT.toBaseType()
 
         self.expect("sizeof")
         self.expect("(")

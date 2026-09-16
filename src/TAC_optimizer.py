@@ -165,8 +165,7 @@ class TACOptimizer:
                         if isinstance(inst.result.valueType, BaseDeclaratorType):
                             toType = inst.result.valueType.baseType
                         else:
-                            # TODO: This is only for 64-bit systems.
-                            toType = TypeSpecifier.ULONG
+                            toType = TypeSpecifier.ARCH_UINT
 
                         value, warning = StaticEvaluation.parseValue(toType, inst.exp.constantValue)
                         foldedConst = TACValue(True, inst.result.valueType, str(value))
@@ -178,8 +177,7 @@ class TACOptimizer:
                         if isinstance(inst.dst.valueType, BaseDeclaratorType):
                             toType = inst.dst.valueType.baseType
                         else:
-                            # TODO: This is only for 64-bit systems.
-                            toType = TypeSpecifier.ULONG
+                            toType = TypeSpecifier.ARCH_UINT
 
                         value, warning = StaticEvaluation.parseValue(toType, inst.src.constantValue)
                         foldedConst = TACValue(True, inst.dst.valueType, str(value))
