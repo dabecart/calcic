@@ -11,7 +11,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import math
 import enum
-from typing import Any, Type, TypeVar, Final
+from typing import Type, TypeVar, Final
 
 from src.TAC import *
 from src.calci32.types_calci32 import AssemblyType
@@ -265,7 +265,7 @@ class AssemblerProgram(AssemblyAST):
     .globl	_start
 _start:
     # Initialize the stack.
-    mov     $0x1000, %rsp
+    mov     $__stack_start, %rsp
     mov     %rsp, %rsb
 
     # Call the main function.
@@ -627,7 +627,7 @@ class AssemblerFunction(AssemblyAST):
         return (regArgs, False)
 
     def firstPass(self):
-        REG_ORDER: Final[list[REG]] = [REG.R2, REG.R3, REG.R4, REG.R5, REG.R6, REG.R7]
+        REG_ORDER: Final[list[REG]] = [REG.R0, REG.R1, REG.R2, REG.R3, REG.R4, REG.R5]
 
         # Is the return value passed from the stack?
         self.returnInStack = \
@@ -650,14 +650,14 @@ class AssemblerFunction(AssemblyAST):
         self.regArgs, self.stackInputArgs = self.classifyArguments(tacArgs, self.returnInStack)
 
         if self.returnInStack:
-            # Store the address of the return value, which is stored in R2 to the stack.
+            # Store the address of the return value, which is stored in R0 to the stack.
             self.createInst(MOVE, 
                             AssemblyType.LONGWORD,
-                            Register(AssemblyType.LONGWORD, REG.R2), 
+                            Register(AssemblyType.LONGWORD, REG.R0), 
                             Memory(AssemblyType.LONGWORD, REG.RSB, -8))
 
-        # The order of arguments is: R2 to R7 and then stack (pushed in reversed order).
-        # Do not use R2 if the return value is stored in the stack.
+        # The order of arguments is: R0 to R5 and then stack (pushed in reversed order).
+        # Do not use R0 if the return value is stored in the stack.
         for (value, movAsmbType), reg in zip(self.regArgs, REG_ORDER[(1 if self.returnInStack else 0):]):
             if self.function.isVariadic:
                 raise ValueError()
@@ -672,7 +672,7 @@ class AssemblerFunction(AssemblyAST):
         for (value, movAsmbType) in self.stackInputArgs:
             if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                 self.instructions.extend(
-                    self.copyBytes(Memory(AssemblyType.WORD, REG.RSB, stackOffset), value, movAsmbType)
+                    self.copyBytes(Memory(AssemblyType.LONGWORD, REG.RSB, stackOffset), value, movAsmbType)
                 )
             else:
                 # Move to the stack.
@@ -905,7 +905,7 @@ class AssemblerFunction(AssemblyAST):
                         self.createInst(MOV, exp, Register(exp.assemblyType, REG.R2))
                         # Transfer to another register whilst extending.
                         self.createInst(MOV, Register(exp.assemblyType, REG.R2, signExtend=True), Register(result.assemblyType, REG.R3))
-                        # Finally, store the extended value into the result.
+                        # Finally, store the extended value into the result. 
                         self.createInst(MOVE, 
                             result.assemblyType, Register(result.assemblyType, REG.R3), result)
 
@@ -947,20 +947,20 @@ class AssemblerFunction(AssemblyAST):
 
                     if self.returnInStack:
                         # When the value is returned in the stack, the return value's space is 
-                        # reserved on the caller. It's address is stored in R2.
+                        # reserved on the caller. It's address is stored in R0.
                         retAsmbVal = self.fromTACValue(inst.result)
-                        self.createInst(OFS, retAsmbVal, Register(AssemblyType.LONGWORD, REG.R2))
+                        self.createInst(OFS, retAsmbVal, Register(AssemblyType.LONGWORD, REG.R0))
 
                     # Split between arguments stored in registers and arguments stored in the stack.
                     intRegisterArgs, stackArgs = self.classifyArguments(inst.arguments, self.returnInStack)
 
-                    # The stack needs to be padded so that the function arguments start from a multiple of 16. 
-                    # Each cell in the stack is 4 bytes long.
-                    if len(stackArgs) % 4 == 0:
+                    # The stack needs to be padded so that the function arguments start from a 
+                    # multiple of 8. Each cell in the stack is 4 bytes long.
+                    if len(stackArgs) % 2 == 0:
                         stackPadding = 0
                     else:
-                        # Pad so that it starts from a multiple of 16.
-                        stackPadding = 4 - (len(stackArgs) % 4)
+                        # Pad so that it starts from a multiple of 8.
+                        stackPadding = 4
 
                     if stackPadding != 0:
                         # Allocate stack.
@@ -970,12 +970,12 @@ class AssemblerFunction(AssemblyAST):
                                         Register(AssemblyType.LONGWORD, REG.RSP), 
                                         Register(AssemblyType.LONGWORD, REG.OP1))
                         self.createInst(MOVE, 
-                                        offs.assemblyType, offs, Register(offs.assemblyType, REG.OP2))
-                        self.createInst(ALU, ALUOP.SUB, AssemblyType.LONGWORD, Register(offs.assemblyType, REG.RSP))
+                                        AssemblyType.LONGWORD, offs, Register(AssemblyType.LONGWORD, REG.OP2))
+                        self.createInst(ALU, ALUOP.SUB, AssemblyType.LONGWORD, Register(AssemblyType.LONGWORD, REG.RSP))
 
                     # Pass the function's arguments to registers and then the stack.
-                    # The order of arguments is R2 to R7 and then stack (pushed in reversed order).
-                    # Skip R2 if the return value is saved in the stack, it contains the address of the return value.
+                    # The order of arguments is R0 to R5 and then stack (pushed in reversed order).
+                    # Skip R0 if the return value is saved in the stack, it contains the address of the return value.
                     for (value, movAsmbType), reg in zip(intRegisterArgs, REG_ORDER[(1 if self.returnInStack else 0):]):
                         if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                             # There may be part of a struct/union returned in a register whose byte 
@@ -1008,8 +1008,8 @@ class AssemblerFunction(AssemblyAST):
                             self.createInst(PSH, value)
                         else:
                             # This value is under 4 bytes so it must be transferred to a register and then pushed. 
-                            self.createInst(MOVE, movAsmbType, value, Register(movAsmbType, REG.R0))
-                            self.createInst(PSH, Register(AssemblyType.LONGWORD, REG.R0))
+                            self.createInst(MOVE, movAsmbType, value, Register(movAsmbType, REG.R6))
+                            self.createInst(PSH, Register(AssemblyType.LONGWORD, REG.R6))
                     
                     if inst.isVariadic:
                         raise ValueError()
@@ -1020,8 +1020,8 @@ class AssemblerFunction(AssemblyAST):
                         self.createInst(MOVE,
                                         AssemblyType.LONGWORD,
                                         funcAddrs, 
-                                        Register(funcAddrs.assemblyType, REG.R0))
-                        self.createInst(FUN, Register(funcAddrs.assemblyType, REG.R0))
+                                        Register(funcAddrs.assemblyType, REG.R6))
+                        self.createInst(FUN, Register(funcAddrs.assemblyType, REG.R6))
                     else:
                         self.createInst(FUN, inst.identifier)
 
@@ -1057,10 +1057,10 @@ class AssemblerFunction(AssemblyAST):
                             self.createInst(MOVE, 
                                             AssemblyType.LONGWORD,
                                             Memory(AssemblyType.LONGWORD, REG.RSB, -8), 
-                                            Register(AssemblyType.LONGWORD, REG.R0))
+                                            Register(AssemblyType.LONGWORD, REG.R6))
                             # Transfer the return value to this address.
                             transferInsts = self.copyBytes(self.fromTACValue(inst.result), 
-                                                          Memory(AssemblyType.QUADWORD, REG.R0, 0), 
+                                                          Memory(AssemblyType.QUADWORD, REG.R6, 0), 
                                                           AssemblyType.fromTAC(inst.result.valueType))
                             self.instructions.extend(transferInsts)
                         else:
@@ -1089,8 +1089,8 @@ class AssemblerFunction(AssemblyAST):
 
         # Allocate the stack.
         functionStackAlloc = -Memory.STACK_OFFSET
-        # Round to the next multiple of 16. Makes it easier to align function calls.
-        functionStackAlloc = 16 * math.ceil(functionStackAlloc / 16)
+        # Round to the next multiple of 8. Makes it easier to align function calls.
+        functionStackAlloc = 8 * math.ceil(functionStackAlloc / 8)
 
         if functionStackAlloc > 0:
             # Allocate the stack.
@@ -1214,7 +1214,7 @@ class MOVE(AssemblerInstruction):
                 case AssemblyType.LONGWORD: inst = "sto"
                 case AssemblyType.WORD:     inst = "sto16"
                 case AssemblyType.BYTE:     inst = "sto8"
-                case _:                     raise ValueError()
+                case _:                     raise ValueError(f"Cannot do STO on {self.asmbType.baseType}")
         elif isinstance(self.src, (Register, Immediate, LabeledImmediate, Memory, Data)) and isinstance(self.dst, Register):
             inst = "mov"
         else:
@@ -1268,6 +1268,8 @@ class ALUOP(enum.Enum):
     NOT     = enum.auto()
     SHL     = enum.auto()
     SHR     = enum.auto()
+    SHLA    = enum.auto()
+    SHRA    = enum.auto()
     CMP     = enum.auto()
     INC     = enum.auto()
     DEC     = enum.auto()
@@ -1296,11 +1298,17 @@ class ALUOP(enum.Enum):
             case BinaryOperator.SUBTRACT:
                 return ALUOP.SUB
 
-            case BinaryOperator.LOGIC_LEFT_SHIFT | BinaryOperator.ARITHMETIC_LEFT_SHIFT:
+            case BinaryOperator.LOGIC_LEFT_SHIFT:
                 return ALUOP.SHL
 
-            case BinaryOperator.LOGIC_RIGHT_SHIFT | BinaryOperator.ARITHMETIC_RIGHT_SHIFT:
+            case BinaryOperator.LOGIC_RIGHT_SHIFT:
                 return ALUOP.SHR
+
+            case BinaryOperator.ARITHMETIC_LEFT_SHIFT:
+                return ALUOP.SHLA
+
+            case BinaryOperator.ARITHMETIC_RIGHT_SHIFT:
+                return ALUOP.SHRA
 
             case BinaryOperator.BITWISE_AND:
                 return ALUOP.AND
@@ -1589,8 +1597,8 @@ class PSH(AssemblerInstruction):
         self.operand = self.convertFromPseudo(self.operand)
 
     def thirdPass(self) -> list[AssemblerInstruction]:
-        if isinstance(self.operand, (Memory, Data)):
-            # - Stack cannot have a memory address. Save the src into temporary register R0 and then push R0.
+        if isinstance(self.operand, (Memory, Data, Immediate, LabeledImmediate)):
+            # - Stack cannot have a memory address or an immediate. Save the src into temporary register and then push it.
             movToReg = self.createChild(MOVE, self.operand.assemblyType, self.operand, Register(self.operand.assemblyType, REG.R6))
             pushFromReg = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R6))
             return [movToReg, pushFromReg]
@@ -1881,7 +1889,7 @@ class Data(AssemblerOperand):
     def print(self) -> str:
         return f"Data({self.identifier})"
 
-# (regA, regB, scale) -> regA + regB * scale
+# [regA, regB, scale] -> regA + regB * scale
 class Indexed(AssemblerOperand):
     def __init__(self, assemblyType: AssemblyType, base: Register, index: Register, scale: int,
                  parentAST: AssemblyAST | None = None) -> None:
@@ -1898,7 +1906,7 @@ class Indexed(AssemblerOperand):
         return Indexed(self.assemblyType, self.base, self.index, self.scale, self.parent)
 
     def emitCode(self) -> str:
-        return f"{self.base.emitCode()}, {self.index.emitCode()}, ${self.scale}"
+        return f"[{self.base.emitCode()}, {self.index.emitCode()}, {self.scale}]"
 
     def print(self) -> str:
         return f"Indexed({self.base}, {self.index}, {self.scale})"
