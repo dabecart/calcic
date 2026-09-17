@@ -743,15 +743,32 @@ class AST(ABC):
         match tok.id:
             case "constant":
                 # A number (without any ending identifier such as L or ul) can be considered an int 
-                # or a long.
+                # or a long. If they are binary, octal or hexadecimal, then they can be signed or 
+                # unsigned too.
+                core: str = tok.value.lower()
+                isHex: bool = core.startswith("0x")
+                isBin: bool = core.startswith("0b")
+                isOctal: bool = core.startswith("0") and len(core) > 1
+
                 try:
                     intVal = tok.parseIntegerToken()
                 except Exception as e:
                     self.raiseError(str(e))
-                if intVal >= 0x80000000:
-                    ret = self.createChild(LongConstant)
+
+                if isHex or isBin or isOctal:
+                    if intVal < 0x80000000:
+                        ret = self.createChild(IntConstant)
+                    elif intVal < 0x100000000:
+                        ret = self.createChild(UIntConstant)
+                    elif intVal < 0x8000000000000000:
+                        ret = self.createChild(LongConstant)
+                    else:
+                        ret = self.createChild(ULongConstant)
                 else:
-                    ret = self.createChild(IntConstant)
+                    if intVal < 0x80000000:
+                        ret = self.createChild(IntConstant)
+                    else:
+                        ret = self.createChild(LongConstant)
             
             case "unsigned_constant":
                 # A number ending in u can be either considered an uint or ulong.

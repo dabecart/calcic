@@ -9,6 +9,7 @@ calcic. Written by @dabecart, 2026.
 from dataclasses import dataclass, field
 from typing import Callable
 import enum
+import os
 
 from src.calcic_types import *
 from src.builtin.builtin_types import BuiltInTypes
@@ -43,7 +44,9 @@ class GlobalContext:
             case TargetArchitectures.x64:
                 self.linkerRoute = "gcc"
             case TargetArchitectures.calci32:
-                self.linkerRoute = "./linker/calcil/calcil"
+                srcFolder = os.path.dirname(os.path.abspath(__file__))
+                calcicFolder = os.path.dirname(srcFolder)
+                self.linkerRoute =  os.path.join(calcicFolder, "linker/calcil/calcil")
 
                 # TODO: remove these setters when the library classes can be compiled.
                 self.useCalcicSTDLibraries = False

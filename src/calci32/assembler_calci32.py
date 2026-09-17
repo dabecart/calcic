@@ -715,6 +715,9 @@ class AssemblerFunction(AssemblyAST):
                                 # Use the negate ALU operation.
                                 self.createInst(ALU, ALUOP.NEG, dest.assemblyType, dest)
 
+                        case UnaryOperator.BITWISE_COMPLEMENT:
+                            self.createInst(ALU, ALUOP.NOT, dest.assemblyType, dest)
+
                         case UnaryOperator.INCREMENT:
                             if inst.result.valueType.isDecimal():
                                 raise ValueError()
@@ -747,12 +750,11 @@ class AssemblerFunction(AssemblyAST):
                             if inst.result.valueType.isDecimal():
                                 raise ValueError()
                             elif inst.result.valueType.isSigned():
-                                self.createInst(ALU, ALUOP.SDIV, dest.assemblyType)
+                                # Save the high result, which is the one that stores the modulus. 
+                                # You need to pass a dummy register value.
+                                self.createInst(ALU, ALUOP.SDIV, dest.assemblyType, Register(dest.assemblyType, REG.R2), dest)
                             else:
-                                self.createInst(ALU, ALUOP.UDIV, dest.assemblyType)
-
-                            # The modulus is stored in RESH, save it to dest.
-                            self.createInst(MOVE, dest.assemblyType, Register(dest.assemblyType, REG.RESH), dest)
+                                self.createInst(ALU, ALUOP.UDIV, dest.assemblyType, Register(dest.assemblyType, REG.R2), dest)
 
                         case BinaryOperator.GREATER_THAN | BinaryOperator.GREATER_OR_EQUAL | \
                              BinaryOperator.LESS_THAN    | BinaryOperator.LESS_OR_EQUAL    | \
@@ -918,7 +920,7 @@ class AssemblerFunction(AssemblyAST):
                         # Store into a register whilst masking.
                         self.createInst(MOV, exp, Register(result.assemblyType, REG.R2))
                         # Finally, store the truncated value into the result.
-                        self.createInst(MOVE, result.assemblyType, Register(result.assemblyType, REG.R3), result)
+                        self.createInst(MOVE, result.assemblyType, Register(result.assemblyType, REG.R2), result)
 
                 case TACZeroExtend():
                     exp = self.fromTACValue(inst.exp)
@@ -931,9 +933,9 @@ class AssemblerFunction(AssemblyAST):
                         # Store into a register whilst masking it to the input type.
                         self.createInst(MOV, exp, Register(exp.assemblyType, REG.R2))
                         # Transfer to another register whilst zero extending.
-                        self.createInst(MOV, Register(exp.assemblyType, REG.R2, signExtend=False), Register(result.assemblyType, REG.R1))
+                        self.createInst(MOV, Register(exp.assemblyType, REG.R2, signExtend=False), Register(result.assemblyType, REG.R3))
                         # Finally, store the extended value into the result.
-                        self.createInst(MOVE, result.assemblyType, Register(result.assemblyType, REG.R1), result)
+                        self.createInst(MOVE, result.assemblyType, Register(result.assemblyType, REG.R3), result)
 
                 case TACFunctionCall() | TACIndirectFunctionCall():
                     returnIntRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
@@ -1208,7 +1210,11 @@ class MOVE(AssemblerInstruction):
         # Switch between STO and MOV instructions.
         inst: str
         if isinstance(self.src, Register) and isinstance(self.dst, (Memory, Data)):
-            inst = "sto"
+            match self.asmbType:
+                case AssemblyType.LONGWORD: inst = "sto"
+                case AssemblyType.WORD:     inst = "sto16"
+                case AssemblyType.BYTE:     inst = "sto8"
+                case _:                     raise ValueError()
         elif isinstance(self.src, (Register, Immediate, LabeledImmediate, Memory, Data)) and isinstance(self.dst, Register):
             inst = "mov"
         else:
@@ -1290,10 +1296,10 @@ class ALUOP(enum.Enum):
             case BinaryOperator.SUBTRACT:
                 return ALUOP.SUB
 
-            case BinaryOperator.BITWISE_LEFT_SHIFT:
+            case BinaryOperator.LOGIC_LEFT_SHIFT | BinaryOperator.ARITHMETIC_LEFT_SHIFT:
                 return ALUOP.SHL
 
-            case BinaryOperator.BITWISE_RIGHT_SHIFT:
+            case BinaryOperator.LOGIC_RIGHT_SHIFT | BinaryOperator.ARITHMETIC_RIGHT_SHIFT:
                 return ALUOP.SHR
 
             case BinaryOperator.BITWISE_AND:
