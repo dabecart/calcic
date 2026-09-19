@@ -785,9 +785,9 @@ class AssemblerFunction(AssemblyAST):
                     # Move value to OP2.
                     self.createInst(MOVE, val.assemblyType, val, Register(val.assemblyType, REG.OP2))
                     # Move R2 to OP1.
-                    self.createInst(MOVE, exp1.assemblyType, Register(exp1.assemblyType, REG.R2), Register(exp1.assemblyType, REG.OP1))
+                    self.createInst(MOVE, cond.assemblyType, Register(cond.assemblyType, REG.R2), Register(cond.assemblyType, REG.OP1))
 
-                    self.createInst(ALU, ALUOP.CMP, dest.assemblyType)
+                    self.createInst(ALU, ALUOP.CMP, cond.assemblyType)
 
                     if inst.condition.valueType.isDecimal():
                         raise ValueError()
@@ -1623,7 +1623,7 @@ class FUN(AssemblerInstruction):
             
         elif isinstance(self.callArgument, Register):
             # Indirect call.
-            return f"\tfun\t*{self.callArgument.emitCode()}\n"
+            return f"\tfun\t{self.callArgument.emitCode()}\n"
         
         else:
             raise ValueError()
