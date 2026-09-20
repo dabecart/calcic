@@ -7,7 +7,7 @@
 ***************************************************************************************************/
 
 #include <arch.h>
-#include <x64/unistd_64.h>
+#include <arch/x64/unistd_64.h>
 
 #define PROT_READ     0x1              // Page can be read.      
 #define PROT_WRITE    0x2              // Page can be written.      

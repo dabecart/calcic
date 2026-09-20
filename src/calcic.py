@@ -122,8 +122,8 @@ def main() -> None:
     inputFileBasename: str = inputFile.rsplit(".", 1)[0]
 
     # Libraries folder.
-    calcicFolder = Path(__file__).parent.parent.resolve()
-    libPath = calcicFolder / "lib"
+    calcicFolder: Path = Path(__file__).parent.parent.resolve()
+    libPath: Path = calcicFolder / "lib"
 
     # Set the architecture of the global context.
     arch = TargetArchitectures(args.architecture)

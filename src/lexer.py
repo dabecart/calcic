@@ -39,7 +39,8 @@ keywordPatterns = [
     ("enum",                re.compile(r"enum\b")),
     ("const",               re.compile(r"const\b")),
     ("typedef",             re.compile(r"typedef\b")),
-    ("volatile",             re.compile(r"volatile\b")),
+    ("volatile",            re.compile(r"volatile\b")),
+    ("__attribute__",       re.compile(r"__attribute__\b")),
 ]
 
 tokenPatterns = [

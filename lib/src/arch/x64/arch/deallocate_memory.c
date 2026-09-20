@@ -7,7 +7,7 @@
 ***************************************************************************************************/
 
 #include <arch.h>
-#include <x64/unistd_64.h>
+#include <arch/x64/unistd_64.h>
 
 static int __munmap(void *start, size_t len)
 {

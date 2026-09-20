@@ -1308,6 +1308,22 @@ class SimpleDeclarator(DeclaratorAST):
         if nextTok.id == "identifier":
             self.isIdentifier = True
             self.id = nextTok.value
+
+            # After an identifier, you may add a __attribute__.
+            self.attributes: list[str] = []
+            if self.peek().id == "__attribute__":
+                self.pop()
+                self.expect("(")
+                self.expect("(")
+
+                self.attributes.append(self.expect("identifier").value)
+                while self.peek().id == ",":
+                    self.pop()
+                    self.attributes.append(self.expect("identifier").value)
+
+                self.expect(")")
+                self.expect(")")
+
         else:
             self.isIdentifier = False
             self.declarator = self.createChild(TopDeclarator)
@@ -1315,7 +1331,7 @@ class SimpleDeclarator(DeclaratorAST):
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
         if self.isIdentifier:
-            return DeclaratorInformation(self.id, baseType, [])
+            return DeclaratorInformation(self.id, baseType, [], attributes=self.attributes)
         else:
             return self.declarator.process(baseType)
 
@@ -2132,6 +2148,7 @@ class FunctionDeclaration(Declaration):
             self.raiseError("Expected a function declaration")
 
         self.typeId: FunctionDeclaratorType = info.type
+        self.attributes: list[str] = info.attributes
         self.identifier: str = info.name
         self.returnType: DeclaratorType = info.type.returnDeclarator
 

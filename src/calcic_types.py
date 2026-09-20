@@ -9,7 +9,7 @@ calcic. Written by @dabecart, 2026.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import enum
 import struct
 import math
@@ -502,6 +502,7 @@ class DeclaratorInformation:
     type: DeclaratorType
     params: list[ParameterInformation]
     isAnonymous: bool = False
+    attributes: list[str] = field(default_factory=list)
 
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

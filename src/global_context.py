@@ -58,6 +58,6 @@ class GlobalContext:
 globalContext = GlobalContext()
 
 # If running the 'Writing a C compiler' testsuite...
-globalContext.useGCCLibraries = True
-globalContext.useCalcicSTDLibraries = False
-globalContext.generateExecutable = False
+# globalContext.useGCCLibraries = True
+# globalContext.useCalcicSTDLibraries = False
+# globalContext.generateExecutable = False

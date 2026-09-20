@@ -643,8 +643,9 @@ class AssemblerFunction(AssemblyAST):
             AssemblyType.fromTAC(self.function.funDecl.typeId.returnDeclarator). \
             members[0].classType == AssemblyClassType.MEMORY
 
-        # If the function is variadic, dump all registers into a "Register Save Area".
-        if self.function.isVariadic:
+        # If the function is variadic, dump all registers into a "Register Save Area". Do this only
+        # if the function is not crude.
+        if self.function.isVariadic and "crude" not in self.function.funDecl.attributes:
             # 48 bytes for integer registers and 128 bytes for double registers.
             registerSaveOffset = -184 if self.returnInStack else -176
             Memory.restartStackVariables(registerSaveOffset)
@@ -683,79 +684,80 @@ class AssemblerFunction(AssemblyAST):
         self.intRegArgs, self.doubleRegArgs, self.stackInputArgs = self.classifyArguments(tacArgs, 
                                                                                           self.returnInStack)
 
-        if self.returnInStack:
-            # Store the address of the return value, which is stored in DI to the stack.
-            self.createInst(MOV, 
-                            AssemblyType.QUADWORD,
-                            Register(AssemblyType.QUADWORD, REG.DI), 
-                            Memory(AssemblyType.QUADWORD, REG.BP, -8))
+        if "crude" not in self.function.funDecl.attributes:
+            if self.returnInStack:
+                # Store the address of the return value, which is stored in DI to the stack.
+                self.createInst(MOV, 
+                                AssemblyType.QUADWORD,
+                                Register(AssemblyType.QUADWORD, REG.DI), 
+                                Memory(AssemblyType.QUADWORD, REG.BP, -8))
 
-        # The order of arguments is: DI, SI, DX, CX, R8, R9 and then stack (pushed in reversed order).
-        # In parallel, double arguments must be pushed to XMM0 to XMM7 and then to the stack.
-        # Do not use DI if the return value is stored in the stack.
-        for (value, movAsmbType), reg in zip(self.intRegArgs, INT_REG_ORDER[(1 if self.returnInStack else 0):]):
-            if self.function.isVariadic:
-                # Arguments are pushed onto the stack as they appear in the argument list. When the
-                # function is variadic, all registers are already pushed onto the stack in the 
-                # Register Save Area, so there's no need to push them twice.
-                # Manually convert the TACValues to Memory objects pointing to the Register Save 
-                # Area.
-                regSaveAreaOffset = INT_REG_SAVE_AREA_OFFSET[reg]
-                if isinstance(value, Pseudo):
-                    newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
-                    Memory.stackVariables[value.name] = newMem
-                    value = newMem.createCopy()
-                elif isinstance(value, PseudoMemory):
-                    newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
-                    Memory.stackVariables[value.name] = newMem
-                    base = newMem.createCopy()
-                    value = Memory(value.assemblyType, REG.BP, base.offset + value.offset, value.parent)
+            # The order of arguments is: DI, SI, DX, CX, R8, R9 and then stack (pushed in reversed order).
+            # In parallel, double arguments must be pushed to XMM0 to XMM7 and then to the stack.
+            # Do not use DI if the return value is stored in the stack.
+            for (value, movAsmbType), reg in zip(self.intRegArgs, INT_REG_ORDER[(1 if self.returnInStack else 0):]):
+                if self.function.isVariadic:
+                    # Arguments are pushed onto the stack as they appear in the argument list. When the
+                    # function is variadic, all registers are already pushed onto the stack in the 
+                    # Register Save Area, so there's no need to push them twice.
+                    # Manually convert the TACValues to Memory objects pointing to the Register Save 
+                    # Area.
+                    regSaveAreaOffset = INT_REG_SAVE_AREA_OFFSET[reg]
+                    if isinstance(value, Pseudo):
+                        newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
+                        Memory.stackVariables[value.name] = newMem
+                        value = newMem.createCopy()
+                    elif isinstance(value, PseudoMemory):
+                        newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
+                        Memory.stackVariables[value.name] = newMem
+                        base = newMem.createCopy()
+                        value = Memory(value.assemblyType, REG.BP, base.offset + value.offset, value.parent)
+                    else:
+                        raise ValueError()
+
+                if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
+                    self.instructions.extend(self.copyBytesFromRegister(reg, value, movAsmbType.size))
                 else:
-                    raise ValueError()
+                    self.createInst(MOV, 
+                                    movAsmbType, 
+                                    Register(value.assemblyType, reg), 
+                                    value)
 
-            if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
-                self.instructions.extend(self.copyBytesFromRegister(reg, value, movAsmbType.size))
-            else:
+            for (value, movAsmbType), reg in zip(self.doubleRegArgs, DOUBLE_REG_ORDER):
+                if self.function.isVariadic:
+                    regSaveAreaOffset = DOUBLE_REG_SAVE_AREA_OFFSET[reg]
+                    if isinstance(value, Pseudo):
+                        newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
+                        Memory.stackVariables[value.name] = newMem
+                        value = newMem.createCopy()
+                    elif isinstance(value, PseudoMemory):
+                        newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
+                        Memory.stackVariables[value.name] = newMem
+                        base = newMem.createCopy()
+                        value = Memory(value.assemblyType, REG.BP, base.offset + value.offset, value.parent)
+                    else:
+                        raise ValueError()
+
                 self.createInst(MOV, 
                                 movAsmbType, 
                                 Register(value.assemblyType, reg), 
                                 value)
 
-        for (value, movAsmbType), reg in zip(self.doubleRegArgs, DOUBLE_REG_ORDER):
-            if self.function.isVariadic:
-                regSaveAreaOffset = DOUBLE_REG_SAVE_AREA_OFFSET[reg]
-                if isinstance(value, Pseudo):
-                    newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
-                    Memory.stackVariables[value.name] = newMem
-                    value = newMem.createCopy()
-                elif isinstance(value, PseudoMemory):
-                    newMem = Memory(value.assemblyType, REG.BP, regSaveAreaOffset, value.parent)
-                    Memory.stackVariables[value.name] = newMem
-                    base = newMem.createCopy()
-                    value = Memory(value.assemblyType, REG.BP, base.offset + value.offset, value.parent)
+            # The arguments in the stack start at Stack(16). From then on, add in groups of eight.
+            stackOffset = 16
+            for (value, movAsmbType) in self.stackInputArgs:
+                if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
+                    self.instructions.extend(
+                        self.copyBytes(Memory(AssemblyType.QUADWORD, REG.BP, stackOffset), value, movAsmbType)
+                    )
                 else:
-                    raise ValueError()
-
-            self.createInst(MOV, 
-                            movAsmbType, 
-                            Register(value.assemblyType, reg), 
-                            value)
-
-        # The arguments in the stack start at Stack(16). From then on, add in groups of eight.
-        stackOffset = 16
-        for (value, movAsmbType) in self.stackInputArgs:
-            if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
-                self.instructions.extend(
-                    self.copyBytes(Memory(AssemblyType.QUADWORD, REG.BP, stackOffset), value, movAsmbType)
-                )
-            else:
-                # Move to the stack.
-                self.createInst(MOV, 
-                                movAsmbType, 
-                                Memory(value.assemblyType, REG.BP, stackOffset), 
-                                value)
-            # Increment the stack offset.
-            stackOffset += 8
+                    # Move to the stack.
+                    self.createInst(MOV, 
+                                    movAsmbType, 
+                                    Memory(value.assemblyType, REG.BP, stackOffset), 
+                                    value)
+                # Increment the stack offset.
+                stackOffset += 8
 
         # Convert the function's TAC instructions into assembler instructions.
         for inst in self.function.instructions:
@@ -766,6 +768,10 @@ class AssemblerFunction(AssemblyAST):
 
             if isinstance(inst, TACBuiltInFunction):
                 self.convertBuiltInTAC(inst)
+                continue
+
+            # If crude, only __asm__ functions will be parsed.
+            if "crude" in self.function.funDecl.attributes:
                 continue
 
             match inst:
@@ -1703,8 +1709,11 @@ class AssemblerFunction(AssemblyAST):
         
         ret += "\t.text\n"
         ret += f"{self.identifier}:\n"
-        ret += f"\tpushq\t%rbp\n"
-        ret += f"\tmovq\t%rsp, %rbp\n"
+
+        # If crude, only __asm__ functions will be parsed, no psh or mov are added.
+        if "crude" not in self.function.funDecl.attributes:
+            ret += f"\tpushq\t%rbp\n"
+            ret += f"\tmovq\t%rsp, %rbp\n"
 
         for inst in self.instructions:
             ret += inst.emitCode()

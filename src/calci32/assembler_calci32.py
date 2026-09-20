@@ -256,7 +256,10 @@ class AssemblerProgram(AssemblyAST):
         pass
 
     def emitCode(self) -> str:
-        ret = """
+        ret: str = ""
+
+        if globalContext.generateExecutable:
+            ret = """
     # Set the reset vector.
     .section reset_v
     .long _start
@@ -649,39 +652,41 @@ class AssemblerFunction(AssemblyAST):
         # Classify them.
         self.regArgs, self.stackInputArgs = self.classifyArguments(tacArgs, self.returnInStack)
 
-        if self.returnInStack:
-            # Store the address of the return value, which is stored in R0 to the stack.
-            self.createInst(MOVE, 
-                            AssemblyType.LONGWORD,
-                            Register(AssemblyType.LONGWORD, REG.R0), 
-                            Memory(AssemblyType.LONGWORD, REG.RSB, -8))
-
-        # The order of arguments is: R0 to R5 and then stack (pushed in reversed order).
-        # Do not use R0 if the return value is stored in the stack.
-        for (value, movAsmbType), reg in zip(self.regArgs, REG_ORDER[(1 if self.returnInStack else 0):]):
-            if self.function.isVariadic:
-                raise ValueError()
-
-            if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
-                self.instructions.extend(self.copyBytesFromRegister(reg, value, movAsmbType.size))
-            else:
-                self.createInst(MOVE, movAsmbType, Register(value.assemblyType, reg), value)
-
-        # The arguments in the stack start at Stack(8). From then on, add in groups of four.
-        stackOffset = 8
-        for (value, movAsmbType) in self.stackInputArgs:
-            if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
-                self.instructions.extend(
-                    self.copyBytes(Memory(AssemblyType.LONGWORD, REG.RSB, stackOffset), value, movAsmbType)
-                )
-            else:
-                # Move to the stack.
+        # If crude, do not transfer parameters to the local stack.
+        if "crude" not in self.function.funDecl.attributes:
+            if self.returnInStack:
+                # Store the address of the return value, which is stored in R0 to the stack.
                 self.createInst(MOVE, 
-                                movAsmbType, 
-                                Memory(value.assemblyType, REG.RSB, stackOffset), 
-                                value)
-            # Increment the stack offset.
-            stackOffset += 4
+                                AssemblyType.LONGWORD,
+                                Register(AssemblyType.LONGWORD, REG.R0), 
+                                Memory(AssemblyType.LONGWORD, REG.RSB, -8))
+
+            # The order of arguments is: R0 to R5 and then stack (pushed in reversed order).
+            # Do not use R0 if the return value is stored in the stack.
+            for (value, movAsmbType), reg in zip(self.regArgs, REG_ORDER[(1 if self.returnInStack else 0):]):
+                if self.function.isVariadic:
+                    raise ValueError()
+
+                if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
+                    self.instructions.extend(self.copyBytesFromRegister(reg, value, movAsmbType.size))
+                else:
+                    self.createInst(MOVE, movAsmbType, Register(value.assemblyType, reg), value)
+
+            # The arguments in the stack start at Stack(8). From then on, add in groups of four.
+            stackOffset = 8
+            for (value, movAsmbType) in self.stackInputArgs:
+                if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
+                    self.instructions.extend(
+                        self.copyBytes(Memory(AssemblyType.LONGWORD, REG.RSB, stackOffset), value, movAsmbType)
+                    )
+                else:
+                    # Move to the stack.
+                    self.createInst(MOVE, 
+                                    movAsmbType, 
+                                    Memory(value.assemblyType, REG.RSB, stackOffset), 
+                                    value)
+                # Increment the stack offset.
+                stackOffset += 4
 
         # Convert the function's TAC instructions into assembler instructions.
         for inst in self.function.instructions:
@@ -692,6 +697,10 @@ class AssemblerFunction(AssemblyAST):
 
             if isinstance(inst, TACBuiltInFunction):
                 self.convertBuiltInTAC(inst)
+                continue
+
+            # If crude, only __asm__ functions will be parsed.
+            if "crude" in self.function.funDecl.attributes:
                 continue
 
             match inst:
@@ -1078,7 +1087,56 @@ class AssemblerFunction(AssemblyAST):
                     raise ValueError(f"Unexpected statement {inst} when parsing an AssemblerFunction")
 
     def convertBuiltInTAC(self, tac: TACBuiltInFunction):
-        pass
+        match tac:
+            case TACBuiltIn_asm():
+                # Move the register inputs to their registers. Calculate the immediate 
+                # representation of immediate inputs.
+                for input, inputValue in zip(tac.asmAST.inputs, tac.inValues):
+                    src = self.fromTACValue(inputValue)
+
+                    if input.ioType == BuiltIn_asmIOType.REGISTER:
+                        try:
+                            register: REG = REG[input.args]
+                        except:
+                            tac.asmAST.raiseError(f"Invalid input register {input.args}")
+
+                        self.createInst(MOV,
+                                        src.assemblyType,
+                                        src,
+                                        Register(src.assemblyType, register))
+
+                    elif input.ioType == BuiltIn_asmIOType.IMMEDIATE:
+                        if not isinstance(src, Immediate):
+                            input.exp.raiseError("Not an immediate value")
+
+                        input.setAsmbRepresentation(src.emitCode())
+                    
+                    else:
+                        raise ValueError()
+
+                # Write the given assembly code.
+                self.createInst(CODE, tac.asmAST.generateAssemblyCode())
+
+                # Move the outputs from the registers to the temporary output variables.
+                for output, outputValue in zip(tac.asmAST.outputs, tac.outValues):
+                    dst = self.fromTACValue(outputValue)
+
+                    if output.ioType == BuiltIn_asmIOType.REGISTER:
+                        try:
+                            register: REG = REG[output.args]
+                        except:
+                            tac.asmAST.raiseError(f"Invalid output register {output.args}")
+
+                        self.createInst(MOV,
+                                        dst.assemblyType,
+                                        Register(dst.assemblyType, register),
+                                        dst)
+                    
+                    else:
+                        raise ValueError()
+                    
+            case _:
+                raise ValueError(f"Unexpected built-in TAC {tac}")
 
     def secondPass(self):
         for inst in self.instructions:
@@ -1113,8 +1171,11 @@ class AssemblerFunction(AssemblyAST):
         
         ret += "\t.section text\n"
         ret += f"{self.identifier}:\n"
-        ret += f"\tpsh\t%rsb\n"
-        ret += f"\tmov\t%rsp, %rsb\n"
+
+        # If crude, only __asm__ functions will be parsed, no psh or mov are added.
+        if "crude" not in self.function.funDecl.attributes:
+            ret += f"\tpsh\t%rsb\n"
+            ret += f"\tmov\t%rsp, %rsb\n"
 
         for inst in self.instructions:
             ret += inst.emitCode()
@@ -1587,6 +1648,18 @@ class COMMENT(AssemblerInstruction):
 
     def print(self) -> str:
         return f"\n# {self.comment}"
+
+# Writes raw code into the assembly output.
+class CODE(AssemblerInstruction):
+    def __init__(self, asmbCode: str, parentAST: AssemblyAST | None = None) -> None:
+        self.asmbCode = asmbCode
+        super().__init__(parentAST)
+
+    def emitCode(self) -> str:
+        return self.asmbCode
+
+    def print(self) -> str:
+        return f"\n# __asm__\n{self.asmbCode}"
 
 class PSH(AssemblerInstruction):
     def __init__(self, operand: AssemblerOperand, parentAST: AssemblyAST | None = None) -> None:

@@ -223,9 +223,8 @@ class BuiltIn_offsetof(BuiltInFunctionCall):
         del self.context.identifierMap[name]
         del self.context.variablesMap[mangledName]
 
-        # Return type is size_t (long).
-        # TODO: This is in x64!
-        return TypeSpecifier.ULONG.toBaseType()
+        # Return type is size_t.
+        return TypeSpecifier.ARCH_UINT.toBaseType()
 
     def print(self, padding: int) -> str:
         pad = " " * padding

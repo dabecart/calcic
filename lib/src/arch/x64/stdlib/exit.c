@@ -8,7 +8,7 @@
 
 #define COMPILING_STDLIB
 #include <stdlib.h>
-#include <x64/unistd_64.h>
+#include <arch/x64/unistd_64.h>
 
 void exit(int status) {
     __asm__("\t"
