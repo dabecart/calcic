@@ -25,8 +25,6 @@ class GlobalContext:
     
     useGCCLibraries: bool                                   = False
     useCalcicSTDLibraries: bool                             = True
-    # To know when to add the entry point to the generated assembly.
-    generateExecutable: bool                                = True
 
     builtInTypes: BuiltInTypes                              = field(default_factory=lambda: BuiltInTypes())
     isBuiltInFunctionByIdentifier: Callable                 = lambda *args, **kwargs: None
@@ -48,10 +46,6 @@ class GlobalContext:
                 calcicFolder = os.path.dirname(srcFolder)
                 self.linkerRoute =  os.path.join(calcicFolder, "linker/calcil/calcil")
 
-                # TODO: remove these setters when the library classes can be compiled.
-                self.useCalcicSTDLibraries = False
-                self.useGCCLibraries = True
-
             case _:
                 raise ValueError(f"Invalid architecture: {arch}")
 
@@ -60,4 +54,3 @@ globalContext = GlobalContext()
 # If running the 'Writing a C compiler' testsuite...
 # globalContext.useGCCLibraries = True
 # globalContext.useCalcicSTDLibraries = False
-# globalContext.generateExecutable = False

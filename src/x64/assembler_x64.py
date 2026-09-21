@@ -239,28 +239,6 @@ class AssemblerProgram(AssemblyAST):
 
     def emitCode(self) -> str:
         ret = ""
-        if not globalContext.useGCCLibraries and globalContext.generateExecutable:
-            # The _start entry point has to be manually added.
-            ret = """
-	.text
-	.globl	_start
-_start:
-	pushq	%rbp
-	movq	%rsp, %rbp
-	subq	$16, %rsp
-	movl	$0, %eax
-	call	main@PLT
-	movl	%eax, -4(%rbp)
-	movl	-4(%rbp), %eax
-	
-    # Perform a syscall "exit" (code 60).
-	movl %eax, %edi 
-	movl $60, %eax
-	syscall
-	ret
-
-"""
-
         for func in self.programDefs:
             ret += func.emitCode() + "\n"
 
@@ -1152,9 +1130,7 @@ class AssemblerFunction(AssemblyAST):
                             # size is not standard, i.e. 3, 5, 6 or 7 bytes.
                             self.instructions.extend(self.copyBytesToRegister(value, reg, movAsmbType.size))
                         else:
-                            self.instructions.extend(
-                                self.copyBytes(value, Register(value.assemblyType, reg), movAsmbType)
-                            )
+                            self.createInst(MOV, movAsmbType, value, Register(value.assemblyType, reg))
 
                     # Now with the double registers.
                     for (value, movAsmbType), reg in zip(doubleRegisterArgs, DOUBLE_REG_ORDER):
@@ -1173,7 +1149,7 @@ class AssemblerFunction(AssemblyAST):
                                 self.fromTACValue(TACValue(True, TypeSpecifier.LONG.toBaseType(), "8")),
                                 Register(AssemblyType.QUADWORD, REG.SP))
                             self.instructions.extend(self.copyBytes(value, Memory(value.assemblyType, REG.SP, 0), movAsmbType))
-                        elif isinstance(value, (Register, Immediate)) or value.assemblyType in (AssemblyType.QUADWORD, AssemblyType.DOUBLE):
+                        elif isinstance(value, (Register, Immediate)) or value.assemblyType == AssemblyType.QUADWORD:
                             # This value can be directly pushed as it is 8 bytes.
                             self.createInst(PUSH, value)
                         else:
@@ -2228,13 +2204,7 @@ class PUSH(AssemblerInstruction):
             # push the 64 bit AX.
             # - Cannot push a 64-bit immediate, instead move it to a register and then push it.
             
-            # A movsd (move double) operation cannot be done to REG.AX, but XMMx registers cannot be
-            # pushed onto the stack.
-            if self.operand.assemblyType.isDecimal():
-                asmbType = AssemblyType.QUADWORD
-            else:
-                asmbType = self.operand.assemblyType
-
+            asmbType = self.operand.assemblyType
             movToReg = self.createChild(MOV, asmbType, self.operand, Register(asmbType, REG.AX))
             pushFromReg = self.createChild(PUSH, Register(AssemblyType.QUADWORD, REG.AX))
             return [movToReg, pushFromReg]

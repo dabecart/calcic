@@ -43,7 +43,7 @@ class AssemblyAST(ABC):
         pass
 
     # Third assembler pass.
-    # Fixes invalid instructions (instructions that use two memory locations).
+    # Fixes invalid instructions (instructions that use two memory locations for example).
     # Adds allocation calls for the stack.
     @abstractmethod
     def thirdPass(self):
@@ -76,12 +76,6 @@ class AssemblyAST(ABC):
             if found is not None:
                 return Data(AssemblyType.fromTAC(tacValue.valueType), found.identifier, 0, self)
 
-            # In x64, decimal numbers are stored into memory and cannot be used as immediate.
-            if tacValue.valueType.isDecimal():
-                doubleConstant = AssemblerStaticConstant.newSimpleConstant(
-                    tacValue.valueType, tacValue.print(), isGlobal=False)
-                return Data(AssemblyType.fromTAC(tacValue.valueType), doubleConstant.identifier, 0, self)
-            
             # Functions behave like Data constants.
             if isinstance(tacValue.valueType, FunctionDeclaratorType):
                 return Data(AssemblyType.LONGWORD, tacValue.constantValue, 0, self)
@@ -257,29 +251,6 @@ class AssemblerProgram(AssemblyAST):
 
     def emitCode(self) -> str:
         ret: str = ""
-
-        if globalContext.generateExecutable:
-            ret = """
-    # Set the reset vector.
-    .section reset_v
-    .long _start
-
-    .section text
-    .globl	_start
-_start:
-    # Initialize the stack.
-    mov     $__stack_start, %rsp
-    mov     %rsp, %rsb
-
-    # Call the main function.
-    fun     main
-
-    # Infinite loop.
-_end:
-    brk
-    jmp     _end
-    
-"""
 
         for func in self.programDefs:
             ret += func.emitCode() + "\n"
@@ -556,9 +527,11 @@ class AssemblerFunction(AssemblyAST):
             argType = destinationValue.assemblyType
 
             if argType.isScalar():
-                if regsAvailable > 0:
+                # Quads need to use two 32-bit registers.
+                argLen: int = 2 if argType == AssemblyType.QUADWORD else 1
+                if regsAvailable >= argLen:
                     regArgs.append((destinationValue, argType))
-                    regsAvailable -= 1
+                    regsAvailable -= argLen
                 else:
                     stackArgs.append((destinationValue, argType))
             else:
@@ -663,14 +636,23 @@ class AssemblerFunction(AssemblyAST):
 
             # The order of arguments is: R0 to R5 and then stack (pushed in reversed order).
             # Do not use R0 if the return value is stored in the stack.
-            for (value, movAsmbType), reg in zip(self.regArgs, REG_ORDER[(1 if self.returnInStack else 0):]):
+            regArgIndex = 1 if self.returnInStack else 0
+            for value, movAsmbType in self.regArgs:
                 if self.function.isVariadic:
                     raise ValueError()
 
                 if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
-                    self.instructions.extend(self.copyBytesFromRegister(reg, value, movAsmbType.size))
+                    self.instructions.extend(self.copyBytesFromRegister(REG_ORDER[regArgIndex], value, movAsmbType.size))
+                    regArgIndex += 1
+                elif movAsmbType.baseType == AssemblyType.QUADWORD:
+                    self.createInst(STOQ, 
+                                    Register(AssemblyType.LONGWORD, REG_ORDER[regArgIndex]), 
+                                    Register(AssemblyType.LONGWORD, REG_ORDER[regArgIndex+1]), 
+                                    value)
+                    regArgIndex += 2
                 else:
-                    self.createInst(MOVE, movAsmbType, Register(value.assemblyType, reg), value)
+                    self.createInst(MOVE, movAsmbType, Register(value.assemblyType, REG_ORDER[regArgIndex]), value)
+                    regArgIndex += 1
 
             # The arguments in the stack start at Stack(8). From then on, add in groups of four.
             stackOffset = 8
@@ -747,40 +729,60 @@ class AssemblerFunction(AssemblyAST):
                     exp2: AssemblerOperand = self.fromTACValue(inst.exp2)
                     dest: AssemblerOperand = self.fromTACValue(inst.result)
 
-                    # Move exp1 to R2. Do this as the operations below would surely overwrite OP1.
-                    self.createInst(MOVE, exp1.assemblyType, exp1, Register(exp1.assemblyType, REG.R2))
-                    # Move exp2 to OP2.
-                    self.createInst(MOVE, exp2.assemblyType, exp2, Register(exp2.assemblyType, REG.OP2))
-                    # Move R2 to OP1.
-                    self.createInst(MOVE, exp1.assemblyType, Register(exp1.assemblyType, REG.R2), Register(exp1.assemblyType, REG.OP1))
+                    if dest.assemblyType == AssemblyType.QUADWORD:
+                        # For long/unsigned long operations, make the call to the included long functions. These 
+                        # functions are written in C, compiled separately and linked to all calci32 programs. 
+                        # Source code can be found at /lib/src/arch/calci32/long.c
+                        # Therefore, all long operations are taken as function calls. ABI must be followed.
 
-                    match inst.operator:
-                        case BinaryOperator.MODULUS:
-                            if inst.result.valueType.isDecimal():
-                                raise ValueError()
-                            elif inst.result.valueType.isSigned():
-                                # Save the high result, which is the one that stores the modulus. 
-                                # You need to pass a dummy register value.
-                                self.createInst(ALU, ALUOP.SDIV, dest.assemblyType, Register(dest.assemblyType, REG.R2), dest)
-                            else:
-                                self.createInst(ALU, ALUOP.UDIV, dest.assemblyType, Register(dest.assemblyType, REG.R2), dest)
+                        self.createInst(MOVQ, exp1, Register(AssemblyType.LONGWORD, REG.R0), Register(AssemblyType.LONGWORD, REG.R1))
+                        self.createInst(MOVQ, exp2, Register(AssemblyType.LONGWORD, REG.R2), Register(AssemblyType.LONGWORD, REG.R3))
 
-                        case BinaryOperator.GREATER_THAN | BinaryOperator.GREATER_OR_EQUAL | \
-                             BinaryOperator.LESS_THAN    | BinaryOperator.LESS_OR_EQUAL    | \
-                             BinaryOperator.EQUAL        | BinaryOperator.NOT_EQUAL:
+                        retType: str
+                        if inst.result.valueType == TypeSpecifier.LONG.toBaseType():
+                            retType = "long"
+                        else:
+                            retType = "ulong"
 
-                            if inst.result.valueType.isDecimal():
-                                raise ValueError()
-                            else:
-                                self.createInst(ALU, ALUOP.CMP, dest.assemblyType)
-                                self.createInst(SET, 
-                                                ConditionCode.fromBinaryOperator(inst.operator, inst.exp1.valueType), 
-                                                dest)
+                        self.createInst(FUN, f"__{inst.operator.name.lower()}_{retType}")
 
-                        case _:
-                            self.createInst(ALU, 
-                                            ALUOP.fromBinaryOperator(inst.operator, inst.exp1.valueType), 
-                                            dest.assemblyType, dest)
+                        self.createInst(STOQ, Register(AssemblyType.LONGWORD, REG.R0), Register(AssemblyType.LONGWORD, REG.R1), dest)
+
+                    else:
+                        # Move exp1 to R2. Do this as the operations below would surely overwrite OP1.
+                        self.createInst(MOVE, exp1.assemblyType, exp1, Register(exp1.assemblyType, REG.R2))
+                        # Move exp2 to OP2.
+                        self.createInst(MOVE, exp2.assemblyType, exp2, Register(exp2.assemblyType, REG.OP2))
+                        # Move R2 to OP1.
+                        self.createInst(MOVE, exp1.assemblyType, Register(exp1.assemblyType, REG.R2), Register(exp1.assemblyType, REG.OP1))
+
+                        match inst.operator:
+                            case BinaryOperator.MODULUS:
+                                if inst.result.valueType.isDecimal():
+                                    raise ValueError()
+                                elif inst.result.valueType.isSigned():
+                                    # Save the high result, which is the one that stores the modulus. 
+                                    # You need to pass a dummy register value.
+                                    self.createInst(ALU, ALUOP.SDIV, dest.assemblyType, Register(dest.assemblyType, REG.R2), dest)
+                                else:
+                                    self.createInst(ALU, ALUOP.UDIV, dest.assemblyType, Register(dest.assemblyType, REG.R2), dest)
+
+                            case BinaryOperator.GREATER_THAN | BinaryOperator.GREATER_OR_EQUAL | \
+                                BinaryOperator.LESS_THAN    | BinaryOperator.LESS_OR_EQUAL    | \
+                                BinaryOperator.EQUAL        | BinaryOperator.NOT_EQUAL:
+
+                                if inst.result.valueType.isDecimal():
+                                    raise ValueError()
+                                else:
+                                    self.createInst(ALU, ALUOP.CMP, dest.assemblyType)
+                                    self.createInst(SET, 
+                                                    ConditionCode.fromBinaryOperator(inst.operator, inst.exp1.valueType), 
+                                                    dest)
+
+                            case _:
+                                self.createInst(ALU, 
+                                                ALUOP.fromBinaryOperator(inst.operator, inst.exp1.valueType), 
+                                                dest.assemblyType, dest)
 
                 case TACJump():
                     self.createInst(JMP, inst.target)
@@ -985,15 +987,22 @@ class AssemblerFunction(AssemblyAST):
                     # Pass the function's arguments to registers and then the stack.
                     # The order of arguments is R0 to R5 and then stack (pushed in reversed order).
                     # Skip R0 if the return value is saved in the stack, it contains the address of the return value.
-                    for (value, movAsmbType), reg in zip(intRegisterArgs, REG_ORDER[(1 if self.returnInStack else 0):]):
+                    regArgIndex = 1 if self.returnInStack else 0
+                    for value, movAsmbType in intRegisterArgs:
                         if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                             # There may be part of a struct/union returned in a register whose byte 
                             # size is not standard, i.e. 3, 5, 6 or 7 bytes.
-                            self.instructions.extend(self.copyBytesToRegister(value, reg, movAsmbType.size))
+                            self.instructions.extend(self.copyBytesToRegister(value, REG_ORDER[regArgIndex], movAsmbType.size))
+                            regArgIndex += 1
+                        elif movAsmbType.baseType == AssemblyType.QUADWORD:
+                            self.createInst(MOVQ, 
+                                            value,
+                                            Register(AssemblyType.LONGWORD, REG_ORDER[regArgIndex]), 
+                                            Register(AssemblyType.LONGWORD, REG_ORDER[regArgIndex+1]))
+                            regArgIndex += 2
                         else:
-                            self.instructions.extend(
-                                self.copyBytes(value, Register(value.assemblyType, reg), movAsmbType)
-                            )
+                            self.createInst(MOVE, movAsmbType, value, Register(value.assemblyType, REG_ORDER[regArgIndex]))
+                            regArgIndex += 1
 
                     # Push the values in reversed order.
                     for (value, movAsmbType) in reversed(stackArgs):
@@ -1010,9 +1019,7 @@ class AssemblerFunction(AssemblyAST):
                             self.createInst(ALU, ALUOP.SUB, AssemblyType.LONGWORD, Register(offs.assemblyType, REG.RSP))
                             self.instructions.extend(self.copyBytes(value, Memory(value.assemblyType, REG.RSP, 0), movAsmbType))
 
-                        elif value.assemblyType == AssemblyType.QUADWORD:
-                            raise ValueError()
-                        elif isinstance(value, (Register, Immediate)) or value.assemblyType == AssemblyType.LONGWORD:
+                        elif isinstance(value, (Register, Immediate)) or value.assemblyType in (AssemblyType.LONGWORD, AssemblyType.QUADWORD):
                             # This value can be directly pushed as it is 4 bytes.
                             self.createInst(PSH, value)
                         else:
@@ -1230,11 +1237,6 @@ class AssemblerInstruction(AssemblyAST):
 class MOVE(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, src: AssemblerOperand, dst: AssemblerOperand,
                  parentAST: AssemblyAST | None = None) -> None:
-        if not isinstance(src, AssemblerOperand):
-            raise ValueError(f"Invalid argument {src}: MOV only receives AssemblerOperands")
-        if not isinstance(dst, AssemblerOperand):
-            raise ValueError(f"Invalid argument {dst}: MOV only receives AssemblerOperands")
-        
         self.asmbType = asmbType
         self.src = src
         self.dst = dst
@@ -1246,7 +1248,32 @@ class MOVE(AssemblerInstruction):
         self.dst = self.convertFromPseudo(self.dst)
 
     def thirdPass(self) -> list[AssemblerInstruction]:
-        if (isinstance(self.src, (Immediate, Memory, Data)) and isinstance(self.dst, (Memory, Data))):
+        if self.asmbType == AssemblyType.QUADWORD:
+            if isinstance(self.src, Immediate) and isinstance(self.dst, (Memory, Data)):
+                # Moving a quad immediate to memory. Split in two longword immediates, pass them to 
+                # a register and store into memory using a STOQ operation.
+                imm: int = int(self.src.valueStr)
+                lowVal = imm & 0xFFFFFFFF
+                highVal = (imm >> 32) & 0xFFFFFFFF
+
+                low = self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(lowVal)))
+                high = self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(highVal)))
+
+                movToRegLow = self.createChild(MOVE, AssemblyType.LONGWORD, low, Register(AssemblyType.LONGWORD, REG.R6))
+                movToRegHigh = self.createChild(MOVE, AssemblyType.LONGWORD, high, Register(AssemblyType.LONGWORD, REG.R7))
+                stoOp = self.createChild(STOQ, Register(AssemblyType.LONGWORD, REG.R6), Register(AssemblyType.LONGWORD, REG.R7), self.dst)
+                return [movToRegLow, movToRegHigh, stoOp]
+
+            elif isinstance(self.src, (Memory, Data)) and isinstance(self.dst, (Memory, Data)):
+                # Move quad from memory to memory. Use a MOVQ and then a STOQ operation.
+                movOp = self.createChild(MOVQ, self.src, Register(AssemblyType.LONGWORD, REG.R6), Register(AssemblyType.LONGWORD, REG.R7))
+                stoOp = self.createChild(STOQ, Register(AssemblyType.LONGWORD, REG.R6), Register(AssemblyType.LONGWORD, REG.R7), self.dst)
+                return [movOp, stoOp]
+
+            else:
+                raise ValueError(f"Cannot move a quad from {self.src.print()} to {self.dst.print()}") 
+
+        elif (isinstance(self.src, (Immediate, Memory, Data)) and isinstance(self.dst, (Memory, Data))):
             # - MOV cannot have two memory addresses. 
             # - Cannot MOV a constant into memory.
             # Save the src into a temporary register and then pass it to the dst. 
@@ -1282,11 +1309,7 @@ class MOVE(AssemblerInstruction):
             raise ValueError(f"Cannot emit code for this MOV instruction: {self.print()}")
 
         if self.asmbType == AssemblyType.QUADWORD:
-            # Use the stoq/movq instruction for 8 byte values.
-            inst += "q"
-            # Move the QUAD using two LONG.
-            self.src.assemblyType = AssemblyType.LONGWORD
-            self.dst.assemblyType = AssemblyType.LONGWORD
+            raise ValueError("Cannot MOVE quadwords!")
         else:
             # Set the type to that of the instruction.
             self.src.assemblyType = self.asmbType
@@ -1298,22 +1321,95 @@ class MOVE(AssemblerInstruction):
         return f"Mov({self.src}, {self.dst})\n"
 
 class MOV(AssemblerInstruction):
-    def __init__(self, src: AssemblerOperand, dst: AssemblerOperand, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, src: AssemblerOperand, dst: Register, 
+                 parentAST: AssemblyAST | None = None) -> None:
 
         self.src = src
         self.dst = dst
+
+        if not isinstance(dst, Register):
+            raise ValueError("Cannot create a MOV without a register destination")
 
         super().__init__(parentAST)
 
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
-        self.dst = self.convertFromPseudo(self.dst)
 
     def emitCode(self) -> str:
         return f"\tmov\t{self.src.emitCode()}, {self.dst.emitCode()}\n"
 
     def print(self) -> str:
         return f"Mov({self.src}, {self.dst})\n"
+
+# MOVQ does not exist as a single instruction. This virtual instruction is used to move quad data 
+# from memory to different registers.
+class MOVQ(AssemblerInstruction):
+    def __init__(self, src: AssemblerOperand, dstLow: Register, dstHigh: Register, 
+                 parentAST: AssemblyAST | None = None) -> None:
+
+        self.src = src
+        self.dstLow = dstLow
+        self.dstHigh = dstHigh
+
+        if not isinstance(dstLow, Register) or not isinstance(dstHigh, Register):
+            raise ValueError("Cannot create a MOVQ without register destinations")
+
+        super().__init__(parentAST)
+
+    def secondPass(self):
+        self.src = self.convertFromPseudo(self.src)
+
+    def emitCode(self) -> str:
+        # Divide the MOVQ in two MOV instructions.
+        if isinstance(self.src, (Memory, Data)):
+            low = self.src.createCopy()
+            high = self.src.createCopy()
+            high.offset += 4
+
+            dividedInstructions = [
+                self.createChild(MOVE, AssemblyType.LONGWORD, low, self.dstLow),
+                self.createChild(MOVE, AssemblyType.LONGWORD, high, self.dstHigh)
+            ]
+            return "".join([inst.emitCode() for inst in dividedInstructions])
+
+        raise ValueError()
+
+    def print(self) -> str:
+        return f"Movq({self.src}, {self.dstLow}, {self.dstHigh})\n"
+
+class STOQ(AssemblerInstruction):
+    def __init__(self, srcLow: Register, srcHigh: Register, dst: AssemblerOperand, 
+                 parentAST: AssemblyAST | None = None) -> None:
+
+        self.srcLow = srcLow
+        self.srcHigh = srcHigh
+        self.dst = dst
+
+        if not isinstance(srcLow, Register) or not isinstance(srcHigh, Register):
+            raise ValueError("Cannot create a STOQ without register sources")
+
+        super().__init__(parentAST)
+
+    def secondPass(self):
+        self.dst = self.convertFromPseudo(self.dst)
+
+    def emitCode(self) -> str:
+        # Divide the STOQ in two MOV instructions.
+        if isinstance(self.dst, (Memory, Data)):
+            low = self.dst.createCopy()
+            high = self.dst.createCopy()
+            high.offset += 4
+
+            dividedInstructions = [
+                self.createChild(MOVE, AssemblyType.LONGWORD, self.srcLow, low),
+                self.createChild(MOVE, AssemblyType.LONGWORD, self.srcHigh, high)
+            ]
+            return "".join([inst.emitCode() for inst in dividedInstructions])
+
+        raise ValueError()
+
+    def print(self) -> str:
+        return f"Stoq({self.srcLow}, {self.srcHigh}, {self.dst})\n"
 
 class ALUOP(enum.Enum):
     ADD     = enum.auto()
@@ -1670,12 +1766,41 @@ class PSH(AssemblerInstruction):
         self.operand = self.convertFromPseudo(self.operand)
 
     def thirdPass(self) -> list[AssemblerInstruction]:
-        if isinstance(self.operand, (Memory, Data, Immediate, LabeledImmediate)):
-            # - Stack cannot have a memory address or an immediate. Save the src into temporary register and then push it.
+        if self.operand.assemblyType == AssemblyType.QUADWORD:
+            if isinstance(self.operand, (Memory, Data)):
+                # Stack cannot receive a memory address. Save the src into temporary register and then push it.
+                # If it's a QUAD, do two PSH using intermediary registers.
+                low = self.operand.createCopy()
+                high = self.operand.createCopy()
+                high.offset += 4
+
+                movToRegLow = self.createChild(MOVE, AssemblyType.LONGWORD, low, Register(AssemblyType.LONGWORD, REG.R6))
+                movToRegHigh = self.createChild(MOVE, AssemblyType.LONGWORD, high, Register(AssemblyType.LONGWORD, REG.R7))
+                pushFromRegLow = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R6))
+                pushFromRegHigh = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R7))
+                return [movToRegLow, movToRegHigh, pushFromRegLow, pushFromRegHigh]
+            elif isinstance(self.operand, Immediate):
+                # Stack cannot receive an immediate. Save the src into temporary register and then push it.
+                # Split the 64-bit immediate in two 32-bit immediates.
+                imm: int = int(self.operand.valueStr)
+                lowVal = imm & 0xFFFFFFFF
+                highVal = (imm >> 32) & 0xFFFFFFFF
+
+                low = self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(lowVal)))
+                high = self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(highVal)))
+
+                movToRegLow = self.createChild(MOVE, AssemblyType.LONGWORD, low, Register(AssemblyType.LONGWORD, REG.R6))
+                movToRegHigh = self.createChild(MOVE, AssemblyType.LONGWORD, high, Register(AssemblyType.LONGWORD, REG.R7))
+                pushFromRegLow = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R6))
+                pushFromRegHigh = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R7))
+                return [movToRegLow, movToRegHigh, pushFromRegLow, pushFromRegHigh]
+        
+        elif isinstance(self.operand, (Memory, Data, Immediate, LabeledImmediate)):
+            # Stack cannot receive an immediate or memory. Save the src into temporary register and then push it.
             movToReg = self.createChild(MOVE, self.operand.assemblyType, self.operand, Register(self.operand.assemblyType, REG.R6))
             pushFromReg = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R6))
             return [movToReg, pushFromReg]
-        
+
         return [self]
 
     def emitCode(self) -> str:
@@ -1809,8 +1934,6 @@ class Immediate(AssemblerOperand):
 
         if not self.value.isConstant:
             raise ValueError("Cannot create an Immediate operand from a not constant value")
-
-        self.intVal = int(self.valueStr)
 
         super().__init__(AssemblyType.fromTAC(self.value.valueType), parentAST)
 

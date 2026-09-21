@@ -129,191 +129,192 @@ def main() -> None:
     arch = TargetArchitectures(args.architecture)
     globalContext.setArchitecture(arch)
 
-    # When generating an object (.o), do not add the entry point. Only do it when generating an 
-    # executable.
-    globalContext.generateExecutable = not args.generate_object
-    
     if args.optimize > 0 and args.debug:
         print(f"Cannot optimize program and generate debug information.", file=sys.stderr)
         exit(1)
     globalContext.addDebugInfo = args.debug
 
-    """
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    PREPROCESSOR
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    """
-    # Use the calcic standard libraries and not the GCC's.
-    preprocessCommand = ["gcc", "-E", inputFile, "-o", f"{inputFileBasename}.i"]
-    if not globalContext.useGCCLibraries:
-        # Set the lib/headers folder as a system directory for the preprocessor.
-        preprocessCommand += ["-nostdinc", "-isystem", str(libPath / "headers")]
-    
-    preprocessStatus = subprocess.run(preprocessCommand)
-    retCode = preprocessStatus.returncode
-
-    if retCode != 0:
-        exit(retCode)
-
-    """
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    LEXER
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    """
-    try:
-        tokens = lexer.lex(f"{inputFileBasename}.i")
-        if args.verbose:
-            print(f"Tokens:\n{tokens}\n")
-    except Exception as e:
-        os.remove(f"{inputFileBasename}.i")
-        print(f"Lexer exception:\n{e}", file=sys.stderr)
-        if args.verbose:
-            print(traceback.format_exc(), file=sys.stderr)
-        exit(1)
-
-    os.remove(f"{inputFileBasename}.i")
-
-    if args.lex:
-        exit(0)
-
-    # The global context stores variables used on all stages of the compiler.
-    # Add the built-in function handlers to the global context.
-    BuiltInFunctions.connectHandlersToContext(globalContext)
-
-    """
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    PARSER
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    """
-    try:
-        # Create the context.
-        context = parser.Context()
-        
-        # Add built-in types to the context before parsing. Set the ADDRESS type.
-        match arch:
-            case TargetArchitectures.x64:
-                builtin_types_x64.BuiltInTypes_x64(context)
-                TypeSpecifier.ARCH_INT = TypeSpecifier.LONG
-                TypeSpecifier.ARCH_UINT = TypeSpecifier.ULONG
-
-            case TargetArchitectures.calci32:
-                builtin_types_calci32.BuiltInTypes_calci32(context)
-                TypeSpecifier.ARCH_INT = TypeSpecifier.INT
-                TypeSpecifier.ARCH_UINT = TypeSpecifier.UINT
-
-            case _:
-                raise ValueError()
-        
-        # Parse the program.
-        program = parser.Program(tokens, context)
-        if len(tokens) > 0:
-            raise ValueError("Missing tokens out of the program")
-        
-        if args.verbose:
-            print(f"Parser:\n{program}")
-    except Exception as e:
-        print(f"Parser exception:\n{e}", file=sys.stderr)
-        if args.verbose:
-            print(traceback.format_exc(), file=sys.stderr)
-        exit(1)
-
-    if args.parse or args.validate:
-        exit(0)
-
-    """
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    Three Address Code (TAC)
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    """
-    try:
-        tacProgram = TAC.TACProgram(program)
-        if args.verbose:
-            print(f"TAC:\n{tacProgram}")
-    except Exception as e:
-        print(f"TAC exception:\n{e}", file=sys.stderr)
-        if args.verbose:
-            print(traceback.format_exc(), file=sys.stderr)
-        exit(1)
-
-    if args.tac:
-        exit(0)
-
-    """
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    OPTIMIZER
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    """
-    if (args.optimize == 0) and (
-        args.fold_constants or args.eliminate_unreachable_code or \
-        args.propagate_copies or args.eliminate_dead_stores):
-        # For the case when only the flags are used, but not the -O flag.
-        iterationSteps = optimizer.MAX_ITERATION_STEPS
-    else:
-        iterationSteps = args.optimize
-
-    optimizationFlags = optimizer.TACOptimizationFlags(
-        constant_folding                = args.fold_constants               or bool(args.optimize),
-        unreachable_code_elimination    = args.eliminate_unreachable_code   or bool(args.optimize),
-        copy_propagation                = args.propagate_copies             or bool(args.optimize),
-        dead_store_elimination          = args.eliminate_dead_stores        or bool(args.optimize),
-        iteration_steps                 = iterationSteps
-    )
-
-    try:
-        tacOptimizer = optimizer.TACOptimizer(optimizationFlags)
-        # Modifies the inner instructions of the program.
-        tacOptimizer.optimize(tacProgram)
-        if args.verbose:
-            print(f"Optimizer:\n{tacProgram}")
-    except Exception as e:
-        print(f"Optimizer exception:\n{e}", file=sys.stderr)
-        if args.verbose:
-            print(traceback.format_exc(), file=sys.stderr)
-        exit(1)
-
-    """
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    ASSEMBLY GENERATION
-    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    """
-    try:
-        match arch:
-            case TargetArchitectures.x64:
-                assemblyProgram = assembler_x64.AssemblerProgram(tacProgram)
-            case TargetArchitectures.calci32:
-                assemblyProgram = assembler_calci32.AssemblerProgram(tacProgram)
-            case _:
-                raise ValueError("Invalid architecture")
-            
-    except Exception as e:
-        print(f"Assembler exception:\n{e}", file=sys.stderr)
-        if args.verbose:
-            print(traceback.format_exc(), file=sys.stderr)
-        exit(1)
-
-    if args.codegen:
-        exit(0)
-
-    assemblyCode = assemblyProgram.emitCode()
-    if args.verbose:
-        print(f"Assembly code:\n{assemblyCode}")
-
+    assemblyOutput: str
     if args.generate_assembly and args.output is not None:
         assemblyOutput = args.output
     else:
         assemblyOutput = f"{inputFileBasename}.s"
 
-    with open(assemblyOutput, "w") as assemblyFile:
-        assemblyFile.write(assemblyCode)
+    isInputAssemblyFile: bool = inputFile.endswith((".s", ".S"))
 
-    if args.generate_assembly:
-        exit(0)
+    if not isInputAssemblyFile:
+        """
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        PREPROCESSOR
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        """
+        # Use the calcic standard libraries and not the GCC's.
+        preprocessCommand: list[str] = ["gcc", "-E", inputFile, "-o", f"{inputFileBasename}.i"]
+        if not globalContext.useGCCLibraries:
+            # Set the lib/headers folder as a system directory for the preprocessor.
+            preprocessCommand += ["-nostdinc", "-isystem", str(libPath / "headers")]
+        
+        preprocessStatus = subprocess.run(preprocessCommand)
+        retCode = preprocessStatus.returncode
+
+        if retCode != 0:
+            exit(retCode)
+
+        """
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        LEXER
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        """
+        try:
+            tokens = lexer.lex(f"{inputFileBasename}.i")
+            if args.verbose:
+                print(f"Tokens:\n{tokens}\n")
+        except Exception as e:
+            os.remove(f"{inputFileBasename}.i")
+            print(f"Lexer exception:\n{e}", file=sys.stderr)
+            if args.verbose:
+                print(traceback.format_exc(), file=sys.stderr)
+            exit(1)
+
+        os.remove(f"{inputFileBasename}.i")
+
+        if args.lex:
+            exit(0)
+
+        # The global context stores variables used on all stages of the compiler.
+        # Add the built-in function handlers to the global context.
+        BuiltInFunctions.connectHandlersToContext(globalContext)
+
+        """
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        PARSER
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        """
+        try:
+            # Create the context.
+            context = parser.Context()
+            
+            # Add built-in types to the context before parsing. Set the ADDRESS type.
+            match arch:
+                case TargetArchitectures.x64:
+                    builtin_types_x64.BuiltInTypes_x64(context)
+                    TypeSpecifier.ARCH_INT = TypeSpecifier.LONG
+                    TypeSpecifier.ARCH_UINT = TypeSpecifier.ULONG
+
+                case TargetArchitectures.calci32:
+                    builtin_types_calci32.BuiltInTypes_calci32(context)
+                    TypeSpecifier.ARCH_INT = TypeSpecifier.INT
+                    TypeSpecifier.ARCH_UINT = TypeSpecifier.UINT
+
+                case _:
+                    raise ValueError()
+            
+            # Parse the program.
+            program = parser.Program(tokens, context)
+            if len(tokens) > 0:
+                raise ValueError("Missing tokens out of the program")
+            
+            if args.verbose:
+                print(f"Parser:\n{program}")
+        except Exception as e:
+            print(f"Parser exception:\n{e}", file=sys.stderr)
+            if args.verbose:
+                print(traceback.format_exc(), file=sys.stderr)
+            exit(1)
+
+        if args.parse or args.validate:
+            exit(0)
+
+        """
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        Three Address Code (TAC)
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        """
+        try:
+            tacProgram = TAC.TACProgram(program)
+            if args.verbose:
+                print(f"TAC:\n{tacProgram}")
+        except Exception as e:
+            print(f"TAC exception:\n{e}", file=sys.stderr)
+            if args.verbose:
+                print(traceback.format_exc(), file=sys.stderr)
+            exit(1)
+
+        if args.tac:
+            exit(0)
+
+        """
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        OPTIMIZER
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        """
+        if (args.optimize == 0) and (
+            args.fold_constants or args.eliminate_unreachable_code or \
+            args.propagate_copies or args.eliminate_dead_stores):
+            # For the case when only the flags are used, but not the -O flag.
+            iterationSteps = optimizer.MAX_ITERATION_STEPS
+        else:
+            iterationSteps = args.optimize
+
+        optimizationFlags = optimizer.TACOptimizationFlags(
+            constant_folding                = args.fold_constants               or bool(args.optimize),
+            unreachable_code_elimination    = args.eliminate_unreachable_code   or bool(args.optimize),
+            copy_propagation                = args.propagate_copies             or bool(args.optimize),
+            dead_store_elimination          = args.eliminate_dead_stores        or bool(args.optimize),
+            iteration_steps                 = iterationSteps
+        )
+
+        try:
+            tacOptimizer = optimizer.TACOptimizer(optimizationFlags)
+            # Modifies the inner instructions of the program.
+            tacOptimizer.optimize(tacProgram)
+            if args.verbose:
+                print(f"Optimizer:\n{tacProgram}")
+        except Exception as e:
+            print(f"Optimizer exception:\n{e}", file=sys.stderr)
+            if args.verbose:
+                print(traceback.format_exc(), file=sys.stderr)
+            exit(1)
+
+        """
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        ASSEMBLY GENERATION
+        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        """
+        try:
+            match arch:
+                case TargetArchitectures.x64:
+                    assemblyProgram = assembler_x64.AssemblerProgram(tacProgram)
+                case TargetArchitectures.calci32:
+                    assemblyProgram = assembler_calci32.AssemblerProgram(tacProgram)
+                case _:
+                    raise ValueError("Invalid architecture")
+                
+        except Exception as e:
+            print(f"Assembler exception:\n{e}", file=sys.stderr)
+            if args.verbose:
+                print(traceback.format_exc(), file=sys.stderr)
+            exit(1)
+
+        if args.codegen:
+            exit(0)
+
+        assemblyCode = assemblyProgram.emitCode()
+        if args.verbose:
+            print(f"Assembly code:\n{assemblyCode}")
+
+        with open(assemblyOutput, "w") as assemblyFile:
+            assemblyFile.write(assemblyCode)
+
+        if args.generate_assembly:
+            exit(0)
 
     """
     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     ASSEMBLER AND LINKER
     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     """
+    exeOutput: str
     if args.output is None:
         if args.generate_object:
             exeOutput = f"{inputFileBasename}.o"
@@ -326,7 +327,7 @@ def main() -> None:
 
     if not args.nostdlib and globalContext.useCalcicSTDLibraries:
         # Include the calcic standard libraries.
-        libBuildObject: str = str(libPath / "calcic_libc.o")
+        libBuildObject: str = str(libPath / f"build/{arch.name.lower()}/calcic_libc.o")
         if not os.path.exists(libBuildObject):
             raise ValueError(f"Expected file: {libBuildObject}. Please, build the calcic libraries.")
         assemblerCommand.insert(1, libBuildObject)
@@ -337,9 +338,17 @@ def main() -> None:
         for lib in args.library:
             assemblerCommand.append("-l")
             assemblerCommand.append(lib)
+            
     if not globalContext.useGCCLibraries:
-        assemblerCommand.append("-nostdlib")
-        assemblerCommand.append("-fno-builtin")
+        if arch == TargetArchitectures.x64:
+            # Tell ldd not to use the built in functions and the GCC standard libraries, use CALCIC's instead.
+            assemblerCommand.extend(("-nostdlib", "-fno-builtin"))
+
+        # When generating an object (.o), do not add the entry point. Only do it when generating an 
+        # executable.
+        if not args.generate_object:
+            entryPointPath: str = str(libPath / f"build/{arch.name.lower()}/program_entry.o")
+            assemblerCommand.insert(1, entryPointPath)
 
     if args.verbose:
         assemblerCommand.append("-v")
@@ -351,5 +360,7 @@ def main() -> None:
     if retCode != 0:
         exit(retCode)
 
-    os.remove(f"{inputFileBasename}.s")
+    if not isInputAssemblyFile:
+        # Do not remove the assembly file if it's been the input of the program.
+        os.remove(f"{inputFileBasename}.s")
     
