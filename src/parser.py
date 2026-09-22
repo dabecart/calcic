@@ -1289,6 +1289,43 @@ class AST(ABC):
     def __str__(self) -> str:
         return self.print(padding=0)
 
+    def parseAttributeMacro(self) -> DeclaratorAttributes:
+        attrs = DeclaratorAttributes()
+
+        if self.peek().value != "__attribute__":
+            return attrs
+
+        self.pop()
+        self.expect("(")
+        self.expect("(")
+
+        while True:
+            attrKey: str = self.expect("identifier").value
+            match attrKey:
+                case "crude":
+                    attrs.crude = True
+                case "alias":
+                    self.expect("(")
+                    while True:
+                        alias: str = self.expect("identifier").value
+                        attrs.alias.append(alias)
+
+                        if self.peek().id == ",":
+                            self.pop()
+                        else:
+                            break
+                    self.expect(")")
+            
+            if self.peek().id == ",":
+                self.pop()
+            else:
+                break
+
+        self.expect(")")
+        self.expect(")")
+
+        return attrs
+
 class DeclaratorAST(AST):
     @abstractmethod
     def parse(self, *args):
@@ -1310,19 +1347,7 @@ class SimpleDeclarator(DeclaratorAST):
             self.id = nextTok.value
 
             # After an identifier, you may add a __attribute__.
-            self.attributes: list[str] = []
-            if self.peek().id == "__attribute__":
-                self.pop()
-                self.expect("(")
-                self.expect("(")
-
-                self.attributes.append(self.expect("identifier").value)
-                while self.peek().id == ",":
-                    self.pop()
-                    self.attributes.append(self.expect("identifier").value)
-
-                self.expect(")")
-                self.expect(")")
+            self.attributes: DeclaratorAttributes = self.parseAttributeMacro()
 
         else:
             self.isIdentifier = False
@@ -2148,7 +2173,7 @@ class FunctionDeclaration(Declaration):
             self.raiseError("Expected a function declaration")
 
         self.typeId: FunctionDeclaratorType = info.type
-        self.attributes: list[str] = info.attributes
+        self.attributes: DeclaratorAttributes = info.attributes
         self.identifier: str = info.name
         self.returnType: DeclaratorType = info.type.returnDeclarator
 

@@ -497,12 +497,19 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 """
 
 @dataclass
+class DeclaratorAttributes:
+    # A crude function only compiles the __asm__ directives. No function head or tail code (stack pushes) are added.
+    crude: bool         = False
+    # Other names that a declaration may have.
+    alias: list[str]    = field(default_factory=list)
+
+@dataclass
 class DeclaratorInformation:
     name: str
     type: DeclaratorType
     params: list[ParameterInformation]
     isAnonymous: bool = False
-    attributes: list[str] = field(default_factory=list)
+    attributes: DeclaratorAttributes = field(default_factory=DeclaratorAttributes)
 
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

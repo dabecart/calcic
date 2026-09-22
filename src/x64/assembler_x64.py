@@ -623,7 +623,7 @@ class AssemblerFunction(AssemblyAST):
 
         # If the function is variadic, dump all registers into a "Register Save Area". Do this only
         # if the function is not crude.
-        if self.function.isVariadic and "crude" not in self.function.funDecl.attributes:
+        if self.function.isVariadic and not self.function.funDecl.attributes.crude:
             # 48 bytes for integer registers and 128 bytes for double registers.
             registerSaveOffset = -184 if self.returnInStack else -176
             Memory.restartStackVariables(registerSaveOffset)
@@ -662,7 +662,7 @@ class AssemblerFunction(AssemblyAST):
         self.intRegArgs, self.doubleRegArgs, self.stackInputArgs = self.classifyArguments(tacArgs, 
                                                                                           self.returnInStack)
 
-        if "crude" not in self.function.funDecl.attributes:
+        if not self.function.funDecl.attributes.crude:
             if self.returnInStack:
                 # Store the address of the return value, which is stored in DI to the stack.
                 self.createInst(MOV, 
@@ -739,6 +739,10 @@ class AssemblerFunction(AssemblyAST):
 
         # Convert the function's TAC instructions into assembler instructions.
         for inst in self.function.instructions:
+            # If crude, only __asm__ functions will be parsed.
+            if self.function.funDecl.attributes.crude and not isinstance(inst, TACBuiltIn_asm):
+                continue
+
             # # Add a comment between instructions to know what each block of assembler instructions 
             # # is doing. Skip labels.
             # if not isinstance(inst, TACLabel):
@@ -746,10 +750,6 @@ class AssemblerFunction(AssemblyAST):
 
             if isinstance(inst, TACBuiltInFunction):
                 self.convertBuiltInTAC(inst)
-                continue
-
-            # If crude, only __asm__ functions will be parsed.
-            if "crude" in self.function.funDecl.attributes:
                 continue
 
             match inst:
@@ -1679,15 +1679,22 @@ class AssemblerFunction(AssemblyAST):
         self.instructions = newInstructions
 
     def emitCode(self) -> str:
-        ret = ""
+        ret = "\t.section text\n"
+
         if self.function.isGlobal:
-            ret =  f"\t.globl {self.identifier}\n"
-        
-        ret += "\t.text\n"
+            ret +=  f"\t.globl {self.identifier}\n"
         ret += f"{self.identifier}:\n"
 
+        # Add the aliases of the function. These may be global too (check if there's a declaration of the function in
+        # the context).
+        for alias in self.function.funDecl.attributes.alias:
+            if alias in self.function.funDecl.context.functionMap:
+                if self.function.funDecl.context.functionMap[alias].isGlobal:
+                    ret +=  f"\t.globl {self.identifier}\n"
+            ret += f"{alias}:\n"
+
         # If crude, only __asm__ functions will be parsed, no psh or mov are added.
-        if "crude" not in self.function.funDecl.attributes:
+        if not self.function.funDecl.attributes.crude:
             ret += f"\tpushq\t%rbp\n"
             ret += f"\tmovq\t%rsp, %rbp\n"
 
