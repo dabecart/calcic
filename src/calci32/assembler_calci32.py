@@ -89,6 +89,9 @@ class AssemblyAST(ABC):
             
             return Pseudo(tacValue, self)
 
+    def createConstant(self, t: TypeSpecifier, value: int) -> AssemblerOperand:
+        return self.fromTACValue(TACValue(True, t.toBaseType(), str(value)))
+
     def copyBytes(self, src: AssemblerOperand, dst: AssemblerOperand, asmbType: AssemblyType) -> list[AssemblerInstruction]:
         # Basic MOV instruction.
         if not isinstance(src, (Memory, PseudoMemory)) or not isinstance(dst, (Memory, PseudoMemory)):
@@ -145,7 +148,7 @@ class AssemblyAST(ABC):
         # We will be shifting right by 8 bits. Load 8 into OP2.
         instList.append(
             MOVE(AssemblyType.BYTE, 
-                self.fromTACValue(TACValue(True, TypeSpecifier.UCHAR.toBaseType(), "8")), 
+                self.createConstant(TypeSpecifier.UCHAR, 8),
                 Register(AssemblyType.BYTE, REG.OP2)),
         )
 
@@ -181,7 +184,7 @@ class AssemblyAST(ABC):
         # We will be shifting left by 8 bits. Load 8 into OP2.
         instList.append(
             MOVE(AssemblyType.BYTE, 
-                self.fromTACValue(TACValue(True, TypeSpecifier.UCHAR.toBaseType(), "8")), 
+                self.createConstant(TypeSpecifier.UCHAR, 8),
                 Register(AssemblyType.BYTE, REG.OP2)),
         )
 
@@ -644,7 +647,7 @@ class AssemblerFunction(AssemblyAST):
                 if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                     self.instructions.extend(self.copyBytesFromRegister(REG_ORDER[regArgIndex], value, movAsmbType.size))
                     regArgIndex += 1
-                elif movAsmbType.baseType == AssemblyType.QUADWORD:
+                elif movAsmbType == AssemblyType.QUADWORD:
                     self.createInst(STOQ, 
                                     Register(AssemblyType.LONGWORD, REG_ORDER[regArgIndex]), 
                                     Register(AssemblyType.LONGWORD, REG_ORDER[regArgIndex+1]), 
@@ -674,7 +677,7 @@ class AssemblerFunction(AssemblyAST):
         for inst in self.function.instructions:
             # If crude, only __asm__ functions will be parsed.
             if self.function.funDecl.attributes.crude and not isinstance(inst, TACBuiltIn_asm):
-                continue
+                self.function.funDecl.raiseError("Code inside a crude function will not be parsed, unless it is an __asm__ directive")
 
             # Add a comment between instructions to know what each block of assembler instructions 
             # is doing. Skip labels.
@@ -912,13 +915,29 @@ class AssemblerFunction(AssemblyAST):
                         # Simply sign extend.
                         self.createInst(MOVE, result.assemblyType, Register(exp.assemblyType, exp.reg, signExtend=True), result)
                     else:
+                        doQuad: bool = result.assemblyType == AssemblyType.QUADWORD
+
+                        finalMovType: AssemblyType
+                        if doQuad:
+                            finalMovType = AssemblyType.LONGWORD
+                        else:
+                            finalMovType = result.assemblyType
+
                         # Store into a register whilst masking it to the input type.
                         self.createInst(MOV, exp, Register(exp.assemblyType, REG.R2))
                         # Transfer to another register whilst extending.
-                        self.createInst(MOV, Register(exp.assemblyType, REG.R2, signExtend=True), Register(result.assemblyType, REG.R3))
+                        self.createInst(MOV, Register(exp.assemblyType, REG.R2, signExtend=True), Register(finalMovType, REG.R3))
                         # Finally, store the extended value into the result. 
-                        self.createInst(MOVE, 
-                            result.assemblyType, Register(result.assemblyType, REG.R3), result)
+                        self.createInst(MOVE, finalMovType, Register(finalMovType, REG.R3), result)
+
+                        if doQuad and isinstance(result, (Memory, Data)):
+                            resultHigh = result.createCopy()
+                            resultHigh.offset += 4
+
+                            # The last MOVE should have set the negative bit. If it's negative, write 0xFFFFFFF, else 0.
+                            # TODO
+
+                        
 
                 case TACTruncate():
                     exp = self.fromTACValue(inst.exp)
@@ -975,7 +994,7 @@ class AssemblerFunction(AssemblyAST):
 
                     if stackPadding != 0:
                         # Allocate stack.
-                        offs = self.fromTACValue(TACValue(True, TypeSpecifier.INT.toBaseType(), str(stackPadding)))
+                        offs = self.createConstant(TypeSpecifier.INT, stackPadding)
                         self.createInst(MOVE, 
                                         AssemblyType.LONGWORD, 
                                         Register(AssemblyType.LONGWORD, REG.RSP), 
@@ -994,7 +1013,7 @@ class AssemblerFunction(AssemblyAST):
                             # size is not standard, i.e. 3, 5, 6 or 7 bytes.
                             self.instructions.extend(self.copyBytesToRegister(value, REG_ORDER[regArgIndex], movAsmbType.size))
                             regArgIndex += 1
-                        elif movAsmbType.baseType == AssemblyType.QUADWORD:
+                        elif movAsmbType == AssemblyType.QUADWORD:
                             self.createInst(MOVQ, 
                                             value,
                                             Register(AssemblyType.LONGWORD, REG_ORDER[regArgIndex]), 
@@ -1009,7 +1028,7 @@ class AssemblerFunction(AssemblyAST):
                         if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                             # There may be part of a struct/union returned in a register whose byte size is not 
                             # standard. For this case, allocate as 4 bytes in the stack. 
-                            offs = self.fromTACValue(TACValue(True, TypeSpecifier.INT.toBaseType(), "4"))
+                            offs = self.createConstant(TypeSpecifier.INT, 4)
                             self.createInst(MOVE, 
                                             AssemblyType.LONGWORD, 
                                             Register(AssemblyType.LONGWORD, REG.RSP), 
@@ -1045,7 +1064,7 @@ class AssemblerFunction(AssemblyAST):
                     deallocBytes = 4 * len(stackArgs) + stackPadding
                     if deallocBytes != 0:
                         # Deallocate stack.
-                        offs = self.fromTACValue(TACValue(True, TypeSpecifier.INT.toBaseType(), str(deallocBytes)))
+                        offs = self.createConstant(TypeSpecifier.INT, deallocBytes)
                         self.createInst(MOVE, 
                                         AssemblyType.LONGWORD, 
                                         Register(AssemblyType.LONGWORD, REG.RSP), 
@@ -1076,7 +1095,7 @@ class AssemblerFunction(AssemblyAST):
                                             Register(AssemblyType.LONGWORD, REG.R6))
                             # Transfer the return value to this address.
                             transferInsts = self.copyBytes(self.fromTACValue(inst.result), 
-                                                          Memory(AssemblyType.QUADWORD, REG.R6, 0), 
+                                                          Memory(AssemblyType.LONGWORD, REG.R6, 0), 
                                                           AssemblyType.fromTAC(inst.result.valueType))
                             self.instructions.extend(transferInsts)
                         else:
@@ -1159,7 +1178,7 @@ class AssemblerFunction(AssemblyAST):
 
         if functionStackAlloc > 0:
             # Allocate the stack.
-            offs = self.fromTACValue(TACValue(True, TypeSpecifier.INT.toBaseType(), str(functionStackAlloc)))
+            offs = self.createConstant(TypeSpecifier.INT, functionStackAlloc)
             moveStackToALU = MOVE(AssemblyType.LONGWORD, Register(AssemblyType.LONGWORD, REG.RSP), Register(AssemblyType.LONGWORD, REG.OP1))
             moveOffsToALU = MOVE(offs.assemblyType, offs, Register(offs.assemblyType, REG.OP2))
             stackAllocInstruction = ALU(ALUOP.SUB, AssemblyType.LONGWORD, Register(offs.assemblyType, REG.RSP))
@@ -1263,8 +1282,8 @@ class MOVE(AssemblerInstruction):
                 lowVal = imm & 0xFFFFFFFF
                 highVal = (imm >> 32) & 0xFFFFFFFF
 
-                low = self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(lowVal)))
-                high = self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(highVal)))
+                low = self.createConstant(TypeSpecifier.UINT, lowVal)
+                high = self.createConstant(TypeSpecifier.UINT, highVal)
 
                 movToRegLow = self.createChild(MOVE, AssemblyType.LONGWORD, low, Register(AssemblyType.LONGWORD, REG.R6))
                 movToRegHigh = self.createChild(MOVE, AssemblyType.LONGWORD, high, Register(AssemblyType.LONGWORD, REG.R7))
@@ -1696,7 +1715,7 @@ class OFS(AssemblerInstruction):
             # Move the index to a temporary register.
             movIndex = self.createChild(MOVE, 
                                         AssemblyType.LONGWORD,
-                                        self.fromTACValue(TACValue(True, TypeSpecifier.INT.toBaseType(), str(self.src.offset))),
+                                        self.createConstant(TypeSpecifier.INT, self.src.offset),
                                         Register(AssemblyType.LONGWORD, REG.R6))
             # Operate using an Indexed argument.
             newSrc = Indexed(AssemblyType.LONGWORD, self.src.register, Register(AssemblyType.LONGWORD, REG.R6), 1)
@@ -1793,8 +1812,8 @@ class PSH(AssemblerInstruction):
                 lowVal = imm & 0xFFFFFFFF
                 highVal = (imm >> 32) & 0xFFFFFFFF
 
-                low = self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(lowVal)))
-                high = self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(highVal)))
+                low = self.createConstant(TypeSpecifier.UINT, lowVal)
+                high = self.createConstant(TypeSpecifier.UINT, highVal)
 
                 movToRegLow = self.createChild(MOVE, AssemblyType.LONGWORD, low, Register(AssemblyType.LONGWORD, REG.R6))
                 movToRegHigh = self.createChild(MOVE, AssemblyType.LONGWORD, high, Register(AssemblyType.LONGWORD, REG.R7))

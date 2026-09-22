@@ -741,6 +741,7 @@ class AssemblerFunction(AssemblyAST):
         for inst in self.function.instructions:
             # If crude, only __asm__ functions will be parsed.
             if self.function.funDecl.attributes.crude and not isinstance(inst, TACBuiltIn_asm):
+                self.function.funDecl.raiseWarning("Code inside a crude function will not be parsed, unless it is an __asm__ directive")
                 continue
 
             # # Add a comment between instructions to know what each block of assembler instructions 

@@ -983,9 +983,10 @@ class TACFunction(TACTopLevel):
             self.parseTACBlockItem(block, self.instructions)
         
         # Always add a "return 0" at the end of functions. If the function already has a return it
-        # will be pruned on the optimization stage.
-        self.createChild(TACReturn, 
-                         TACValue(True, TypeSpecifier.INT.toBaseType(), "0"), self.instructions)
+        # will be pruned on the optimization stage. Do not add it if the function is crude.
+        if not self.funDecl.attributes.crude:
+            self.createChild(TACReturn, 
+                             TACValue(True, TypeSpecifier.INT.toBaseType(), "0"), self.instructions)
 
     def print(self) -> str:
         ret = f"--- {self.identifier} ---\n"

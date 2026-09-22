@@ -99,7 +99,7 @@ long __multiplication_ulong __attribute__((crude)) (long a, long b) {
     );
 }
 
-long __multiplication_long __attribute__((crude)) (long a, long b) {
+long __multiplication_long (long a, long b) {
     // Multiply them as unsigned and then calculate the sign. 
     int isANegative = a < 0;
     int isBNegative = b < 0;
