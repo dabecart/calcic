@@ -693,7 +693,7 @@ class AssemblerFunction(AssemblyAST):
                     exp: AssemblerOperand = self.fromTACValue(inst.exp)
                     dest: AssemblerOperand = self.fromTACValue(inst.result)
 
-                    if AssemblyType.QUADWORD in (exp1.assemblyType, exp2.assemblyType, dest.assemblyType):
+                    if AssemblyType.QUADWORD in (exp.assemblyType, dest.assemblyType):
                         # For long/unsigned long operations, make the call to the included long functions. These 
                         # functions are written in C, compiled separately and linked to all calci32 programs. 
                         # Source code can be found at /lib/src/arch/calci32/long.c
@@ -802,7 +802,7 @@ class AssemblerFunction(AssemblyAST):
                                 if inst.result.valueType.isDecimal():
                                     raise ValueError()
                                 else:
-                                    self.createInst(ALU, ALUOP.CMP, dest.assemblyType)
+                                    self.createInst(ALU, ALUOP.SUB, dest.assemblyType)
                                     self.createInst(SET, 
                                                     ConditionCode.fromBinaryOperator(inst.operator, inst.exp1.valueType), 
                                                     dest)
@@ -826,7 +826,7 @@ class AssemblerFunction(AssemblyAST):
                     # Move R2 to OP1.
                     self.createInst(MOVE, cond.assemblyType, Register(cond.assemblyType, REG.R2), Register(cond.assemblyType, REG.OP1))
 
-                    self.createInst(ALU, ALUOP.CMP, cond.assemblyType)
+                    self.createInst(ALU, ALUOP.SUB, cond.assemblyType)
 
                     if inst.condition.valueType.isDecimal():
                         raise ValueError()
@@ -963,7 +963,7 @@ class AssemblerFunction(AssemblyAST):
                     # Store into a register whilst masking.
                     self.createInst(MOV, exp, Register(result.assemblyType, REG.R0))
                     # Finally, store the truncated value into the result.
-                    self.createInst(MOVE, result.assemblyType, Register(result.assemblyType, REG.R1), result)
+                    self.createInst(MOVE, result.assemblyType, Register(result.assemblyType, REG.R0), result)
 
                 case TACZeroExtend():
                     exp = self.fromTACValue(inst.exp)
@@ -1505,7 +1505,6 @@ class ALUOP(enum.Enum):
     SHR     = enum.auto()
     SHLA    = enum.auto()
     SHRA    = enum.auto()
-    CMP     = enum.auto()
     INC     = enum.auto()
     DEC     = enum.auto()
 

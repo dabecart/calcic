@@ -32,55 +32,56 @@ long __subtract_long __attribute__((crude, alias(__subtract_ulong))) (long a, lo
     );
 }
 
-int __equal_ulong(unsigned long a, unsigned long b);
+int __equal_ulong (unsigned long a, unsigned long b);
 int __equal_long __attribute__((crude, alias(__equal_ulong))) (long a, long b) {
     __asm__("\t"
-        "mov    %%r1, %%op1\n\t"
-        "mov    %%r3, %%op2\n\t"
-        "cmp    \n\t"
-        "seq    %%r6\n\t"
-        "bne    __equal_long_exit\n\t"
         "mov    %%r0, %%op1\n\t"
         "mov    %%r2, %%op2\n\t"
-        "cmp    \n\t"
-        "seq    %%r6\n"
+        "sub    \n\t"
+        "seq    %%r0\n\t"
+        "bne    __equal_long_exit\n\t"
+        "mov    %%r1, %%op1\n\t"
+        "mov    %%r3, %%op2\n\t"
+        "sub    \n\t"
+        "seq    %%r0\n"
     "__equal_long_exit:\n\t"
-        "mov    %%r6, %%r0\n\t"
         "ret    \n\t"
     );
 }
 
-int __not_equal_ulong(unsigned long a, unsigned long b);
+int __not_equal_ulong (unsigned long a, unsigned long b);
 int __not_equal_long __attribute__((crude, alias(__not_equal_ulong))) (long a, long b) {
     __asm__("\t"
-        "mov    %%r1, %%op1\n\t"
-        "mov    %%r3, %%op2\n\t"
-        "cmp    \n\t"
-        "sne    %%r6\n\t"
-        "bne    __not_equal_long_exit\n\t"
         "mov    %%r0, %%op1\n\t"
         "mov    %%r2, %%op2\n\t"
-        "cmp    \n\t"
-        "sne    %%r6\n"
+        "sub    \n\t"
+        "sne    %%r0\n\t"
+        "bne    __not_equal_long_exit\n\t"
+        "mov    %%r1, %%op1\n\t"
+        "mov    %%r3, %%op2\n\t"
+        "sub    \n\t"
+        "sne    %%r0\n"
     "__not_equal_long_exit:\n\t"
-        "mov    %%r6, %%r0\n\t"
         "ret    \n\t"
     );
 }
 
 int __less_than_long __attribute__((crude)) (long a, long b) {
+    // To compare two signed numbers, the high word is compared using signed operations but the low part is compared
+    // using unsigned operations. Example: 0xFFFFFFFF_00000000 < 0xFFFFFFFF_80000000. High words are the same, comparing
+    // the low words, we have to do it without sign to make it work.
     __asm__("\t"
         "mov    %%r1, %%op1\n\t"
         "mov    %%r3, %%op2\n\t"
-        "cmp    \n\t"
-        "sls    %%r6\n\t"
+        "sub    \n\t"
+        "sls    %%r4\n\t"
         "bne    __less_than_long_exit\n\t"
         "mov    %%r0, %%op1\n\t"
         "mov    %%r2, %%op2\n\t"
-        "cmp    \n\t"
-        "sls    %%r6\n"
+        "sub    \n\t"
+        "slu    %%r4\n"
     "__less_than_long_exit:\n\t"
-        "mov    %%r6, %%r0\n\t"
+        "mov    %%r4, %%r0\n\t"
         "ret    \n\t"
     );
 }
@@ -89,15 +90,15 @@ int __less_or_equal_long __attribute__((crude)) (long a, long b) {
     __asm__("\t"
         "mov    %%r1, %%op1\n\t"
         "mov    %%r3, %%op2\n\t"
-        "cmp    \n\t"
-        "sles   %%r6\n\t"
+        "sub    \n\t"
+        "sles   %%r4\n\t"
         "bne    __less_or_equal_long_exit\n\t"
         "mov    %%r0, %%op1\n\t"
         "mov    %%r2, %%op2\n\t"
-        "cmp    \n\t"
-        "sles   %%r6\n"
+        "sub    \n\t"
+        "sleu   %%r4\n"
     "__less_or_equal_long_exit:\n\t"
-        "mov    %%r6, %%r0\n\t"
+        "mov    %%r4, %%r0\n\t"
         "ret    \n\t"
     );
 }
@@ -106,15 +107,15 @@ int __greater_than_long __attribute__((crude)) (long a, long b) {
     __asm__("\t"
         "mov    %%r1, %%op1\n\t"
         "mov    %%r3, %%op2\n\t"
-        "cmp    \n\t"
-        "sls    %%r6\n\t"
+        "sub    \n\t"
+        "sgs    %%r4\n\t"
         "bne    __greater_than_long_exit\n\t"
         "mov    %%r0, %%op1\n\t"
         "mov    %%r2, %%op2\n\t"
-        "cmp    \n\t"
-        "sls    %%r6\n"
+        "sub    \n\t"
+        "sgu    %%r4\n"
     "__greater_than_long_exit:\n\t"
-        "mov    %%r6, %%r0\n\t"
+        "mov    %%r4, %%r0\n\t"
         "ret    \n\t"
     );
 }
@@ -123,15 +124,83 @@ int __greater_or_equal_long __attribute__((crude)) (long a, long b) {
     __asm__("\t"
         "mov    %%r1, %%op1\n\t"
         "mov    %%r3, %%op2\n\t"
-        "cmp    \n\t"
-        "sles   %%r6\n\t"
+        "sub    \n\t"
+        "sges   %%r4\n\t"
         "bne    __greater_or_equal_long_exit\n\t"
         "mov    %%r0, %%op1\n\t"
         "mov    %%r2, %%op2\n\t"
-        "cmp    \n\t"
-        "sles   %%r6\n"
+        "sub    \n\t"
+        "sgeu   %%r4\n"
     "__greater_or_equal_long_exit:\n\t"
-        "mov    %%r6, %%r0\n\t"
+        "mov    %%r4, %%r0\n\t"
+        "ret    \n\t"
+    );
+}
+
+int __less_than_ulong __attribute__((crude)) (unsigned long a, unsigned long b) {
+    __asm__("\t"
+        "mov    %%r1, %%op1\n\t"
+        "mov    %%r3, %%op2\n\t"
+        "sub    \n\t"
+        "slu    %%r4\n\t"
+        "bne    __less_than_ulong_exit\n\t"
+        "mov    %%r0, %%op1\n\t"
+        "mov    %%r2, %%op2\n\t"
+        "sub    \n\t"
+        "slu    %%r4\n"
+    "__less_than_ulong_exit:\n\t"
+        "mov    %%r4, %%r0\n\t"
+        "ret    \n\t"
+    );
+}
+
+int __less_or_equal_ulong __attribute__((crude)) (unsigned long a, unsigned long b) {
+    __asm__("\t"
+        "mov    %%r1, %%op1\n\t"
+        "mov    %%r3, %%op2\n\t"
+        "sub    \n\t"
+        "sleu   %%r4\n\t"
+        "bne    __less_or_equal_ulong_exit\n\t"
+        "mov    %%r0, %%op1\n\t"
+        "mov    %%r2, %%op2\n\t"
+        "sub    \n\t"
+        "sleu   %%r4\n"
+    "__less_or_equal_ulong_exit:\n\t"
+        "mov    %%r4, %%r0\n\t"
+        "ret    \n\t"
+    );
+}
+
+int __greater_than_ulong __attribute__((crude)) (unsigned long a, unsigned long b) {
+    __asm__("\t"
+        "mov    %%r1, %%op1\n\t"
+        "mov    %%r3, %%op2\n\t"
+        "sub    \n\t"
+        "sgu    %%r4\n\t"
+        "bne    __greater_than_ulong_exit\n\t"
+        "mov    %%r0, %%op1\n\t"
+        "mov    %%r2, %%op2\n\t"
+        "sub    \n\t"
+        "sgu    %%r4\n"
+    "__greater_than_ulong_exit:\n\t"
+        "mov    %%r4, %%r0\n\t"
+        "ret    \n\t"
+    );
+}
+
+int __greater_or_equal_ulong __attribute__((crude)) (unsigned long a, unsigned long b) {
+    __asm__("\t"
+        "mov    %%r1, %%op1\n\t"
+        "mov    %%r3, %%op2\n\t"
+        "sub    \n\t"
+        "sgeu   %%r4\n\t"
+        "bne    __greater_or_equal_ulong_exit\n\t"
+        "mov    %%r0, %%op1\n\t"
+        "mov    %%r2, %%op2\n\t"
+        "sub    \n\t"
+        "sgeu   %%r4\n"
+    "__greater_or_equal_ulong_exit:\n\t"
+        "mov    %%r4, %%r0\n\t"
         "ret    \n\t"
     );
 }
@@ -142,14 +211,14 @@ int __not_long __attribute__((crude, alias(__not_ulong))) (long a) {
     __asm__("\t"
         "mov    %%r1, %%op1\n\t"
         "clr    %%op2\n\t"
-        "cmp    \n\t"
-        "seq    %%r6\n\t"
+        "sub    \n\t"
+        "seq    %%r4\n\t"
         "bne    __not_long_exit\n\t"
         "mov    %%r0, %%op1\n\t"
-        "cmp    \n\t"
-        "seq    %%r6\n"
+        "sub    \n\t"
+        "seq    %%r4\n"
     "__not_long_exit:\n\t"
-        "mov    %%r6, %%r0\n\t"
+        "mov    %%r4, %%r0\n\t"
         "ret    \n\t"
     );
 }
@@ -216,15 +285,15 @@ long __multiplication_ulong __attribute__((crude)) (long a, long b) {
     __asm__("\t"
         "mov        %%r0, %%op1\n\t"
         "mov        %%r3, %%op2\n\t"
-        "umul       %%r6\n\t"           // bc -> r6
+        "umul       %%r4\n\t"           // bc -> r4
         "mov        %%r1, %%op1\n\t"
         "mov        %%r2, %%op2\n\t"
         "umul       %%op2\n\t"          // ad -> op2
-        "mov        %%r6, %%op1\n\t"    // bc -> op1
+        "mov        %%r4, %%op1\n\t"    // bc -> op1
         "add        %%r4\n\t"           // bc + ad = OP1L -> r4
         "mov        %%r0, %%op1\n\t"
         "mov        %%r2, %%op2\n\t"
-        "umul       %%op1, %%r6\n\t"    // bd = OP2H & OP2L -> op1 & r0
+        "umul       %%r0, %%op1\n\t"    // bd = OP2H & OP2L -> op1 & r0
         "mov        %%r4, %%op2\n\t"
         "add        %%r1\n\t"           // OP2H + OP1L -> r1
         "ret        \n\t"
@@ -232,24 +301,19 @@ long __multiplication_ulong __attribute__((crude)) (long a, long b) {
 }
 
 long __multiplication_long (long a, long b) {
-    // Multiply them as unsigned and then calculate the sign. 
-    int isANegative = a < 0L;
-    int isBNegative = b < 0L;
+    int aNegative = a < 0L;
+    int bNegative = b < 0L;
 
-    if (isANegative) {
-        a = -a;
-    }
-    if (isBNegative) {
-        b = -b;
-    }
-    
-    long result = __multiplication_ulong(a, b);
+    if (aNegative) a = -a;
+    if (bNegative) b = -b;
 
-    if (isANegative != isBNegative) {
-        result = -result;
+    unsigned long uresult = __multiplication_ulong((unsigned long) a, (unsigned long) b);
+
+    if (aNegative ^ bNegative) {
+        uresult = -uresult;
     }
 
-    return result;
+    return (long) uresult;
 }
 
 long __signExtend_long __attribute__((crude)) (int a) {
