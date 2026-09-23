@@ -1691,7 +1691,7 @@ class AssemblerFunction(AssemblyAST):
         for alias in self.function.funDecl.attributes.alias:
             if alias in self.function.funDecl.context.functionMap:
                 if self.function.funDecl.context.functionMap[alias].isGlobal:
-                    ret +=  f"\t.globl {self.identifier}\n"
+                    ret +=  f"\t.globl {alias}\n"
             ret += f"{alias}:\n"
 
         # If crude, only __asm__ functions will be parsed, no psh or mov are added.
