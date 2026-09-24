@@ -267,6 +267,91 @@ long __decrement_long __attribute__((crude, alias(__decrement_ulong))) (long a) 
     );
 }
 
+unsigned long __logic_left_shift_ulong (unsigned long a, int b);
+long __logic_left_shift_long __attribute__((crude, alias(__logic_left_shift_ulong))) (long a, int b) {
+    // For 0 <= b < 32:     ret_h = (a_h << b) | (a_l >> (32-b)),   ret_l = a_l << b
+    // For 32 <= b < 64:    ret_h = a_l << (b - 32),                ret_l = 0
+    __asm__("\t"
+        "mov        $32, %%op1\n\t"
+        "mov        %%r2, %%op2\n\t"
+        "sub        %%r4\n\t"                   // 32 - b -> r4
+        "bles       __logic_left_over_32\n"
+        "mov        %%r1, %%op1\n\t"
+        "shl        %%r5\n\t"                   // (a_h << b) -> r5
+        "mov        %%r0, %%op1\n\t"
+        "shl        %%r6\n\t"                   // (a_l << b) -> r6
+        "mov        %%r4, %%op2\n\t"
+        "shr        %%op2\n\t"                  // (a_l >> (32-b)) -> op2
+        "mov        %%r5, %%op1\n\t"
+        "or         %%r1\n\t"
+        "mov        %%r6, %%r0\n\t"
+        "ret        \n"
+    "__logic_left_over_32:\n\t"
+        "mov        %%r4, %%op1\n\t"
+        "neg        %%op2\n\t"                  // b - 32 -> op2
+        "mov        %%r0, %%op1\n\t"
+        "shl        %%r1\n\t"                   // a_l << (b - 32) -> r1
+        "clr        %%r0\n\t"
+        "ret        \n"
+    );
+}
+
+unsigned long __logic_right_shift_ulong __attribute__((crude)) (unsigned long a, int b) {
+    // For 0 <= b < 32:     ret_h = a_h >> b,   ret_l = (a_l >> b) | (a_h << (32-b))
+    // For 32 <= b < 64:    ret_h = 0,          ret_l = a_h >> (b - 32)
+    __asm__("\t"
+        "mov        $32, %%op1\n\t"
+        "mov        %%r2, %%op2\n\t"
+        "sub        %%r4\n\t"                   // 32 - b -> r4
+        "bles       __logic_right_over_32\n"
+        "mov        %%r0, %%op1\n\t"
+        "shr        %%r5\n\t"                   // (a_l >> b) -> r5
+        "mov        %%r1, %%op1\n\t"
+        "shr        %%r6\n\t"                   // (a_h >> b) -> r6
+        "mov        %%r4, %%op2\n\t"
+        "shl        %%op2\n\t"                  // (a_h << (32-b)) -> op2
+        "mov        %%r5, %%op1\n\t"
+        "or         %%r0\n\t"
+        "mov        %%r6, %%r1\n\t"
+        "ret        \n"
+    "__logic_right_over_32:\n\t"
+        "mov        %%r4, %%op1\n\t"
+        "neg        %%op2\n\t"                  // b - 32 -> op2
+        "mov        %%r1, %%op1\n\t"
+        "shr        %%r0\n\t"                   // a_h >> (b - 32) -> r0
+        "clr        %%r1\n\t"
+        "ret        \n"
+    );
+}
+
+long __arithmetic_right_shift_long __attribute__((crude)) (long a, int b) {
+    // For 0 <= b < 32:     ret_h = a_h shra b,   ret_l = (a_l >> b) | (a_h << (32-b))
+    // For 32 <= b < 64:    ret_h = a_h shra 31,  ret_l = a_h shra (b - 32)
+    __asm__("\t"
+        "mov        $32, %%op1\n\t"
+        "mov        %%r2, %%op2\n\t"
+        "sub        %%r4\n\t"                   // 32 - b -> r4
+        "bles       __arithmetic_right_over_32\n"
+        "mov        %%r0, %%op1\n\t"
+        "shr        %%r5\n\t"                   // (a_l >> b) -> r5
+        "mov        %%r1, %%op1\n\t"
+        "shra       %%r6\n\t"                   // (a_h shra b) -> r6
+        "mov        %%r4, %%op2\n\t"
+        "shl        %%op2\n\t"                  // (a_h << (32-b)) -> op2
+        "mov        %%r5, %%op1\n\t"
+        "or         %%r0\n\t"
+        "mov        %%r6, %%r1\n\t"
+        "ret        \n"
+    "__arithmetic_right_over_32:\n\t"
+        "mov        %%r4, %%op1\n\t"
+        "neg        %%op2\n\t"                  // b - 32 -> op2
+        "mov        %%r1, %%op1\n\t"
+        "shra       %%r0\n\t"                   // a_h shra (b - 32) -> r1
+        "mov        $31, %%op2\n\t"
+        "shra       %%r1\n\t"                   // a_h shra 31 -> r1
+        "ret        \n"
+    );
+}
 
 long __multiplication_ulong __attribute__((crude)) (long a, long b) {
     /**
