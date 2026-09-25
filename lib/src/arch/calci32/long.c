@@ -249,9 +249,11 @@ unsigned long __increment_ulong(unsigned long a);
 long __increment_long __attribute__((crude, alias(__increment_ulong))) (long a) {
     // Pass 1 as second argument to __sum_long.
     __asm__("\t"
-        "mov        $1, %%r2\n\t"
-        "clr        %%r3\n\t"
-        "fun        __sum_long\n\t"
+        "mov        %%r0, %%op1\n\t"
+        "inc        %%r0\n\t"
+        "mov        %%r1, %%op1\n\t"
+        "clr        %%op2\n\t"
+        "addc       %%r1\n\t"
         "ret        \n\t"
     );
 }
@@ -260,9 +262,11 @@ unsigned long __decrement_ulong(unsigned long a);
 long __decrement_long __attribute__((crude, alias(__decrement_ulong))) (long a) {
     // Pass 1 as second argument to __subtract_long.
     __asm__("\t"
-        "mov        $1, %%r2\n\t"   
+        "mov        %%r0, %%op1\n\t"
+        "dec        %%r0\n\t"
+        "mov        %%r1, %%op1\n\t"
         "clr        %%r3\n\t"
-        "fun        __subtract_long\n\t"
+        "subc       %%r1\n\t"
         "ret        \n\t"
     );
 }
@@ -353,7 +357,7 @@ long __arithmetic_right_shift_long __attribute__((crude)) (long a, int b) {
     );
 }
 
-long __multiplication_ulong __attribute__((crude)) (long a, long b) {
+unsigned long __multiplication_ulong __attribute__((crude)) (unsigned long a, unsigned long b) {
     /**
         With r0 = b, r1 = a, r2 = d, r3 = c:
 
@@ -401,14 +405,125 @@ long __multiplication_long (long a, long b) {
     return (long) uresult;
 }
 
+
+void __division_algorithm __attribute__((crude)) () {
+    /**
+     * With A = a*2^32 + b and B = c*2^32 + d, we will calculate A/B and A mod B at once.
+     *          ^r1      ^r0       ^r3      ^r2
+     */
+    __asm__("\t"
+        // Check the divisor is not zero.
+        "mov        %%r2, %%r4\n\t"
+        "bne        __division_algorithm_not_zero_first\n\t"
+        "mov        %%r3, %%r5\n\t"
+        "bne        __division_algorithm_not_zero_second\n\t"
+        "clr        %%op1\n\t"
+        "dec        %%r0\n\t"
+        "mov        %%r0, %%r1\n\t"
+        "mov        %%r0, %%r2\n\t"
+        "mov        %%r0, %%r3\n\t"
+        "ret        \n"
+
+    "__division_algorithm_not_zero_first:\n\t"
+        "mov        %%r3, %%r5\n"
+
+    "__division_algorithm_not_zero_second:\n\t"
+    
+        "mov        $64, %%r11\n\t"
+        "clr        %%r2\n\t"
+        "clr        %%r3\n\t"
+        
+        // Quotient:                [0] = r0, [1] = r1 <- This contains the dividend at the beginning.
+        // Remainder:               [0] = r2, [1] = r3
+        // Divisor:                 [0] = r4, [1] = r5
+    "__division_algorithm_loop_start:\n\t"
+        "set        %%op2\n\t"
+        "mov        %%r0, %%op1\n\t"
+        "shl        %%r0\n\t"
+        "mov        %%r1, %%op1\n\t"
+        "rol        %%r1\n\t"
+        "mov        %%r2, %%op1\n\t"    // Transfer the dividend to the remainder a bit at a time.
+        "rol        %%r2\n\t"
+        "mov        %%r3, %%op1\n\t"
+        "rol        %%r3\n\t"
+
+        "mov        %%r2, %%op1\n\t"    // Try to subtract: remainder - divisor
+        "mov        %%r4, %%op2\n\t"
+        "sub        %%r6\n\t"
+        "mov        %%r3, %%op1\n\t"
+        "mov        %%r5, %%op2\n\t"
+        "subc       %%r7\n\t"
+
+        "bfcs       __division_algorithm_next_bit\n\t"
+
+        "fun        __increment_long\n\t"   // The subtraction was possible. Increment the quotient.
+        "mov        %%r6, %%r2\n\t"         // Move the subtracted values to the remainder.
+        "mov        %%r7, %%r3\n"
+
+    "__division_algorithm_next_bit:\n\t"
+        "mov        %%r11, %%op1\n\t"
+        "dec        %%r11\n\t"
+        "bne        __division_algorithm_loop_start\n\t"
+
+        "ret\n\t"
+    );
+}
+
+unsigned long __division_ulong __attribute__((crude)) (unsigned long a, unsigned long b) {
+    __asm__("\t"
+        "fun    __division_algorithm\n\t"
+        "ret"
+    );
+}
+
+unsigned long __modulus_ulong __attribute__((crude)) (unsigned long a, unsigned long b) {
+    __asm__("\t"
+        "fun    __division_algorithm\n\t"
+        "mov    %%r2, %%r0\n\t"
+        "mov    %%r3, %%r1\n\t"
+        "ret    \n\t"
+    );
+}
+
+long __division_long (long a, long b) {
+    int aNegative = a < 0L;
+    int bNegative = b < 0L;
+
+    if (aNegative) a = -a;
+    if (bNegative) b = -b;
+
+    unsigned long uresult = __division_ulong((unsigned long) a, (unsigned long) b);
+
+    if (aNegative ^ bNegative) {
+        uresult = -uresult;
+    }
+
+    return (long) uresult;
+}
+
+long __modulus_long (long a, long b) {
+    int aNegative = a < 0L;
+
+    if (aNegative)  a = -a;
+    if (b < 0L)     b = -b;
+
+    unsigned long uresult = __modulus_ulong((unsigned long) a, (unsigned long) b);
+
+    if (aNegative) {
+        uresult = -uresult;
+    }
+
+    return (long) uresult;
+}
+
 long __signExtend_long __attribute__((crude)) (int a) {
     // If a is negative then write 0xFFFFFFFF to the upper part (r1). The last mov instruction was 
     // used to move the input number, therefore, the negative flag should be set accordingly.
     __asm__("\t"
-        "clr    %%r1\n\t"
-        "bfnr   __signExtend_long_exit\n\t"
-        "mov    $0xFFFFFFFF, %%r1\n\t"
+        "clr        %%r1\n\t"
+        "bfnr       __signExtend_long_exit\n\t"
+        "mov        $0xFFFFFFFF, %%r1\n\t"
     "__signExtend_long_exit:\n\t"
-        "ret    \n\t"
+        "ret        \n\t"
     );
 }
