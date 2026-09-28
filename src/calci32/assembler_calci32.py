@@ -665,13 +665,13 @@ class AssemblerFunction(AssemblyAST):
                         self.copyBytes(Memory(AssemblyType.LONGWORD, REG.RSB, stackOffset), value, movAsmbType)
                     )
                 else:
-                    # Move to the stack.
+                    # Move from the stack.
                     self.createInst(MOVE, 
                                     movAsmbType, 
                                     Memory(value.assemblyType, REG.RSB, stackOffset), 
                                     value)
                 # Increment the stack offset.
-                stackOffset += 4
+                stackOffset += 8 if movAsmbType == AssemblyType.QUADWORD else 4
 
         # Convert the function's TAC instructions into assembler instructions.
         for inst in self.function.instructions:
@@ -754,7 +754,7 @@ class AssemblerFunction(AssemblyAST):
                     exp2: AssemblerOperand = self.fromTACValue(inst.exp2)
                     dest: AssemblerOperand = self.fromTACValue(inst.result)
 
-                    if AssemblyType.QUADWORD in (exp1.assemblyType, exp2.assemblyType, dest.assemblyType):
+                    if AssemblyType.QUADWORD in (exp1.assemblyType, dest.assemblyType):
                         # For long/unsigned long operations, make the call to the included long functions. These 
                         # functions are written in C, compiled separately and linked to all calci32 programs. 
                         # Source code can be found at /lib/src/arch/calci32/long.c
@@ -780,7 +780,12 @@ class AssemblerFunction(AssemblyAST):
                         # Move exp1 to R2. Do this as the operations below would surely overwrite OP1.
                         self.createInst(MOVE, exp1.assemblyType, exp1, Register(exp1.assemblyType, REG.R2))
                         # Move exp2 to OP2.
-                        self.createInst(MOVE, exp2.assemblyType, exp2, Register(exp2.assemblyType, REG.OP2))
+                        if exp2.assemblyType == AssemblyType.QUADWORD:
+                            # exp2 can be a quad being used as argument for an integer operation without promotion (like
+                            # for bitwise shifts).
+                            self.createInst(MOVE, AssemblyType.LONGWORD, exp2, Register(exp2.assemblyType, REG.OP2))
+                        else:
+                            self.createInst(MOVE, exp2.assemblyType, exp2, Register(exp2.assemblyType, REG.OP2))
                         # Move R2 to OP1.
                         self.createInst(MOVE, exp1.assemblyType, Register(exp1.assemblyType, REG.R2), Register(exp1.assemblyType, REG.OP1))
 
@@ -819,41 +824,63 @@ class AssemblerFunction(AssemblyAST):
                     cond: AssemblerOperand = self.fromTACValue(inst.condition)
                     val: AssemblerOperand = self.fromTACValue(inst.value)
 
-                    # Move condition to R2.
-                    self.createInst(MOVE, cond.assemblyType, cond, Register(cond.assemblyType, REG.R2))
-                    # Move value to OP2.
-                    self.createInst(MOVE, val.assemblyType, val, Register(val.assemblyType, REG.OP2))
-                    # Move R2 to OP1.
-                    self.createInst(MOVE, cond.assemblyType, Register(cond.assemblyType, REG.R2), Register(cond.assemblyType, REG.OP1))
+                    if cond.assemblyType == AssemblyType.QUADWORD or val.assemblyType == AssemblyType.QUADWORD:
+                        self.createInst(MOVQ, cond, Register(AssemblyType.LONGWORD, REG.R0), Register(AssemblyType.LONGWORD, REG.R1))
+                        self.createInst(MOVQ, val, Register(AssemblyType.LONGWORD, REG.R2), Register(AssemblyType.LONGWORD, REG.R3))
 
-                    self.createInst(ALU, ALUOP.SUB, cond.assemblyType)
+                        # Check if they're equal by calling the long comparing function.
+                        self.createInst(FUN, f"__equal_long")
 
-                    if inst.condition.valueType.isDecimal():
-                        raise ValueError()
-                    else:
+                        # The function has updated the zero flag. Use it to branch out.
                         self.createInst(BRANCH, ConditionCode.EQUAL, inst.target)
+
+                    else:
+                        # Move condition to R2.
+                        self.createInst(MOV, cond, Register(cond.assemblyType, REG.R2))
+                        # Move value to OP2.
+                        self.createInst(MOV, val, Register(val.assemblyType, REG.OP2))
+                        # Move R2 to OP1.
+                        self.createInst(MOV, Register(cond.assemblyType, REG.R2), Register(cond.assemblyType, REG.OP1))
+                        self.createInst(ALU, ALUOP.SUB, cond.assemblyType)
+
+                        if inst.condition.valueType.isDecimal():
+                            raise ValueError()
+                        else:
+                            self.createInst(BRANCH, ConditionCode.EQUAL, inst.target)
 
                 case TACJumpIfZero():
                     cond: AssemblerOperand = self.fromTACValue(inst.condition)
 
-                    # Move condition to R2, this will set the zero flag.
-                    self.createInst(MOVE, cond.assemblyType, cond, Register(cond.assemblyType, REG.R2))
-
-                    if inst.condition.valueType.isDecimal():
-                        raise ValueError()
-                    else:
+                    if cond.assemblyType == AssemblyType.QUADWORD:
+                        self.createInst(MOVQ, cond, Register(AssemblyType.LONGWORD, REG.R0), Register(AssemblyType.LONGWORD, REG.R1))
+                        self.createInst(FUN, f"__not_long")
                         self.createInst(BRANCH, ConditionCode.EQUAL, inst.target)
+
+                    else:
+                        # Move condition to R2, this will set the zero flag.
+                        self.createInst(MOVE, cond.assemblyType, cond, Register(cond.assemblyType, REG.R2))
+
+                        if inst.condition.valueType.isDecimal():
+                            raise ValueError()
+                        else:
+                            self.createInst(BRANCH, ConditionCode.EQUAL, inst.target)
 
                 case TACJumpIfNotZero():
                     cond: AssemblerOperand = self.fromTACValue(inst.condition)
 
-                    # Move condition to R2, this will set the zero flag.
-                    self.createInst(MOVE, cond.assemblyType, cond, Register(cond.assemblyType, REG.R2))
-
-                    if inst.condition.valueType.isDecimal():
-                        raise ValueError()
-                    else:
+                    if cond.assemblyType == AssemblyType.QUADWORD:
+                        self.createInst(MOVQ, cond, Register(AssemblyType.LONGWORD, REG.R0), Register(AssemblyType.LONGWORD, REG.R1))
+                        self.createInst(FUN, f"__not_long")
                         self.createInst(BRANCH, ConditionCode.NOT_EQUAL, inst.target)
+
+                    else:
+                        # Move condition to R2, this will set the zero flag.
+                        self.createInst(MOVE, cond.assemblyType, cond, Register(cond.assemblyType, REG.R2))
+
+                        if inst.condition.valueType.isDecimal():
+                            raise ValueError()
+                        else:
+                            self.createInst(BRANCH, ConditionCode.NOT_EQUAL, inst.target)
 
                 case TACCopy():
                     src = self.fromTACValue(inst.src)
@@ -952,7 +979,7 @@ class AssemblerFunction(AssemblyAST):
                     if doQuad:
                         # Do a call to the extend function int -> long.
                         self.createInst(FUN, f"__signExtend_long")
-                        self.createInst(STOQ, Register(AssemblyType.LONGWORD, REG.R0), Register(AssemblyType.LONGWORD, REG.R1), dest)
+                        self.createInst(STOQ, Register(AssemblyType.LONGWORD, REG.R0), Register(AssemblyType.LONGWORD, REG.R1), result)
                     else:
                         self.createInst(MOVE, finalMovType, Register(finalMovType, REG.R0), result)
 
@@ -961,7 +988,11 @@ class AssemblerFunction(AssemblyAST):
                     result = self.fromTACValue(inst.result)
 
                     # Store into a register whilst masking.
-                    self.createInst(MOV, exp, Register(result.assemblyType, REG.R0))
+                    if isinstance(exp, Immediate):
+                        exp.valueStr = str(int(exp.valueStr) & 0xFFFFFFFF)
+                        self.createInst(MOV, exp, Register(result.assemblyType, REG.R0))
+                    else:
+                        self.createInst(MOV, exp, Register(result.assemblyType, REG.R0))
                     # Finally, store the truncated value into the result.
                     self.createInst(MOVE, result.assemblyType, Register(result.assemblyType, REG.R0), result)
 
@@ -980,12 +1011,12 @@ class AssemblerFunction(AssemblyAST):
                     # Store into a register whilst masking it to the input type.
                     self.createInst(MOV, exp, Register(exp.assemblyType, REG.R1))
                     # Transfer to another register whilst zero extending.
-                    self.createInst(MOV, Register(exp.assemblyType, REG.R1, signExtend=False), Register(result.assemblyType, REG.R0))
+                    self.createInst(MOV, Register(exp.assemblyType, REG.R1, signExtend=False), Register(finalMovType, REG.R0))
 
                     if doQuad:
                         # Simply write zero on the upper bytes using a CLR instruction.
                         self.createInst(CLR, AssemblyType.LONGWORD, Register(AssemblyType.LONGWORD, REG.R1))
-                        self.createInst(STOQ, Register(AssemblyType.LONGWORD, REG.R0), Register(AssemblyType.LONGWORD, REG.R1), dest)
+                        self.createInst(STOQ, Register(AssemblyType.LONGWORD, REG.R0), Register(AssemblyType.LONGWORD, REG.R1), result)
                     else:
                         self.createInst(MOVE, finalMovType, Register(finalMovType, REG.R0), result)
 
@@ -1851,11 +1882,13 @@ class PSH(AssemblerInstruction):
                 high = self.operand.createCopy()
                 high.offset += 4
 
-                movToRegLow = self.createChild(MOVE, AssemblyType.LONGWORD, low, Register(AssemblyType.LONGWORD, REG.R6))
-                movToRegHigh = self.createChild(MOVE, AssemblyType.LONGWORD, high, Register(AssemblyType.LONGWORD, REG.R7))
                 pushFromRegLow = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R6))
+                movToRegHigh = self.createChild(MOVE, AssemblyType.LONGWORD, high, Register(AssemblyType.LONGWORD, REG.R7))
+                
+                # Remember to push the high word first.
+                movToRegLow = self.createChild(MOVE, AssemblyType.LONGWORD, low, Register(AssemblyType.LONGWORD, REG.R6))
                 pushFromRegHigh = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R7))
-                return [movToRegLow, movToRegHigh, pushFromRegLow, pushFromRegHigh]
+                return [movToRegLow, movToRegHigh, pushFromRegHigh, pushFromRegLow]
             elif isinstance(self.operand, Immediate):
                 # Stack cannot receive an immediate. Save the src into temporary register and then push it.
                 # Split the 64-bit immediate in two 32-bit immediates.
@@ -1868,9 +1901,11 @@ class PSH(AssemblerInstruction):
 
                 movToRegLow = self.createChild(MOVE, AssemblyType.LONGWORD, low, Register(AssemblyType.LONGWORD, REG.R6))
                 movToRegHigh = self.createChild(MOVE, AssemblyType.LONGWORD, high, Register(AssemblyType.LONGWORD, REG.R7))
-                pushFromRegLow = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R6))
+
+                # Remember to push the high word first.
                 pushFromRegHigh = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R7))
-                return [movToRegLow, movToRegHigh, pushFromRegLow, pushFromRegHigh]
+                pushFromRegLow = self.createChild(PSH, Register(AssemblyType.LONGWORD, REG.R6))
+                return [movToRegLow, movToRegHigh, pushFromRegHigh, pushFromRegLow]
         
         elif isinstance(self.operand, (Memory, Data, Immediate, LabeledImmediate)):
             # Stack cannot receive an immediate or memory. Save the src into temporary register and then push it.
@@ -1997,7 +2032,7 @@ class Register(AssemblerOperand):
                     ret += "'u8"
 
             case _:
-                raise ValueError(f"Cannot emit code for a register with assembly type {self.assemblyType.baseType}")
+                raise ValueError(f"Cannot emit code for register {self.reg} with assembly type {self.assemblyType.baseType}")
 
         return ret
 

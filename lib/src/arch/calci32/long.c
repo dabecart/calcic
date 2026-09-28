@@ -209,16 +209,12 @@ unsigned int __not_ulong (unsigned long a);
 int __not_long __attribute__((crude, alias(__not_ulong))) (long a) {
     // !x is the same as x == 0.
     __asm__("\t"
-        "mov    %%r1, %%op1\n\t"
-        "clr    %%op2\n\t"
-        "sub    \n\t"
-        "seq    %%r4\n\t"
-        "bne    __not_long_exit\n\t"
         "mov    %%r0, %%op1\n\t"
-        "sub    \n\t"
-        "seq    %%r4\n"
+        "seq    %%r0\n\t"
+        "bne    __not_long_exit\n\t"
+        "mov    %%r1, %%op1\n\t"
+        "seq    %%r0\n\t"
     "__not_long_exit:\n\t"
-        "mov    %%r4, %%r0\n\t"
         "ret    \n\t"
     );
 }
@@ -265,7 +261,7 @@ long __decrement_long __attribute__((crude, alias(__decrement_ulong))) (long a) 
         "mov        %%r0, %%op1\n\t"
         "dec        %%r0\n\t"
         "mov        %%r1, %%op1\n\t"
-        "clr        %%r3\n\t"
+        "clr        %%op2\n\t"
         "subc       %%r1\n\t"
         "ret        \n\t"
     );
@@ -353,6 +349,45 @@ long __arithmetic_right_shift_long __attribute__((crude)) (long a, int b) {
         "shra       %%r0\n\t"                   // a_h shra (b - 32) -> r1
         "mov        $31, %%op2\n\t"
         "shra       %%r1\n\t"                   // a_h shra 31 -> r1
+        "ret        \n"
+    );
+}
+
+unsigned long __bitwise_and_ulong (unsigned long a, unsigned long b);
+long __bitwise_and_long __attribute__((crude, alias(__bitwise_and_ulong))) (long a, long b) {
+    __asm__("\t"
+        "mov        %%r0, %%op1\n\t"
+        "mov        %%r2, %%op2\n\t"
+        "and        %%r0\n\t"
+        "mov        %%r1, %%op1\n\t"
+        "mov        %%r3, %%op2\n\t"
+        "and        %%r1\n\t"
+        "ret        \n"
+    );
+}
+
+unsigned long __bitwise_or_ulong (unsigned long a, unsigned long b);
+long __bitwise_or_long __attribute__((crude, alias(__bitwise_or_ulong))) (long a, long b) {
+    __asm__("\t"
+        "mov        %%r0, %%op1\n\t"
+        "mov        %%r2, %%op2\n\t"
+        "or         %%r0\n\t"
+        "mov        %%r1, %%op1\n\t"
+        "mov        %%r3, %%op2\n\t"
+        "or         %%r1\n\t"
+        "ret        \n"
+    );
+}
+
+unsigned long __bitwise_xor_ulong (unsigned long a, unsigned long b);
+long __bitwise_xor_long __attribute__((crude, alias(__bitwise_xor_ulong))) (long a, long b) {
+    __asm__("\t"
+        "mov        %%r0, %%op1\n\t"
+        "mov        %%r2, %%op2\n\t"
+        "xor        %%r0\n\t"
+        "mov        %%r1, %%op1\n\t"
+        "mov        %%r3, %%op2\n\t"
+        "xor        %%r1\n\t"
         "ret        \n"
     );
 }
