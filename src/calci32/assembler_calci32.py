@@ -715,12 +715,10 @@ class AssemblerFunction(AssemblyAST):
                             self.createInst(MOVE, dest.assemblyType, Register(AssemblyType.LONGWORD, REG.R0), dest)
 
                     else:
-                        # Move exp to OP1. None of the operations below change OP1.
-                        self.createInst(MOVE, exp.assemblyType, exp, Register(exp.assemblyType, REG.OP1))
-
                         match inst.operator:
                             case UnaryOperator.NOT:
                                 # !(x) is the same as x == 0. The MOVE above sets the ZERO flag.
+                                self.createInst(MOVE, exp.assemblyType, exp, Register(exp.assemblyType, REG.OP1))
                                 self.createInst(SET, ConditionCode.EQUAL, dest)
 
                             case UnaryOperator.NEGATION:
@@ -729,22 +727,24 @@ class AssemblerFunction(AssemblyAST):
 
                                 else:
                                     # Use the negate ALU operation.
+                                    self.createInst(MOVE, exp.assemblyType, exp, Register(exp.assemblyType, REG.OP1))
                                     self.createInst(ALU, ALUOP.NEG, dest.assemblyType, dest)
 
                             case UnaryOperator.BITWISE_COMPLEMENT:
+                                self.createInst(MOVE, exp.assemblyType, exp, Register(exp.assemblyType, REG.OP1))
                                 self.createInst(ALU, ALUOP.NOT, dest.assemblyType, dest)
 
                             case UnaryOperator.INCREMENT:
                                 if inst.result.valueType.isDecimal():
                                     raise ValueError()
                                 else:
-                                    self.createInst(ALU, ALUOP.INC, dest.assemblyType, dest)
+                                    self.createInst(INC, dest.assemblyType, exp, dest)
 
                             case UnaryOperator.DECREMENT:
                                 if inst.result.valueType.isDecimal():
                                     raise ValueError()
                                 else:
-                                    self.createInst(ALU, ALUOP.DEC, dest.assemblyType, dest)
+                                    self.createInst(DEC, dest.assemblyType, exp, dest)
 
                             case _:
                                 raise ValueError(f"Invalid Unary Operation: {inst.operator}")
@@ -1534,10 +1534,10 @@ class ALUOP(enum.Enum):
     NOT     = enum.auto()
     SHL     = enum.auto()
     SHR     = enum.auto()
+    ROL     = enum.auto()
+    ROR     = enum.auto()
     SHLA    = enum.auto()
     SHRA    = enum.auto()
-    INC     = enum.auto()
-    DEC     = enum.auto()
 
     @staticmethod
     def fromBinaryOperator(op: BinaryOperator, valueType: DeclaratorType) -> ALUOP:
@@ -1672,6 +1672,106 @@ class CLR(AssemblerInstruction):
 
     def print(self) -> str:
         return f"CLR({self.dst})\n"
+
+# Increment.
+class INC(AssemblerInstruction):
+    def __init__(self, asmbType, src: AssemblerOperand, dst: AssemblerOperand | None = None,
+                 parentAST: AssemblyAST | None = None) -> None:
+        self.asmbType = asmbType
+        self.src = src
+        self.dst: AssemblerOperand | None = dst
+
+        super().__init__(parentAST)
+
+    def secondPass(self):
+        self.src = self.convertFromPseudo(self.src)
+        if self.dst is not None:
+            self.dst = self.convertFromPseudo(self.dst)
+
+    def thirdPass(self) -> list[AssemblerInstruction]:
+        moveSrcToReg = isinstance(self.src, (Memory, Data))
+        moveDstToReg = isinstance(self.dst, (Memory, Data))
+
+        if moveSrcToReg and moveDstToReg:
+            moveSrc  = self.createChild(MOVE, self.asmbType, self.src, Register(self.asmbType, REG.R6))
+            incInst  = self.createChild(INC, self.asmbType, Register(self.asmbType, REG.R6))
+            moveDst  = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R6), self.dst)
+            return [moveSrc, incInst, moveDst]
+
+        if moveSrcToReg:
+            moveSrc  = self.createChild(MOVE, self.asmbType, self.src, self.dst)
+            incInst  = self.createChild(INC, self.asmbType, self.dst)
+            return [moveSrc, incInst]
+
+        # If this is reached, it could also be that both src and dst are registers. Increment it and move it.
+        if moveDstToReg or (self.src != self.dst):
+            incInst  = self.createChild(INC, self.asmbType, self.src)
+            moveDst  = self.createChild(MOVE, self.asmbType, self.src, self.dst)
+            return [incInst, moveDst]
+
+        # Source and destination registers are the same.
+        return [self]
+
+    def emitCode(self) -> str:
+        if self.dst is not None:
+            raise ValueError("Cannot increment")
+
+        # Set the type to that of the instruction.
+        self.src.assemblyType = self.asmbType
+        return f"\tinc\t{self.src.emitCode()}\n"
+
+    def print(self) -> str:
+        return f"INC({self.src})\n"
+
+# Decrement.
+class DEC(AssemblerInstruction):
+    def __init__(self, asmbType, src: AssemblerOperand, dst: AssemblerOperand | None = None,
+                 parentAST: AssemblyAST | None = None) -> None:
+        self.asmbType = asmbType
+        self.src = src
+        self.dst: AssemblerOperand | None = dst
+
+        super().__init__(parentAST)
+
+    def secondPass(self):
+        self.src = self.convertFromPseudo(self.src)
+        if self.dst is not None:
+            self.dst = self.convertFromPseudo(self.dst)
+
+    def thirdPass(self) -> list[AssemblerInstruction]:
+        moveSrcToReg = isinstance(self.src, (Memory, Data))
+        moveDstToReg = isinstance(self.dst, (Memory, Data))
+
+        if moveSrcToReg and moveDstToReg:
+            moveSrc  = self.createChild(MOVE, self.asmbType, self.src, Register(self.asmbType, REG.R6))
+            incInst  = self.createChild(DEC, self.asmbType, Register(self.asmbType, REG.R6))
+            moveDst  = self.createChild(MOVE, self.asmbType, Register(self.asmbType, REG.R6), self.dst)
+            return [moveSrc, incInst, moveDst]
+
+        if moveSrcToReg:
+            moveSrc  = self.createChild(MOVE, self.asmbType, self.src, self.dst)
+            incInst  = self.createChild(DEC, self.asmbType, self.dst)
+            return [moveSrc, incInst]
+
+        # If this is reached, it could also be that both src and dst are registers. Decrement it and move it.
+        if moveDstToReg or (self.src != self.dst):
+            incInst  = self.createChild(DEC, self.asmbType, self.src)
+            moveDst  = self.createChild(MOVE, self.asmbType, self.src, self.dst)
+            return [incInst, moveDst]
+
+        # Source and destination registers are the same.
+        return [self]
+
+    def emitCode(self) -> str:
+        if self.dst is not None:
+            raise ValueError(f"Cannot decrement")
+
+        # Set the type to that of the instruction.
+        self.src.assemblyType = self.asmbType
+        return f"\tdec\t{self.src.emitCode()}\n"
+
+    def print(self) -> str:
+        return f"DEC({self.src})\n"
 
 class ConditionCode(enum.Enum):
     EQUAL                   = "eq "

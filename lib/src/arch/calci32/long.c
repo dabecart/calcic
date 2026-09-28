@@ -245,7 +245,6 @@ unsigned long __increment_ulong(unsigned long a);
 long __increment_long __attribute__((crude, alias(__increment_ulong))) (long a) {
     // Pass 1 as second argument to __sum_long.
     __asm__("\t"
-        "mov        %%r0, %%op1\n\t"
         "inc        %%r0\n\t"
         "mov        %%r1, %%op1\n\t"
         "clr        %%op2\n\t"
@@ -258,7 +257,6 @@ unsigned long __decrement_ulong(unsigned long a);
 long __decrement_long __attribute__((crude, alias(__decrement_ulong))) (long a) {
     // Pass 1 as second argument to __subtract_long.
     __asm__("\t"
-        "mov        %%r0, %%op1\n\t"
         "dec        %%r0\n\t"
         "mov        %%r1, %%op1\n\t"
         "clr        %%op2\n\t"
@@ -447,23 +445,28 @@ void __division_algorithm __attribute__((crude)) () {
      *          ^r1      ^r0       ^r3      ^r2
      */
     __asm__("\t"
-        // Check the divisor is not zero.
-        "mov        %%r2, %%r4\n\t"
-        "bne        __division_algorithm_not_zero_first\n\t"
         "mov        %%r3, %%r5\n\t"
-        "bne        __division_algorithm_not_zero_second\n\t"
-        "clr        %%op1\n\t"
-        "dec        %%r0\n\t"
-        "mov        %%r0, %%r1\n\t"
-        "mov        %%r0, %%r2\n\t"
-        "mov        %%r0, %%r3\n\t"
-        "ret        \n"
+        "seq        %%op1\n\t"
+        "mov        %%r2, %%r4\n\t"
+        "seq        %%r11\n\t"          // Save it for the 32-bit high check.
+        "mov        %%r11, %%op2\n\t"
 
-    "__division_algorithm_not_zero_first:\n\t"
-        "mov        %%r3, %%r5\n"
+        "and        \n\t"
+        "bne        __division_algorithm_dividing_by_zero\n\t"
 
-    "__division_algorithm_not_zero_second:\n\t"
-    
+        // Is r1 = r3 = 0?
+        "mov        %%r1, %%r1\n\t"
+        "seq        %%op2\n\t"
+        "and        \n\t"
+        "bne        __division_algorithm_32_bit_low\n\t"
+
+        // Is r0 = r2 = 0?
+        "mov        %%r11, %%op1\n\t"
+        "mov        %%r0, %%r0\n\t"
+        "seq        %%op2\n\t"
+        "and        \n\t"
+        "bne        __division_algorithm_32_bit_high\n\t"
+
         "mov        $64, %%r11\n\t"
         "clr        %%r2\n\t"
         "clr        %%r3\n\t"
@@ -471,6 +474,7 @@ void __division_algorithm __attribute__((crude)) () {
         // Quotient:                [0] = r0, [1] = r1 <- This contains the dividend at the beginning.
         // Remainder:               [0] = r2, [1] = r3
         // Divisor:                 [0] = r4, [1] = r5
+        // Temporary subtraction:   [0] = r6, [1] = r7
     "__division_algorithm_loop_start:\n\t"
         "set        %%op2\n\t"
         "mov        %%r0, %%op1\n\t"
@@ -496,11 +500,34 @@ void __division_algorithm __attribute__((crude)) () {
         "mov        %%r7, %%r3\n"
 
     "__division_algorithm_next_bit:\n\t"
-        "mov        %%r11, %%op1\n\t"
         "dec        %%r11\n\t"
         "bne        __division_algorithm_loop_start\n\t"
+        "ret        \n"
 
-        "ret\n\t"
+    "__division_algorithm_dividing_by_zero:\n\t"
+        // Divisor is zero. Return -1 on both quotient and remainder.
+        "clr        %%r0\n\t"
+        "dec        %%r0\n\t"
+        "mov        %%r0, %%r1\n\t"
+        "mov        %%r0, %%r2\n\t"
+        "mov        %%r0, %%r3\n\t"
+        "ret        \n"
+
+    "__division_algorithm_32_bit_low:\n\t"
+        "mov        %%r0, %%op1\n\t"
+        "mov        %%r2, %%op2\n\t"
+        "udiv       %%r0, %%r2\n\t"
+        "clr        %%r1\n\t"
+        "clr        %%r3\n\t"
+        "ret        \n"
+
+    "__division_algorithm_32_bit_high:\n\t"
+        "mov        %%r1, %%op1\n\t"
+        "mov        %%r3, %%op2\n\t"
+        "udiv       %%r0, %%r3\n\t"
+        "clr        %%r1\n\t"
+        "clr        %%r2\n\t"
+        "ret        \n"
     );
 }
 
