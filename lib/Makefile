@@ -13,8 +13,8 @@ ARCH ?= x64
 CC       		:= ../calcic
 LD_x64      	:= ld
 LD_calci32  	:= ../linker/calcil/calcil
-CFLAGS   		:= -O --nostdlib 	# Enable optimizations, do not use the previously compiled libraries.
-LDFLAGS_x64 	:= -r  				# Relocatable flag to join objects without making a binary
+CFLAGS   		:= -O --nostdlib	# Enable optimizations, do not use the previously compiled libraries.
+LDFLAGS_x64 	:= -r				# Relocatable flag to join objects without making a binary
 LDFLAGS_calci32 := -c				# Create an object file.
 
 # Output names

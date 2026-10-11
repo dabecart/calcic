@@ -12,6 +12,7 @@ import subprocess
 import os
 import traceback
 import sys
+import tempfile
 from pathlib import Path
 
 from src import lexer, parser, TAC
@@ -118,7 +119,12 @@ def main() -> None:
                            action="store_true")
     
     args = argParser.parse_args(splitCombinedArguments(sys.argv[1:], {'l'}))
+    
     inputFile: str = args.input_file
+    if not os.path.exists(inputFile):
+        print(f"File {inputFile} does not exist", file=sys.stderr)
+        exit(1)
+
     inputFileBasename: str = inputFile.rsplit(".", 1)[0]
 
     # Libraries folder.
@@ -134,13 +140,18 @@ def main() -> None:
         exit(1)
     globalContext.addDebugInfo = args.debug
 
-    assemblyOutput: str
-    if args.generate_assembly and args.output is not None:
-        assemblyOutput = args.output
-    else:
-        assemblyOutput = f"{inputFileBasename}.s"
-
     isInputAssemblyFile: bool = inputFile.endswith((".s", ".S"))
+
+    assemblyFile: str = ""
+    if isInputAssemblyFile:
+        assemblyFile = inputFile
+    elif args.generate_assembly and args.output is not None:
+        assemblyFile = args.output
+    else:
+        # Generate a temporary file to store the assembly code.
+        fd, assemblyFile = tempfile.mkstemp()
+        # Close the file, we only want the route.
+        os.close(fd)
 
     if not isInputAssemblyFile:
         """
@@ -148,8 +159,12 @@ def main() -> None:
         PREPROCESSOR
         xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
         """
+        # Generate a temporary file to store the preprocessed code.
+        fd, preprocessedOutput = tempfile.mkstemp()
+        # Close the file, we only want the route.
+        os.close(fd)
         # Use the calcic standard libraries and not the GCC's.
-        preprocessCommand: list[str] = ["gcc", "-E", inputFile, "-o", f"{inputFileBasename}.i"]
+        preprocessCommand: list[str] = ["gcc", "-E", inputFile, "-o", preprocessedOutput]
         if not globalContext.useGCCLibraries:
             # Set the lib/headers folder as a system directory for the preprocessor.
             preprocessCommand += ["-nostdinc", "-isystem", str(libPath / "headers")]
@@ -166,17 +181,17 @@ def main() -> None:
         xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
         """
         try:
-            tokens = lexer.lex(f"{inputFileBasename}.i")
+            tokens = lexer.lex(preprocessedOutput)
             if args.verbose:
                 print(f"Tokens:\n{tokens}\n")
         except Exception as e:
-            os.remove(f"{inputFileBasename}.i")
+            os.remove(preprocessedOutput)
             print(f"Lexer exception:\n{e}", file=sys.stderr)
             if args.verbose:
                 print(traceback.format_exc(), file=sys.stderr)
             exit(1)
 
-        os.remove(f"{inputFileBasename}.i")
+        os.remove(preprocessedOutput)
 
         if args.lex:
             exit(0)
@@ -303,8 +318,11 @@ def main() -> None:
         if args.verbose:
             print(f"Assembly code:\n{assemblyCode}")
 
-        with open(assemblyOutput, "w") as assemblyFile:
-            assemblyFile.write(assemblyCode)
+        if assemblyFile:
+            with open(assemblyFile, "w") as f:
+                f.write(assemblyCode)
+        else:
+            print("No assembly file will be generated, use the -o flag")
 
         if args.generate_assembly:
             exit(0)
@@ -323,13 +341,15 @@ def main() -> None:
     else:
         exeOutput = args.output
 
-    assemblerCommand: list[str] = [globalContext.linkerRoute, f"{inputFileBasename}.s", "-o", exeOutput]
+    assemblerCommand: list[str] = [globalContext.linkerRoute, assemblyFile, "-o", exeOutput]
 
     if not args.nostdlib and globalContext.useCalcicSTDLibraries:
         # Include the calcic standard libraries.
         libBuildObject: str = str(libPath / f"build/{arch.name.lower()}/calcic_libc.o")
         if not os.path.exists(libBuildObject):
-            raise ValueError(f"Expected file: {libBuildObject}. Please, build the calcic libraries.")
+            print(f"Libraries missing: {libBuildObject}. Please, build the calcic libraries.", file=sys.stderr)
+            exit(1)
+
         assemblerCommand.insert(1, libBuildObject)
 
     if args.generate_object:
@@ -360,7 +380,7 @@ def main() -> None:
     if retCode != 0:
         exit(retCode)
 
+    # Do not remove the assembly file if it's been the input of the program.
     if not isInputAssemblyFile:
-        # Do not remove the assembly file if it's been the input of the program.
-        os.remove(f"{inputFileBasename}.s")
+        os.remove(assemblyFile)
     
