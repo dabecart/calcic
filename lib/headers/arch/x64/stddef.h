@@ -1,7 +1,7 @@
 /***************************************************************************************************
  * <stddef.h>
  * 
- * General definitions, according to Section 7.17 of the C99 standard.
+ * General definitions, according to Section 7.17 of the C99 standard. For the x64 architecture.
  * 
  * This library is part of the calcic compiler, written by @dabecart. 2026.
 ***************************************************************************************************/

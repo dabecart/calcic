@@ -7,8 +7,8 @@
 ***************************************************************************************************/
 
 #include <arch.h>
-#include <arch/x64/unistd_64.h>
-#include <arch/x64/fcntl.h>
+#include <arch/x64/custom/unistd_64.h>
+#include <arch/x64/custom/fcntl.h>
 
 #define COMPILING_STDIO
 #include <stdio.h>

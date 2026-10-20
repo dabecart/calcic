@@ -7,8 +7,7 @@
 ***************************************************************************************************/
 
 #include <arch.h>
-#include <arch/x64/unistd_64.h>
-#include <arch/x64/fcntl.h>
+#include <arch/x64/custom/unistd_64.h>
 
 static int __read(int fd, void *buf, size_t count)
 {

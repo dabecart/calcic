@@ -26,7 +26,8 @@ BUILD_DIR 	:= build/$(ARCH)
 ifeq ($(ARCH),calci32)
 # Temporary explicit list of compilable files for calci32
 SRCS := \
-	$(SRC_DIR)/arch/calci32/long.c
+	$(SRC_DIR)/arch/calci32/custom/long.c \
+	$(SRC_DIR)/arch/calci32/custom/uart.c
 else
 # Find .c files in src/, including src/arch/$(ARCH)/ but excluding other arch folders
 SRCS := $(shell find $(SRC_DIR) -name "*.c" \( -path "$(SRC_DIR)/arch/$(ARCH)/*" -o ! -path "$(SRC_DIR)/arch/*" \))

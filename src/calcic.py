@@ -149,7 +149,7 @@ def main() -> None:
         assemblyFile = args.output
     else:
         # Generate a temporary file to store the assembly code.
-        fd, assemblyFile = tempfile.mkstemp()
+        fd, assemblyFile = tempfile.mkstemp(suffix = ".s")
         # Close the file, we only want the route.
         os.close(fd)
 
@@ -160,14 +160,17 @@ def main() -> None:
         xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
         """
         # Generate a temporary file to store the preprocessed code.
-        fd, preprocessedOutput = tempfile.mkstemp()
+        fd, preprocessedOutput = tempfile.mkstemp(suffix = ".i")
         # Close the file, we only want the route.
         os.close(fd)
         # Use the calcic standard libraries and not the GCC's.
         preprocessCommand: list[str] = ["gcc", "-E", inputFile, "-o", preprocessedOutput]
         if not globalContext.useGCCLibraries:
             # Set the lib/headers folder as a system directory for the preprocessor.
-            preprocessCommand += ["-nostdinc", "-isystem", str(libPath / "headers")]
+            preprocessCommand += ["-nostdinc",
+                                  "-isystem", str(libPath / "headers"), 
+                                  "-isystem", str(libPath / "headers" / "arch" / arch.value)
+                                ]
         
         preprocessStatus = subprocess.run(preprocessCommand)
         retCode = preprocessStatus.returncode
