@@ -1680,7 +1680,7 @@ class AssemblerFunction(AssemblyAST):
         self.instructions = newInstructions
 
     def emitCode(self) -> str:
-        ret = "\t.section text\n"
+        ret = "\t.section .text\n"
 
         if self.function.isGlobal:
             ret +=  f"\t.globl {self.identifier}\n"
