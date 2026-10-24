@@ -25,6 +25,7 @@ class GlobalContext:
     
     useGCCLibraries: bool                                   = False
     useCalcicSTDLibraries: bool                             = True
+    useTemporaryFiles: bool                                 = True
 
     builtInTypes: BuiltInTypes                              = field(default_factory=lambda: BuiltInTypes())
     isBuiltInFunctionByIdentifier: Callable                 = lambda *args, **kwargs: None
@@ -52,5 +53,6 @@ class GlobalContext:
 globalContext = GlobalContext()
 
 # If running the 'Writing a C compiler' testsuite...
-# globalContext.useGCCLibraries = True
-# globalContext.useCalcicSTDLibraries = False
+globalContext.useGCCLibraries = True
+globalContext.useCalcicSTDLibraries = False
+globalContext.useTemporaryFiles = False

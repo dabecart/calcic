@@ -33,8 +33,12 @@ class ParameterInformation:
     # Used for anonymous parameters in function declarations.
     isAnonymous: bool = False
 
-    # Used for the parameters of structs.
+    # Offset in bytes from the start of the struct.
     offset: int = 0
+    # For bitfields structs.
+    isBitfield: bool = False
+    bitOffset: int = 0
+    bitWidth: int = 0
 
     def __str__(self) -> str:
         if self.isAnonymous:

@@ -1089,29 +1089,79 @@ class AST(ABC):
                 memoryOffset: int = 0
                 memberIndex: int = 0
 
+                activeByteOffset: int = -1
+                activeByteValue: int = 0
+
+                def flushActiveByte():
+                    nonlocal activeByteOffset, activeByteValue, memoryOffset
+                    if activeByteOffset != -1:
+                        byteConst = self.createChild(UCharConstant, activeByteValue & 0xFF)
+                        ret.append(byteConst)
+                        memoryOffset = activeByteOffset + 1
+                        activeByteValue >>= 8
+                        if activeByteValue > 0:
+                            activeByteOffset += 1
+                        else:
+                            activeByteOffset = -1
+
                 self.expect("{")
-                parsed = self.parseConstantFromType(members[0].type, strict)
-                memoryOffset += members[0].type.getByteSize()
-                ret.extend(parsed)
 
-                while self.peek().id == ",":
-                    memberIndex += 1
-                    self.pop()
-
+                while True:
                     if self.peek().id == "}":
                         break
 
                     if memberIndex >= len(members):
                         self.raiseError(f"Too many initializers for {constantType}")
 
-                    paddingBytes = members[memberIndex].offset - memoryOffset
-                    if paddingBytes > 0:
-                        padding = self.createChild(ZeroPaddingInitializer, 
-                                                    TypeSpecifier.VOID.toBaseType(), paddingBytes)
-                        ret.append(padding)
+                    currentMember = members[memberIndex]
 
-                    ret.extend(self.parseConstantFromType(members[memberIndex].type, strict))
-                    memoryOffset += members[memberIndex].type.getByteSize() + paddingBytes
+                    # Flush any active bitfield bytes that precede the current member's offset.
+                    while activeByteOffset != -1 and activeByteOffset < currentMember.offset:
+                        flushActiveByte()
+
+                    # Handle padding.
+                    paddingBytes = currentMember.offset - memoryOffset
+                    if paddingBytes > 0:
+                        if activeByteOffset != -1:
+                            while activeByteOffset != -1:
+                                flushActiveByte()
+                            paddingBytes = currentMember.offset - memoryOffset
+
+                        if paddingBytes > 0:
+                            padding = self.createChild(ZeroPaddingInitializer, 
+                                                        TypeSpecifier.VOID.toBaseType(), paddingBytes)
+                            ret.append(padding)
+                            memoryOffset += paddingBytes
+
+                    # Parse member (bitfield or regular).
+                    if currentMember.isBitfield:
+                        parsed = self.parseConstantFromType(currentMember.type, strict)
+                        val = int(parsed[0].constValue)
+                        mask = (1 << currentMember.bitWidth) - 1
+                        
+                        if activeByteOffset == -1:
+                            activeByteOffset = currentMember.offset
+                            activeByteValue = 0
+
+                        activeByteValue |= (val & mask) << currentMember.bitOffset
+                    else:
+                        if activeByteOffset != -1:
+                            while activeByteOffset != -1:
+                                flushActiveByte()
+                        
+                        ret.extend(self.parseConstantFromType(currentMember.type, strict))
+                        memoryOffset = currentMember.offset + currentMember.type.getByteSize()
+
+                    memberIndex += 1
+
+                    if self.peek().id == ",":
+                        self.pop()
+                    else:
+                        break
+
+                # Flush any remaining active bitfield bytes
+                while activeByteOffset != -1:
+                    flushActiveByte()
 
                 finalPadding = baseConstType.getByteSize() - memoryOffset
                 if finalPadding > 0:
@@ -1120,8 +1170,9 @@ class AST(ABC):
                     ret.append(padding)
 
                 self.expect("}")
+
                 return ret
-            
+
             if baseConstType.name == "UNION":
                 members = baseConstType.getMembers()
                 self.expect("{")
@@ -2505,8 +2556,11 @@ class VariableDeclaration(Declaration):
 class MemberInformation:
     typeId: DeclaratorType
     name: str
-    # The offset gets written in StructDeclaration. It is not used by UnionDeclaration.
+    isBitfield: bool = False
+    bitWidth: int = 0
+    # These offsets get written in StructDeclaration. It is not used by UnionDeclaration.
     offset: int = -1
+    bitOffset: int = 0
 
 class MemberDeclaration(AST):
     def parse(self, *args):
@@ -2520,8 +2574,26 @@ class MemberDeclaration(AST):
 
             if not info.type.isComplete():
                 self.raiseError("Cannot use incomplete type inside a member declaration")
-            
+
             decl = MemberInformation(info.type, info.name)
+
+            if self.peek().id == ":":
+                self.pop()
+                decl.isBitfield = True
+
+                if not info.type.isInteger():
+                    self.raiseError("Invalid type for a bitfield, must be of integer type")
+
+                bitfieldConst = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType())[0]
+                decl.bitWidth = int(bitfieldConst.constValue)
+
+                if decl.bitWidth < 0:
+                    self.raiseError("Width of a bitfield cannot be negative")
+
+                if decl.bitWidth > info.type.getByteSize() * 8:
+                    self.raiseError(f"Bitfield width {decl.bitWidth} is larger than the "
+                                    f"size of {info.type} of size {info.type.getByteSize()}")
+            
             self.declarations.append(decl)
 
             nextToken = self.expect(",", ";")
@@ -2599,34 +2671,109 @@ class StructDeclaration(Declaration):
             # The struct is going to be defined.
             self.byteSize = 0
 
+            # State tracking for active bitfield storage units.
+            activeUnitTypeSize: int|None = None
+            activeUnitByteOffset: int = 0
+            bitsUsedInUnit: int = 0
+
+            # Closes the current active bitfield storage unit and updates byteSize.
+            def flushBitfieldUnit():
+                nonlocal activeUnitTypeSize, activeUnitByteOffset, bitsUsedInUnit
+                if activeUnitTypeSize is not None:
+                    usedBytes = math.ceil(bitsUsedInUnit / 8)
+                    self.byteSize = max(self.byteSize, activeUnitByteOffset + usedBytes)
+                    activeUnitTypeSize = None
+                    bitsUsedInUnit = 0
+
             # Must always have at least one member.
             while True:
                 # This may contain multiple declarations of the same base type.
                 decls = self.createChild(MemberDeclaration).declarations
 
                 for decl in decls:
-                    declAlignment = decl.typeId.getAlignment()
-                    decl.offset = declAlignment * math.ceil(self.byteSize / declAlignment)
+                    if not decl.isBitfield:
+                        # ------------------ Normal Member ------------------
+                        # Any active bitfield group must be closed before a normal member.
+                        flushBitfieldUnit()
+
+                        declAlignment = decl.typeId.getAlignment()
+                        decl.offset = declAlignment * math.ceil(self.byteSize / declAlignment)
+
+                        # The alignment of the structure must be the greatest alignment of its members.
+                        if declAlignment > self.alignment:
+                            self.alignment = declAlignment
+
+                        # Add the size of the member plus the offset added between the current member and the
+                        # previous one.
+                        self.byteSize = decl.offset + decl.typeId.getByteSize()
+
+                    else:
+                        # ------------------ Bitfield Member ------------------
+                        typeSize = decl.typeId.getByteSize()
+                        typeAlign = decl.typeId.getAlignment()
+
+                        if decl.bitWidth == 0:
+                            # ------------------ Zero-width Bitfield ------------------
+                            # Acts as a boundary/separator; flushes current unit and forces 
+                            # the next bitfield to align to its declared type boundary.
+                            flushBitfieldUnit()
+
+                            decl.offset = typeAlign * math.ceil(self.byteSize / typeAlign)
+                            self.byteSize = decl.offset
+
+                            if typeAlign > self.alignment:
+                                self.alignment = typeAlign
+
+                            if decl.name:
+                                self.members.append(decl)
+                        else:
+                            # ------------------ Standard Bitfield ------------------
+                            canPack = False
+                            if activeUnitTypeSize is not None:
+                                # Ensure the active unit base offset satisfies the new type's alignment.
+                                if activeUnitByteOffset % typeAlign == 0:
+                                    newTypeSize = max(activeUnitTypeSize, typeSize)
+                                    if (bitsUsedInUnit + decl.bitWidth) <= (newTypeSize * 8):
+                                        canPack = True
+
+                            if canPack:
+                                assert activeUnitTypeSize is not None
+                                decl.offset = activeUnitByteOffset
+                                decl.bitOffset = bitsUsedInUnit
+                                bitsUsedInUnit += decl.bitWidth
+                                activeUnitTypeSize = max(activeUnitTypeSize, typeSize)
+                            else:
+                                # Flush existing unit and start a new naturally aligned one.
+                                flushBitfieldUnit()
+
+                                activeUnitByteOffset = typeAlign * math.ceil(self.byteSize / typeAlign)
+
+                                if typeAlign > self.alignment:
+                                    self.alignment = typeAlign
+
+                                activeUnitTypeSize = typeSize
+                                bitsUsedInUnit = decl.bitWidth
+
+                                decl.offset = activeUnitByteOffset
+                                decl.bitOffset = 0
+                                self.byteSize = activeUnitByteOffset
 
                     # The name of the declaration must not be repeated.
-                    for mem in self.members:
-                        if mem.name == decl.name:
-                            self.raiseError(f"Duplicated member with name {decl.name}")
-                    self.members.append(decl)
-
-                    # The alignment of the structure must be the greatest alignment of it members.
-                    if declAlignment > self.alignment:
-                        self.alignment = declAlignment
-
-                    # Add the size of the member plus the offset added between the current member and the
-                    # previous one.
-                    self.byteSize += decl.typeId.getByteSize() + (decl.offset - self.byteSize)
+                    if decl.name:
+                        for mem in self.members:
+                            if mem.name == decl.name:
+                                self.raiseError(f"Duplicated member with name {decl.name}")
+                        self.members.append(decl)
 
                 if self.peek().id == "}":
                     break
-            
+
+            # Flush any trailing bitfield unit left open at the end of the struct
+            flushBitfieldUnit()
+
             # Round up the byteSize depending on the struct's alignment.
             self.byteSize = self.alignment * math.ceil(self.byteSize / self.alignment)
+
             self.expect("}")
 
         ctx = self.context.getStructFromOriginalName(self.originalIdentifier)
@@ -2645,8 +2792,10 @@ class StructDeclaration(Declaration):
 
     def membersToParamInfo(self) -> list[ParameterInformation]:
         return [
-            ParameterInformation(member.typeId, member.name, offset=member.offset)
-            for member in self.members
+            ParameterInformation(
+                member.typeId, member.name, offset=member.offset, 
+                isBitfield=member.isBitfield, bitOffset=member.bitOffset, bitWidth=member.bitWidth
+            ) for member in self.members
         ]
 
     def print(self, padding: int) -> str:
@@ -2999,7 +3148,10 @@ class Exp(AST):
     def isLvalue(self) -> bool:
         return isinstance(self, (Variable, Dereference, Subscript, String, Arrow)) or \
             (isinstance(self, Dot) and self.getFirstDotOperand().isLvalue())
-    
+
+    def isBitfield(self) -> bool:
+        return isinstance(self, (Dot, Arrow)) and self.containsBitfield()
+
     def isLvalueAssignable(self) -> bool:
         # To be assignable, it must be a lvalue and not a constant.
         return self.isLvalue() and \
@@ -4429,6 +4581,8 @@ class AddressOf(Exp):
             self.inner: Exp = self._parseFactor()
             if not self.inner.isLvalue():
                 self.raiseError(f"Cannot take the address of non-lvalue: {self.inner}")
+            elif self.inner.isBitfield():
+                self.raiseError(f"Cannot take the address of a bitfield")
         else:
             self.inner = inner
 
@@ -4539,6 +4693,9 @@ class Dot(Exp):
         
         return getDotLeftExp(self.leftExp)
 
+    def containsBitfield(self) -> bool:
+        return self.memberInfo is not None and self.memberInfo.isBitfield
+
     def staticEval(self) -> StaticEvalValue:
         leftEval = self.leftExp.staticEval()
         # Calculate the byte offset of the member and add it to the offset of leftEval.
@@ -4583,6 +4740,9 @@ class Arrow(Exp):
         # It inherits the type qualifiers of the left expression.
         self.typeId.setTypeQualifiers(self.typeId.getTypeQualifiers().union(leftQualifiers))
 
+    def containsBitfield(self) -> bool:
+        return self.memberInfo is not None and self.memberInfo.isBitfield
+    
     def staticEval(self) -> StaticEvalValue:
         leftEval = self.leftExp.staticEval()
         # Calculate the byte offset of the member and add it to the offset of leftEval.

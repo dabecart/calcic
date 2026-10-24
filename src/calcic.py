@@ -147,11 +147,13 @@ def main() -> None:
         assemblyFile = inputFile
     elif args.generate_assembly and args.output is not None:
         assemblyFile = args.output
-    else:
+    elif globalContext.useTemporaryFiles:
         # Generate a temporary file to store the assembly code.
         fd, assemblyFile = tempfile.mkstemp(suffix = ".s")
         # Close the file, we only want the route.
         os.close(fd)
+    else:
+        assemblyFile = f"{inputFileBasename}.s"
 
     if not isInputAssemblyFile:
         """
@@ -159,10 +161,14 @@ def main() -> None:
         PREPROCESSOR
         xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
         """
-        # Generate a temporary file to store the preprocessed code.
-        fd, preprocessedOutput = tempfile.mkstemp(suffix = ".i")
-        # Close the file, we only want the route.
-        os.close(fd)
+        if globalContext.useTemporaryFiles:
+            # Generate a temporary file to store the preprocessed code.
+            fd, preprocessedOutput = tempfile.mkstemp(suffix = ".i")
+            # Close the file, we only want the route.
+            os.close(fd)
+        else:
+            preprocessedOutput = f"{inputFileBasename}.i"
+            
         # Use the calcic standard libraries and not the GCC's.
         preprocessCommand: list[str] = ["gcc", "-E", inputFile, "-o", preprocessedOutput]
         if not globalContext.useGCCLibraries:
@@ -374,7 +380,9 @@ def main() -> None:
             assemblerCommand.insert(1, entryPointPath)
 
     if args.verbose:
-        assemblerCommand.append("-v")
+        if arch == TargetArchitectures.calci32:
+            assemblerCommand.append("-v")
+
         cmd = ' '.join(assemblerCommand)
         print(f"Running assembler: {cmd}")
     

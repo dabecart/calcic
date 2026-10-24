@@ -97,6 +97,31 @@ class TAC(ABC):
             case TACSubObject():
                 self.createChild(TACCopyToOffset, rValue, lValue.value, lValue.offset, insts)
                 return TACBaseOperand(rValue, resultType, insts)
+            case TACBitfieldObject():
+                # Calculate the mask for this bitfield.
+                bitMask = ((1 << lValue.bitWidth) - 1) << lValue.bitOffset
+                maskValue = self.createChild(TACValue, True, lValue.processedType, str(bitMask))
+                invertedMaskValue = self.createChild(TACValue, True, lValue.processedType, str(~bitMask))
+                shiftValue = self.createChild(TACValue, True, TypeSpecifier.UCHAR.toBaseType(), str(lValue.bitOffset))
+                # Bitshift the rvalue.
+                rValShift = TACBinary(BinaryOperator.LOGIC_LEFT_SHIFT, rValue, shiftValue, 
+                                      instructionsList=insts)
+                # Apply the mask to the bitshifted rval.
+                rValShiftAndMask = TACBinary(BinaryOperator.BITWISE_AND, rValShift.result, maskValue, 
+                                             instructionsList=insts)
+                # Load the value from the destination into a temporary copy.
+                destCopy = self.createChild(TACValue, False, lValue.processedType)
+                self.createChild(TACCopyFromOffset, lValue.value, lValue.byteOffset, destCopy, insts)
+                # Mask the destination copy with an inverted mask.
+                maskedDest = TACBinary(BinaryOperator.BITWISE_AND, destCopy, invertedMaskValue, 
+                                       instructionsList=insts)
+                # OR the shifted and masked rval into the masked destination to get the final result.
+                finalResult = TACBinary(BinaryOperator.BITWISE_OR, maskedDest.result, rValShiftAndMask.result, 
+                                      instructionsList=insts)
+                # Move the final result to the destination.
+                self.createChild(TACCopyToOffset, finalResult.result, lValue.value, lValue.byteOffset, insts)
+
+                return TACBaseOperand(rValue, resultType, insts)
             case _:
                 raise ValueError("Invalid lvalue in the assignment")
 
@@ -403,15 +428,23 @@ class TAC(ABC):
                 
                 if inner.processedType.baseType.name == "STRUCT":
                     # Get the byte offset of the member.
-                    member = inner.processedType.baseType.getMember(exp.member)
+                    member: ParameterInformation|None = inner.processedType.baseType.getMember(exp.member)
                     if member is None:
                         raise ValueError("Couldn't find the member")
 
                     match inner:
                         case TACBaseOperand():
-                            return TACSubObject(inner.value, member.offset, exp.typeId, insts)
+                            if member.isBitfield:
+                                return TACBitfieldObject(inner.value, member.offset, 
+                                                         member.bitWidth, member.bitOffset, exp.typeId, insts)
+                            else:
+                                return TACSubObject(inner.value, member.offset, exp.typeId, insts)
                         case TACSubObject():
-                            return TACSubObject(inner.value, inner.offset + member.offset, exp.typeId, insts)
+                            if member.isBitfield:
+                                return TACBitfieldObject(inner.value, inner.offset + member.offset, 
+                                                    member.bitWidth, member.bitOffset, exp.typeId, insts)
+                            else:
+                                return TACSubObject(inner.value, inner.offset + member.offset, exp.typeId, insts)
                         case TACDereferencedPointer():
                             # If the offset is 0, no need to add it to the pointer.
                             if member.offset != 0:
@@ -422,7 +455,7 @@ class TAC(ABC):
                             else:
                                 return TACDereferencedPointer(inner.value, exp.typeId, insts)
                 else:
-                    # This is an union. Members have offset 0. A 
+                    # This is an union. Members have offset 0.
                     match inner:
                         case TACBaseOperand():
                             return TACSubObject(inner.value, 0, exp.typeId, insts)
@@ -611,18 +644,16 @@ class TAC(ABC):
                     self.parseTACBlockItem(decl, insts)
 
             case VariableDeclaration():
-                # Discard declarations of static variables (this was already taken care of in the 
-                # top level of the program).
+                # Discard declarations of static variables (already handled at the top level).
                 if blockItem.identifier in blockItem.context.staticVariablesMap:
                     return
 
                 if isinstance(blockItem.initialization, SingleInitializer):
                     rightResult = self.parseTACExpression(blockItem.initialization.init, insts).convert()
-
                     self.addDebugInformation(blockItem, insts)
-
                     leftVariable = self.createChild(TACValue, False, blockItem.typeId, blockItem.identifier)
                     self.createChild(TACCopy, rightResult, leftVariable, insts)
+                    
                 elif isinstance(blockItem.initialization, CompoundInitializer):
                     leftVariable = self.createChild(TACValue, False, blockItem.typeId, blockItem.identifier)
                     
@@ -633,106 +664,66 @@ class TAC(ABC):
                         offset: int = initialOffset
                         offsetStep: int = arrayType.getArrayBaseType().getByteSize()
                     
-                        def declareArrayInitializer(subArrayType: DeclaratorType, input: Initializer):
+                        def declareArrayInitializer(subArrayType: DeclaratorType, inInit: Initializer):
                             nonlocal offset
 
                             # TODO: this could be optimized by grouping the array's items inside ints or longs.
-                            if isinstance(input, CompoundInitializer):
-                                for inner in input.init:
-                                    if isinstance(subArrayType, BaseDeclaratorType) and subArrayType.baseType.name in "STRUCT":
-                                        # Array of structs.
-                                        declareStruct(offset, subArrayType, inner)
-                                        offset += offsetStep
-                                    elif isinstance(subArrayType, BaseDeclaratorType) and subArrayType.baseType.name in "UNION":
-                                        # Array of unions.
-                                        declareUnion(offset, subArrayType, inner)
+                            if isinstance(inInit, CompoundInitializer):
+                                for inner in inInit.init:
+                                    if isinstance(subArrayType, BaseDeclaratorType) and subArrayType.baseType.name in ("STRUCT", "UNION"):
+                                        declareAggregate(offset, subArrayType, inner)
                                         offset += offsetStep
                                     elif isinstance(subArrayType, ArrayDeclaratorType):
-                                        # Multidimensional array.
                                         declareArrayInitializer(subArrayType.declarator, inner)
                                     else:
-                                        # Array of single initializers.
                                         declareArrayInitializer(subArrayType, inner)
                                     
-                            elif isinstance(input, SingleInitializer):
-                                if isinstance(subArrayType, BaseDeclaratorType) and subArrayType.baseType.name == "STRUCT":
-                                    # Array of structs, initialized from another struct. Ex:
-                                    # struct example a;
-                                    # struct example array[5] = {a, ...}
-                                    declareStruct(offset, subArrayType, input)
-                                elif isinstance(subArrayType, BaseDeclaratorType) and subArrayType.baseType.name == "UNION":
-                                    # Array of unions, initialized from another union.
-                                    declareUnion(offset, subArrayType, input)
+                            elif isinstance(inInit, SingleInitializer):
+                                if isinstance(subArrayType, BaseDeclaratorType) and subArrayType.baseType.name in ("STRUCT", "UNION"):
+                                    declareAggregate(offset, subArrayType, inInit)
                                 else:
-                                    expr = self.parseTACExpression(input.init, insts).convert()
-
+                                    expr = self.parseTACExpression(inInit.init, insts).convert()
                                     self.addDebugInformation(blockItem, insts)
                                     self.createChild(TACCopyToOffset, expr, leftVariable, offset, insts)
-                                
                                 offset += offsetStep
                             else:
                                 raise ValueError()
                             
                         declareArrayInitializer(arrayType.declarator, input)
                     
-                    def declareStruct(baseOffset: int, structType: DeclaratorType, input: Initializer):
-                        if not isinstance(structType, BaseDeclaratorType) or structType.baseType.name != "STRUCT":
-                            raise ValueError(f"Cannot declare struct with input type {structType}")
+                    def declareAggregate(baseOffset: int, aggregateType: DeclaratorType, inInit: Initializer):
+                        if not isinstance(aggregateType, BaseDeclaratorType) or aggregateType.baseType.name not in ("STRUCT", "UNION"):
+                            raise ValueError(f"Cannot declare aggregate with input type {aggregateType}")
                         
-                        if isinstance(input, SingleInitializer):
-                            # Initialize struct from another struct.
-                            expr = self.parseTACExpression(input.init, insts).convert()
+                        isUnion = aggregateType.baseType.name == "UNION"
+
+                        if isinstance(inInit, SingleInitializer):
+                            # Initialize aggregate from another aggregate of the same type.
+                            expr = self.parseTACExpression(inInit.init, insts).convert()
                             self.createChild(TACCopyToOffset, expr, leftVariable, baseOffset, insts)
-                        elif isinstance(input, CompoundInitializer):
-                            for memberInfo, memberInit in zip(structType.baseType.getMembers(), input.init):
-                                memberOffset = baseOffset + memberInfo.offset
+                        elif isinstance(inInit, CompoundInitializer):
+                            for memberInfo, memberInit in zip(aggregateType.baseType.getMembers(), inInit.init):
+                                memberOffset = baseOffset if isUnion else baseOffset + memberInfo.offset
                                 
                                 if isinstance(memberInfo.type, ArrayDeclaratorType):
-                                    # Array inside the struct.
                                     declareArray(memberOffset, memberInfo.type, memberInit)
-                                elif isinstance(memberInfo.type, BaseDeclaratorType) and memberInfo.type.baseType.name == "STRUCT":
-                                    # Struct inside a struct.
-                                    declareStruct(memberOffset, memberInfo.type, memberInit)
-                                elif isinstance(memberInfo.type, BaseDeclaratorType) and memberInfo.type.baseType.name == "UNION":
-                                    # Union inside a struct.
-                                    declareUnion(memberOffset, memberInfo.type, memberInit)
+                                elif isinstance(memberInfo.type, BaseDeclaratorType) and memberInfo.type.baseType.name in ("STRUCT", "UNION"):
+                                    declareAggregate(memberOffset, memberInfo.type, memberInit)
                                 elif isinstance(memberInit, SingleInitializer):
-                                    # Normal value inside a struct.
                                     expr = self.parseTACExpression(memberInit.init, insts).convert()
-
                                     self.addDebugInformation(blockItem, insts)
-                                    self.createChild(TACCopyToOffset, expr, leftVariable, memberOffset, insts)
-                                else:
-                                    raise ValueError()
-                        else:
-                            raise ValueError()
 
-                    def declareUnion(baseOffset: int, unionType: DeclaratorType, input: Initializer):
-                        if not isinstance(unionType, BaseDeclaratorType) or unionType.baseType.name != "UNION":
-                            raise ValueError(f"Cannot declare union with input type {unionType}")
-                        
-                        if isinstance(input, SingleInitializer):
-                            # Initialize union from another union.
-                            expr = self.parseTACExpression(input.init, insts).convert()
-                            self.createChild(TACCopyToOffset, expr, leftVariable, baseOffset, insts)
-                        elif isinstance(input, CompoundInitializer):
-                            # Should only be one memberInit.
-                            for memberInfo, memberInit in zip(unionType.baseType.getMembers(), input.init):
-                                if isinstance(memberInfo.type, ArrayDeclaratorType):
-                                    # Array inside the union.
-                                    declareArray(baseOffset, memberInfo.type, memberInit)
-                                elif isinstance(memberInfo.type, BaseDeclaratorType) and memberInfo.type.baseType.name == "STRUCT":
-                                    # Struct inside an union.
-                                    declareStruct(baseOffset, memberInfo.type, memberInit)
-                                elif isinstance(memberInfo.type, BaseDeclaratorType) and memberInfo.type.baseType.name == "UNION":
-                                    # Union inside an union.
-                                    declareUnion(baseOffset, memberInfo.type, memberInit)
-                                elif isinstance(memberInit, SingleInitializer):
-                                    # Normal value inside an union.
-                                    expr = self.parseTACExpression(memberInit.init, insts).convert()
+                                    # I make use of the makeAssignment function so that I don't repeat the bitfield 
+                                    # code to instantiate bitfield values.
+                                    dest: TACExpressionResult
+                                    if memberInfo.isBitfield:
+                                        dest = TACBitfieldObject(leftVariable, memberOffset, 
+                                                                 memberInfo.bitWidth, memberInfo.bitOffset, 
+                                                                 expr.valueType, insts)
+                                    else:
+                                        dest = TACSubObject(leftVariable, memberOffset, expr.valueType, insts)
 
-                                    self.addDebugInformation(blockItem, insts)
-                                    self.createChild(TACCopyToOffset, expr, leftVariable, baseOffset, insts)
+                                    self.makeAssignment(expr.valueType, dest, expr, insts)
                                 else:
                                     raise ValueError()
                         else:
@@ -740,13 +731,11 @@ class TAC(ABC):
 
                     if isinstance(blockItem.typeId, ArrayDeclaratorType):
                         declareArray(0, blockItem.typeId, blockItem.initialization)
-                    elif isinstance(blockItem.typeId, BaseDeclaratorType) and blockItem.typeId.baseType.name == "STRUCT":
-                        declareStruct(0, blockItem.typeId, blockItem.initialization)
-                    elif isinstance(blockItem.typeId, BaseDeclaratorType) and blockItem.typeId.baseType.name == "UNION":
-                        declareUnion(0, blockItem.typeId, blockItem.initialization)
+                    elif isinstance(blockItem.typeId, BaseDeclaratorType) and blockItem.typeId.baseType.name in ("STRUCT", "UNION"):
+                        declareAggregate(0, blockItem.typeId, blockItem.initialization)
                     else:
                         raise ValueError(f"Cannot initialize {blockItem.typeId} with the current initialization")
-
+    
             case StructDeclaration() | UnionDeclaration() | EnumDeclaration() | FunctionDeclaration() | TypedefDeclaration():
                 # Nothing to generate with struct, union, enum or typedef declarations.
                 # Function declarations can only be defined from an ASTProgram. These declarations 
@@ -849,6 +838,34 @@ class TACExpressionResult(TAC):
                 dst = self.createChild(TACValue, False, self.processedType)
                 self.createChild(TACCopyFromOffset, self.value, self.offset, dst, self.insts)
                 return dst
+            case TACBitfieldObject():
+                tempDst = self.createChild(TACValue, False, self.processedType)
+                # Copy the whole value. This contains junk from other values.
+                self.createChild(TACCopyFromOffset, self.value, self.byteOffset, tempDst, self.insts)
+
+                # We're going to move the whole value to the left, so the most significant bit of the value is at
+                # the most significant bit of the return type. Then, we're going to shift to the right until the 
+                # least significant bit of the value is at the least significant bit of the return type.
+                shiftToRight: int = self.processedType.getByteSize() * 8 - self.bitWidth
+                shiftToLeft: int = shiftToRight - self.bitOffset
+                leftShiftValue = self.createChild(TACValue, True, TypeSpecifier.UCHAR.toBaseType(), str(shiftToLeft))
+                rightShiftValue = self.createChild(TACValue, True, TypeSpecifier.UCHAR.toBaseType(), str(shiftToRight))
+
+                # Shift the value to the leftmost bit of the result type.
+                shiftedLeft = TACBinary(BinaryOperator.LOGIC_LEFT_SHIFT, tempDst, leftShiftValue, 
+                                        instructionsList=self.insts)
+                
+                # Now depending on the signedness, shift to the right using the right kind of shift.
+                rightShiftType: BinaryOperator
+                if self.processedType.isSigned():
+                    # Keeps the sign.
+                    rightShiftType = BinaryOperator.ARITHMETIC_RIGHT_SHIFT
+                else:
+                    rightShiftType = BinaryOperator.LOGIC_RIGHT_SHIFT
+
+                shiftedRight = TACBinary(rightShiftType, shiftedLeft.result, rightShiftValue, 
+                                         instructionsList=self.insts)
+                return shiftedRight.result
             case _:
                 raise ValueError(f"Cannot convert {self} to lvalue")
 
@@ -868,6 +885,18 @@ class TACSubObject(TACExpressionResult):
 
     def print(self) -> str:
         return f"SubObject({self.value})"
+
+class TACBitfieldObject(TACExpressionResult):
+    def __init__(self, value: TACValue, byteOffset: int, bitWidth: int, bitOffset: int,
+                 processedType: DeclaratorType, insts: list[TACInstruction], 
+                 parentTAC: TAC | None = None) -> None:
+        self.byteOffset = byteOffset
+        self.bitWidth = bitWidth
+        self.bitOffset = bitOffset
+        super().__init__(value, processedType, insts, parentTAC)
+
+    def print(self) -> str:
+        return f"BitfieldObject({self.value})"
 
 class TACProgram(TAC):
     def __init__(self, program: Program, parentTAC: TAC | None = None) -> None:

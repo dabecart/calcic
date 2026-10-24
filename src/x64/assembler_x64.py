@@ -744,10 +744,10 @@ class AssemblerFunction(AssemblyAST):
                 self.function.funDecl.raiseWarning("Code inside a crude function will not be parsed, unless it is an __asm__ directive")
                 continue
 
-            # # Add a comment between instructions to know what each block of assembler instructions 
-            # # is doing. Skip labels.
-            # if not isinstance(inst, TACLabel):
-            #     self.createInst(COMMENT, inst.print())
+            # Add a comment between instructions to know what each block of assembler instructions 
+            # is doing. Skip labels.
+            if not isinstance(inst, TACLabel):
+                self.createInst(COMMENT, inst.print())
 
             if isinstance(inst, TACBuiltInFunction):
                 self.convertBuiltInTAC(inst)
@@ -2828,7 +2828,7 @@ class Register(AssemblerOperand):
             case AssemblyBaseType.DOUBLE:       regId = self.reg.get64Name()
             case AssemblyBaseType.FLOAT:        regId = self.reg.get32Name()
             case _:
-                raise ValueError()
+                raise ValueError(f"Cannot emit code for register with type {self.assemblyType.baseType}")
                 
         return f"%{regId}"
 
