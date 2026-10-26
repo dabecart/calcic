@@ -1138,12 +1138,16 @@ class AST(ABC):
                         parsed = self.parseConstantFromType(currentMember.type, strict)
                         val = int(parsed[0].constValue)
                         mask = (1 << currentMember.bitWidth) - 1
+                        maskedVal = val & mask
+
+                        if val != maskedVal:
+                            self.raiseWarning(f"{val} overflows to {maskedVal}")
                         
                         if activeByteOffset == -1:
                             activeByteOffset = currentMember.offset
                             activeByteValue = 0
 
-                        activeByteValue |= (val & mask) << currentMember.bitOffset
+                        activeByteValue |= maskedVal << currentMember.bitOffset
                     else:
                         if activeByteOffset != -1:
                             while activeByteOffset != -1:
@@ -2567,21 +2571,34 @@ class MemberDeclaration(AST):
         self.declarations: list[MemberInformation] = []
 
         _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+        paddingCounter: int = 0
         
         while True:
-            declarator = self.createChild(TopDeclarator)
-            info: DeclaratorInformation = declarator.process(declType)
+            memType: DeclaratorType
+            memName: str
 
-            if not info.type.isComplete():
-                self.raiseError("Cannot use incomplete type inside a member declaration")
+            if self.peek().id != ":":
+                declarator = self.createChild(TopDeclarator)
+                info: DeclaratorInformation = declarator.process(declType)
 
-            decl = MemberInformation(info.type, info.name)
+                if not info.type.isComplete():
+                    self.raiseError("Cannot use incomplete type inside a member declaration")
+                
+                memType = info.type
+                memName = info.name
+            else:
+                # Unnamed bitfield used for padding. Give it an unusable name from C.
+                memType = declType
+                memName = f"pad#{paddingCounter}"
+                paddingCounter += 1
+
+            decl = MemberInformation(memType, memName)
 
             if self.peek().id == ":":
                 self.pop()
                 decl.isBitfield = True
 
-                if not info.type.isInteger():
+                if not memType.isInteger():
                     self.raiseError("Invalid type for a bitfield, must be of integer type")
 
                 bitfieldConst = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType())[0]
@@ -2590,9 +2607,9 @@ class MemberDeclaration(AST):
                 if decl.bitWidth < 0:
                     self.raiseError("Width of a bitfield cannot be negative")
 
-                if decl.bitWidth > info.type.getByteSize() * 8:
+                if decl.bitWidth > memType.getByteSize() * 8:
                     self.raiseError(f"Bitfield width {decl.bitWidth} is larger than the "
-                                    f"size of {info.type} of size {info.type.getByteSize()}")
+                                    f"size of {memType} of size {memType.getByteSize()}")
             
             self.declarations.append(decl)
 
@@ -2652,8 +2669,7 @@ class StructDeclaration(Declaration):
             self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
             # Create the type.
             self.typeId = TypeSpecifier.STRUCT(self.originalIdentifier, self.identifier, 
-                                               self.byteSize, self.alignment, 
-                                               self.membersToParamInfo())
+                                               self.byteSize, self.alignment, [])
             # Add it to the context map only if it has not been declared in the current scope.
             self.context.addStruct(self.originalIdentifier, self.identifier, self.typeId)
         else:
@@ -2724,8 +2740,6 @@ class StructDeclaration(Declaration):
                             if typeAlign > self.alignment:
                                 self.alignment = typeAlign
 
-                            if decl.name:
-                                self.members.append(decl)
                         else:
                             # ------------------ Standard Bitfield ------------------
                             canPack = False
@@ -2759,11 +2773,10 @@ class StructDeclaration(Declaration):
                                 self.byteSize = activeUnitByteOffset
 
                     # The name of the declaration must not be repeated.
-                    if decl.name:
-                        for mem in self.members:
-                            if mem.name == decl.name:
-                                self.raiseError(f"Duplicated member with name {decl.name}")
-                        self.members.append(decl)
+                    for mem in self.members:
+                        if mem.name == decl.name:
+                            self.raiseError(f"Duplicated member with name {decl.name}")
+                    self.members.append(decl)
 
                 if self.peek().id == "}":
                     break
@@ -2854,8 +2867,7 @@ class UnionDeclaration(Declaration):
             self.identifier = self.context.mangleIdentifier(self.originalIdentifier)
             # Create the type.
             self.typeId = TypeSpecifier.UNION(self.originalIdentifier, self.identifier, 
-                                               self.byteSize, self.alignment, 
-                                               self.membersToParamInfo())
+                                               self.byteSize, self.alignment, [])
             # Add it to the context map only if it has not been declared in the current scope.
             self.context.addUnion(self.originalIdentifier, self.identifier, self.typeId)
         else:
@@ -4766,6 +4778,9 @@ class SizeOf(Exp):
 
         if not self.inner.typeId.isComplete():
             self.raiseError("Cannot calculate size of incomplete type")
+
+        if self.inner.isBitfield():
+            self.raiseError("Cannot calculate size of bitfield")
     
     def staticEval(self) -> StaticEvalValue:
         return StaticEvalValue(StaticEvalType.INTEGER, str(self.inner.typeId.getByteSize()))

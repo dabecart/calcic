@@ -206,10 +206,12 @@ class TypeSpecifier:
             ret.extend([TypeSpecifier.VOID.toBaseType()] * byteCount)
         
         lastOffset: int = 0
-        member: ParameterInformation
-        for member in self.members:
+        index: int = 0
+        while index < len(self.members):
+            member: ParameterInformation = self.members[index]
+            memberByteSize: int = member.type.getByteSize()
+
             addPadding(member.offset - lastOffset)
-            lastOffset = member.offset + member.type.getByteSize()
 
             if isinstance(member.type, BaseDeclaratorType) and member.type.baseType.name == "STRUCT":
                 ret.extend(member.type.baseType.flattenStruct())
@@ -217,8 +219,36 @@ class TypeSpecifier:
                 arrayBaseType = member.type.getArrayBaseType()
                 totalArrayLength = member.type.getByteSize() // arrayBaseType.getByteSize()
                 ret.extend([arrayBaseType] * totalArrayLength)
+            elif member.isBitfield:
+                # Bitfield members are packed together in "units". Iterate over bitfields shared 
+                # among the same unit (they have the same offset), calculate the size of the unit 
+                # and add the right member (based on the size) to the flattened members array.
+                unitType: DeclaratorType = member.type
+                unitTypeSize: int = unitType.getByteSize()
+
+                tempIndex = index + 1
+                while tempIndex < len(self.members):
+                    unitMember: ParameterInformation = self.members[tempIndex]
+                    unitMemberSize: int = unitMember.type.getByteSize()
+                    
+                    if member.offset == unitMember.offset:
+                        if unitMemberSize > unitTypeSize:
+                            unitType = unitMember.type
+                            unitTypeSize = unitMemberSize
+                    else:
+                        break
+
+                    tempIndex += 1
+
+                index = tempIndex - 1
+                memberByteSize = unitTypeSize
+                ret.append(unitType)
             else:
                 ret.append(member.type)
+
+            lastOffset = member.offset + memberByteSize
+
+            index += 1
 
         # Add the final padding.
         addPadding(self.getByteSize() - lastOffset)
