@@ -52,7 +52,7 @@ class GlobalContext:
 
 globalContext = GlobalContext()
 
-# If running the 'Writing a C compiler' testsuite...
-globalContext.useGCCLibraries = True
-globalContext.useCalcicSTDLibraries = False
-globalContext.useTemporaryFiles = False
+# If running the 'Writing a C compiler' or 'calcic-tests' testsuite for x64...
+# globalContext.useGCCLibraries = True
+# globalContext.useCalcicSTDLibraries = False
+# globalContext.useTemporaryFiles = False

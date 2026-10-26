@@ -2571,7 +2571,6 @@ class MemberDeclaration(AST):
         self.declarations: list[MemberInformation] = []
 
         _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
-        paddingCounter: int = 0
         
         while True:
             memType: DeclaratorType
@@ -2587,10 +2586,9 @@ class MemberDeclaration(AST):
                 memType = info.type
                 memName = info.name
             else:
-                # Unnamed bitfield used for padding. Give it an unusable name from C.
+                # Unnamed bitfield used for padding.
                 memType = declType
-                memName = f"pad#{paddingCounter}"
-                paddingCounter += 1
+                memName = ""
 
             decl = MemberInformation(memType, memName)
 
@@ -2749,6 +2747,11 @@ class StructDeclaration(Declaration):
                                     newTypeSize = max(activeUnitTypeSize, typeSize)
                                     if (bitsUsedInUnit + decl.bitWidth) <= (newTypeSize * 8):
                                         canPack = True
+                            
+                            # The alignment of the structure must account for all member types,
+                            # even if they are packed into an existing storage unit.
+                            if typeAlign > self.alignment:
+                                self.alignment = typeAlign
 
                             if canPack:
                                 assert activeUnitTypeSize is not None
@@ -2762,9 +2765,6 @@ class StructDeclaration(Declaration):
 
                                 activeUnitByteOffset = typeAlign * math.ceil(self.byteSize / typeAlign)
 
-                                if typeAlign > self.alignment:
-                                    self.alignment = typeAlign
-
                                 activeUnitTypeSize = typeSize
                                 bitsUsedInUnit = decl.bitWidth
 
@@ -2772,11 +2772,13 @@ class StructDeclaration(Declaration):
                                 decl.bitOffset = 0
                                 self.byteSize = activeUnitByteOffset
 
-                    # The name of the declaration must not be repeated.
-                    for mem in self.members:
-                        if mem.name == decl.name:
-                            self.raiseError(f"Duplicated member with name {decl.name}")
-                    self.members.append(decl)
+                    # The name of the declaration must not be repeated. Do not include padding members, which
+                    # are unnammed.
+                    if decl.name:
+                        for mem in self.members:
+                            if mem.name == decl.name:
+                                self.raiseError(f"Duplicated member with name {decl.name}")
+                        self.members.append(decl)
 
                 if self.peek().id == "}":
                     break
