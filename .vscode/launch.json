@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "CALCIC",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/calcic",
+            "console": "integratedTerminal",
+            "args": "${command:pickArgs}"
+        }
+    ]
+}

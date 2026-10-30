@@ -983,19 +983,6 @@ class AssemblerFunction(AssemblyAST):
                     else:
                         self.createInst(MOVE, finalMovType, Register(finalMovType, REG.R0), result)
 
-                case TACTruncate():
-                    exp = self.fromTACValue(inst.exp)
-                    result = self.fromTACValue(inst.result)
-
-                    # Store into a register whilst masking.
-                    if isinstance(exp, Immediate):
-                        exp.valueStr = str(int(exp.valueStr) & 0xFFFFFFFF)
-                        self.createInst(MOV, exp, Register(result.assemblyType, REG.R0))
-                    else:
-                        self.createInst(MOV, exp, Register(result.assemblyType, REG.R0))
-                    # Finally, store the truncated value into the result.
-                    self.createInst(MOVE, result.assemblyType, Register(result.assemblyType, REG.R0), result)
-
                 case TACZeroExtend():
                     exp = self.fromTACValue(inst.exp)
                     result = self.fromTACValue(inst.result)
@@ -1019,6 +1006,15 @@ class AssemblerFunction(AssemblyAST):
                         self.createInst(STOQ, Register(AssemblyType.LONGWORD, REG.R0), Register(AssemblyType.LONGWORD, REG.R1), result)
                     else:
                         self.createInst(MOVE, finalMovType, Register(finalMovType, REG.R0), result)
+
+                case TACTruncate():
+                    exp = self.fromTACValue(inst.exp)
+                    result = self.fromTACValue(inst.result)
+
+                    # Store into a register whilst masking.
+                    self.createInst(MOV, exp, Register(result.assemblyType, REG.R0))
+                    # Finally, store the truncated value into the result.
+                    self.createInst(MOVE, result.assemblyType, Register(result.assemblyType, REG.R0), result)
 
                 case TACFunctionCall() | TACIndirectFunctionCall():
                     returnIntRegs: list[tuple[AssemblerOperand, AssemblyType]] = []

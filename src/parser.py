@@ -2599,7 +2599,7 @@ class MemberDeclaration(AST):
                 if not memType.isInteger():
                     self.raiseError("Invalid type for a bitfield, must be of integer type")
 
-                bitfieldConst = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType())[0]
+                bitfieldConst = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType(), strict=True)[0]
                 decl.bitWidth = int(bitfieldConst.constValue)
 
                 if decl.bitWidth < 0:
@@ -2608,6 +2608,9 @@ class MemberDeclaration(AST):
                 if decl.bitWidth > memType.getByteSize() * 8:
                     self.raiseError(f"Bitfield width {decl.bitWidth} is larger than the "
                                     f"size of {memType} of size {memType.getByteSize()}")
+
+                if decl.bitWidth == 0 and memName != "":
+                    self.raiseError("Zero length bitfield must be unnamed")
             
             self.declarations.append(decl)
 
@@ -2629,6 +2632,8 @@ class StructDeclaration(Declaration):
         self.members: list[MemberInformation] = []
         self.byteSize: int = -1
         self.alignment: int = -1
+        # Used in bitfield structs to know which unit type should be used to operate that bitfield.
+        self.unitTypesByOffset: dict[int, DeclaratorType] = {}
 
         self.expect("struct")
 
@@ -2686,16 +2691,20 @@ class StructDeclaration(Declaration):
             self.byteSize = 0
 
             # State tracking for active bitfield storage units.
+            activeUnitType: DeclaratorType|None = None
             activeUnitTypeSize: int|None = None
             activeUnitByteOffset: int = 0
             bitsUsedInUnit: int = 0
 
             # Closes the current active bitfield storage unit and updates byteSize.
             def flushBitfieldUnit():
-                nonlocal activeUnitTypeSize, activeUnitByteOffset, bitsUsedInUnit
-                if activeUnitTypeSize is not None:
+                nonlocal activeUnitType, activeUnitTypeSize, activeUnitByteOffset, bitsUsedInUnit
+                if activeUnitType is not None and activeUnitTypeSize is not None:
+                    self.unitTypesByOffset[activeUnitByteOffset] = activeUnitType
+
                     usedBytes = math.ceil(bitsUsedInUnit / 8)
                     self.byteSize = max(self.byteSize, activeUnitByteOffset + usedBytes)
+                    activeUnitType = None
                     activeUnitTypeSize = None
                     bitsUsedInUnit = 0
 
@@ -2758,7 +2767,10 @@ class StructDeclaration(Declaration):
                                 decl.offset = activeUnitByteOffset
                                 decl.bitOffset = bitsUsedInUnit
                                 bitsUsedInUnit += decl.bitWidth
-                                activeUnitTypeSize = max(activeUnitTypeSize, typeSize)
+
+                                if typeSize > activeUnitTypeSize:
+                                    activeUnitTypeSize = typeSize
+                                    activeUnitType = decl.typeId
                             else:
                                 # Flush existing unit and start a new naturally aligned one.
                                 flushBitfieldUnit()
@@ -2766,6 +2778,7 @@ class StructDeclaration(Declaration):
                                 activeUnitByteOffset = typeAlign * math.ceil(self.byteSize / typeAlign)
 
                                 activeUnitTypeSize = typeSize
+                                activeUnitType = decl.typeId
                                 bitsUsedInUnit = decl.bitWidth
 
                                 decl.offset = activeUnitByteOffset
@@ -2809,7 +2822,8 @@ class StructDeclaration(Declaration):
         return [
             ParameterInformation(
                 member.typeId, member.name, offset=member.offset, 
-                isBitfield=member.isBitfield, bitOffset=member.bitOffset, bitWidth=member.bitWidth
+                isBitfield=member.isBitfield, bitOffset=member.bitOffset, bitWidth=member.bitWidth,
+                bitfieldUnitType=self.unitTypesByOffset.get(member.offset, None)
             ) for member in self.members
         ]
 
@@ -3200,9 +3214,9 @@ class Exp(AST):
     
     def checkIntegerPromotion(self) -> Exp:
         # Check if the expression needs integer promotion.
-        if isinstance(self.typeId, BaseDeclaratorType) and self.typeId.baseType.needsIntegerPromotion():
+        if (isinstance(self.typeId, BaseDeclaratorType) and self.typeId.baseType.needsIntegerPromotion()):
             return self.createChild(Cast, TypeSpecifier.INT.toBaseType(), self, True)
-        
+
         return self
 
     def getCommonType(self, exp1: Exp, exp2: Exp) -> DeclaratorType|None:
@@ -4692,6 +4706,20 @@ class Dot(Exp):
             self.raiseError(f"Member {self.member} is not part of {self.leftExp.typeId}")
 
         self.typeId = self.memberInfo.type.copy()
+
+        # Section 6.3.1.1 Paragraph 2 regarding integer promotions of bit-fields.
+        if self.memberInfo.isBitfield and self.memberInfo.bitWidth <= 32:
+            if self.memberInfo.bitWidth == 32:
+                self.typeId = TypeSpecifier.UINT.toBaseType()
+            else:
+                self.typeId = TypeSpecifier.INT.toBaseType()
+
+            self.typeId.setTypeQualifiers(
+                self.typeId.getTypeQualifiers().union(
+                    self.memberInfo.type.getTypeQualifiers()
+                )
+            )
+
         # It inherits the type qualifiers of the left expression.
         self.typeId.setTypeQualifiers(self.typeId.getTypeQualifiers().union(leftQualifiers))
 
@@ -4751,6 +4779,20 @@ class Arrow(Exp):
             self.raiseError(f"Member {self.member} is not part of {self.leftExp.typeId}")
 
         self.typeId = self.memberInfo.type.copy()
+        
+        # Section 6.3.1.1 Paragraph 2 regarding integer promotions of bit-fields.
+        if self.memberInfo.isBitfield and self.memberInfo.bitWidth <= 32:
+            if self.memberInfo.bitWidth == 32:
+                self.typeId = TypeSpecifier.UINT.toBaseType()
+            else:
+                self.typeId = TypeSpecifier.INT.toBaseType()
+
+            self.typeId.setTypeQualifiers(
+                self.typeId.getTypeQualifiers().union(
+                    self.memberInfo.type.getTypeQualifiers()
+                )
+            )
+
         # It inherits the type qualifiers of the left expression.
         self.typeId.setTypeQualifiers(self.typeId.getTypeQualifiers().union(leftQualifiers))
 

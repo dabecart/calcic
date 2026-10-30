@@ -39,6 +39,7 @@ class ParameterInformation:
     isBitfield: bool = False
     bitOffset: int = 0
     bitWidth: int = 0
+    bitfieldUnitType: DeclaratorType|None = None
 
     def __str__(self) -> str:
         if self.isAnonymous:
@@ -221,27 +222,18 @@ class TypeSpecifier:
                 ret.extend([arrayBaseType] * totalArrayLength)
             elif member.isBitfield:
                 # Bitfield members are packed together in "units". Iterate over bitfields shared 
-                # among the same unit (they have the same offset), calculate the size of the unit 
-                # and add the right member (based on the size) to the flattened members array.
-                unitType: DeclaratorType = member.type
-                unitTypeSize: int = unitType.getByteSize()
-
+                # among the same unit (they have the same offset) and add its unit type.
                 tempIndex = index + 1
                 while tempIndex < len(self.members):
-                    unitMember: ParameterInformation = self.members[tempIndex]
-                    unitMemberSize: int = unitMember.type.getByteSize()
-                    
-                    if member.offset == unitMember.offset:
-                        if unitMemberSize > unitTypeSize:
-                            unitType = unitMember.type
-                            unitTypeSize = unitMemberSize
+                    if member.offset == self.members[tempIndex].offset:
+                        tempIndex += 1
                     else:
                         break
 
-                    tempIndex += 1
-
                 index = tempIndex - 1
-                memberByteSize = unitTypeSize
+                # Index points to the last member with the same byte offset.
+                unitType = self.members[index].bitfieldUnitType
+                assert unitType is not None
                 ret.append(unitType)
             else:
                 ret.append(member.type)

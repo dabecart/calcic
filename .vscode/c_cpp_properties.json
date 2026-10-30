@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "calcic",
+            "includePath": [
+                "${workspaceFolder}/lib/headers/**"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c99",
+            "intelliSenseMode": "linux-gcc-x64",
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/lib/src"
+                ],
+                "limitSymbolsToIncludedHeaders": false
+            }
+        }
+    ],
+    "version": 4
+}

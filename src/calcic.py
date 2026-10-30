@@ -174,9 +174,12 @@ def main() -> None:
         if not globalContext.useGCCLibraries:
             # Set the lib/headers folder as a system directory for the preprocessor.
             preprocessCommand += ["-nostdinc",
-                                  "-isystem", str(libPath / "headers"), 
-                                  "-isystem", str(libPath / "headers" / "arch" / arch.value)
-                                ]
+                                  "-isystem", str(libPath / "headers")]
+            # Add the subfolders inside the arch headers folder (included itself).
+            archHeadersFolder: Path = libPath / "headers" / "arch" / arch.value
+            archHeadersSubolders = [root for root, _, _ in os.walk(str(archHeadersFolder))]
+            for p in archHeadersSubolders:
+                preprocessCommand += ["-isystem", str(p)]
         
         preprocessStatus = subprocess.run(preprocessCommand)
         retCode = preprocessStatus.returncode

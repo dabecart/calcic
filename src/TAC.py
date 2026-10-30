@@ -98,30 +98,66 @@ class TAC(ABC):
                 self.createChild(TACCopyToOffset, rValue, lValue.value, lValue.offset, insts)
                 return TACBaseOperand(rValue, resultType, insts)
             case TACBitfieldObject():
-                # Calculate the mask for this bitfield.
-                bitMask = ((1 << lValue.bitWidth) - 1) << lValue.bitOffset
-                maskValue = self.createChild(TACValue, True, lValue.processedType, str(bitMask))
-                invertedMaskValue = self.createChild(TACValue, True, lValue.processedType, str(~bitMask))
+                # Calculate the mask for the rvalue.
+                bitMask = (1 << lValue.bitWidth) - 1
+                rvalMask = self.createChild(TACValue, True, lValue.unitType, str(bitMask))
+
+                # Calculate the bitmask for the destination.
+                bitMask = ~(bitMask << lValue.bitOffset)
+                destMask = self.createChild(TACValue, True, lValue.unitType, str(bitMask))
+                
+                # Cast the rValue to the unit type.
+                castRValue = self.makeCast(rValue.valueType, rValue, lValue.unitType, insts)
+                
+                # Apply the mask to rval. This value is the expression result.
+                rValMask = TACBinary(BinaryOperator.BITWISE_AND, castRValue.value, rvalMask, 
+                                     instructionsList=insts)
+                # Bitshift the masked rvalue.
                 shiftValue = self.createChild(TACValue, True, TypeSpecifier.UCHAR.toBaseType(), str(lValue.bitOffset))
-                # Bitshift the rvalue.
-                rValShift = TACBinary(BinaryOperator.LOGIC_LEFT_SHIFT, rValue, shiftValue, 
-                                      instructionsList=insts)
-                # Apply the mask to the bitshifted rval.
-                rValShiftAndMask = TACBinary(BinaryOperator.BITWISE_AND, rValShift.result, maskValue, 
+                rValMaskAndShift = TACBinary(BinaryOperator.LOGIC_LEFT_SHIFT, rValMask.result, shiftValue, 
                                              instructionsList=insts)
+                
                 # Load the value from the destination into a temporary copy.
-                destCopy = self.createChild(TACValue, False, lValue.processedType)
+                destCopy = self.createChild(TACValue, False, lValue.unitType)
                 self.createChild(TACCopyFromOffset, lValue.value, lValue.byteOffset, destCopy, insts)
                 # Mask the destination copy with an inverted mask.
-                maskedDest = TACBinary(BinaryOperator.BITWISE_AND, destCopy, invertedMaskValue, 
+                maskedDest = TACBinary(BinaryOperator.BITWISE_AND, destCopy, destMask, 
                                        instructionsList=insts)
                 # OR the shifted and masked rval into the masked destination to get the final result.
-                finalResult = TACBinary(BinaryOperator.BITWISE_OR, maskedDest.result, rValShiftAndMask.result, 
-                                      instructionsList=insts)
-                # Move the final result to the destination.
+                finalResult = TACBinary(BinaryOperator.BITWISE_OR, maskedDest.result, rValMaskAndShift.result, 
+                                        instructionsList=insts)
+                # Move the final result to the destination. Notice that it's the full init what is stored, not
+                # the individual value.
                 self.createChild(TACCopyToOffset, finalResult.result, lValue.value, lValue.byteOffset, insts)
 
-                return TACBaseOperand(rValue, resultType, insts)
+                # Convert the result to resultType. We cannot use a cast as values are N-bits long. Use bitshift
+                # operations like in the TACExpressionResult::convert function.
+                
+                # We're going to move the whole value to the left, so the most significant bit of the value is at
+                # the most significant bit of the return type. Then, we're going to shift to the right until the 
+                # least significant bit of the value is at the least significant bit of the return type.
+                resultShift: int = lValue.unitType.getByteSize() * 8 - lValue.bitWidth
+                resultShiftValue = self.createChild(TACValue, True, TypeSpecifier.UCHAR.toBaseType(), str(resultShift))
+
+                # Shift the value to the leftmost bit of the result type.
+                shiftedLeft = TACBinary(BinaryOperator.LOGIC_LEFT_SHIFT, rValMask.result, resultShiftValue, 
+                                        instructionsList=insts)
+                
+                # Now depending on the signedness, shift to the right using the right kind of shift.
+                rightShiftType: BinaryOperator
+                if lValue.bitfieldType.isSigned():
+                    # Keeps the sign.
+                    rightShiftType = BinaryOperator.ARITHMETIC_RIGHT_SHIFT
+                else:
+                    rightShiftType = BinaryOperator.LOGIC_RIGHT_SHIFT
+
+                shiftedRight = TACBinary(rightShiftType, shiftedLeft.result, resultShiftValue, 
+                                         instructionsList=insts)
+
+                # Make a final cast to the variable type (not its unit type).
+                castedResult = self.makeCast(lValue.unitType, shiftedRight.result, resultType, insts)
+                
+                return TACBaseOperand(castedResult.value, resultType, insts)
             case _:
                 raise ValueError("Invalid lvalue in the assignment")
 
@@ -200,11 +236,11 @@ class TAC(ABC):
                         # Set the value of the original variable to the unary result.
                         if exp.needsIntegerPromotion:
                             castToBeforePromotion = self.makeCast(unary.result.valueType, unary.result, exp.originalType, insts)
-                            self.makeAssignment(exp.originalType, preCast, castToBeforePromotion.convert(), insts)
+                            ret = self.makeAssignment(exp.originalType, preCast, castToBeforePromotion.convert(), insts)
                         else:
-                            self.makeAssignment(unary.result.valueType, inner, unary.result, insts)
+                            ret = self.makeAssignment(unary.result.valueType, inner, unary.result, insts)
                         # Return the recently operated expression.
-                        return TACBaseOperand(unary.result, exp.typeId, insts)
+                        return ret
                     
                     elif isinstance(exp.typeId, (PointerDeclaratorType, ArrayDeclaratorType)):
                         inner = self.parseTACExpression(exp.inner, insts)
@@ -219,9 +255,7 @@ class TAC(ABC):
                         pointerOp = self.createChild(TACAddToPointer, inner.convert(), 
                             delta, exp.typeId.declarator.getByteSize(), preDereference, insts)
                         # Set the value of the original variable to the unary result.
-                        self.makeAssignment(pointerOp.result.valueType, inner, pointerOp.result, insts)
-                        # Return the recently operated expression.
-                        return TACBaseOperand(pointerOp.result, exp.typeId, insts)
+                        return self.makeAssignment(pointerOp.result.valueType, inner, pointerOp.result, insts)
 
                     else:
                         raise ValueError("not implemented")
@@ -435,14 +469,20 @@ class TAC(ABC):
                     match inner:
                         case TACBaseOperand():
                             if member.isBitfield:
+                                assert member.bitfieldUnitType is not None
                                 return TACBitfieldObject(inner.value, member.offset, 
-                                                         member.bitWidth, member.bitOffset, exp.typeId, insts)
+                                                         member.bitWidth, member.bitOffset, 
+                                                         member.type, member.bitfieldUnitType, 
+                                                         exp.typeId, insts)
                             else:
                                 return TACSubObject(inner.value, member.offset, exp.typeId, insts)
                         case TACSubObject():
                             if member.isBitfield:
+                                assert member.bitfieldUnitType is not None
                                 return TACBitfieldObject(inner.value, inner.offset + member.offset, 
-                                                    member.bitWidth, member.bitOffset, exp.typeId, insts)
+                                                    member.bitWidth, member.bitOffset, 
+                                                    member.type, member.bitfieldUnitType, 
+                                                    exp.typeId, insts)
                             else:
                                 return TACSubObject(inner.value, inner.offset + member.offset, exp.typeId, insts)
                         case TACDereferencedPointer():
@@ -717,8 +757,10 @@ class TAC(ABC):
                                     # code to instantiate bitfield values.
                                     dest: TACExpressionResult
                                     if memberInfo.isBitfield:
+                                        assert memberInfo.bitfieldUnitType is not None
                                         dest = TACBitfieldObject(leftVariable, memberOffset, 
                                                                  memberInfo.bitWidth, memberInfo.bitOffset, 
+                                                                 memberInfo.type, memberInfo.bitfieldUnitType, 
                                                                  expr.valueType, insts)
                                     else:
                                         dest = TACSubObject(leftVariable, memberOffset, expr.valueType, insts)
@@ -839,14 +881,14 @@ class TACExpressionResult(TAC):
                 self.createChild(TACCopyFromOffset, self.value, self.offset, dst, self.insts)
                 return dst
             case TACBitfieldObject():
-                tempDst = self.createChild(TACValue, False, self.processedType)
-                # Copy the whole value. This contains junk from other values.
+                tempDst = self.createChild(TACValue, False, self.unitType)
+                # Copy the whole unit. This contains junk from other values in the same unit.
                 self.createChild(TACCopyFromOffset, self.value, self.byteOffset, tempDst, self.insts)
 
                 # We're going to move the whole value to the left, so the most significant bit of the value is at
                 # the most significant bit of the return type. Then, we're going to shift to the right until the 
                 # least significant bit of the value is at the least significant bit of the return type.
-                shiftToRight: int = self.processedType.getByteSize() * 8 - self.bitWidth
+                shiftToRight: int = self.unitType.getByteSize() * 8 - self.bitWidth
                 shiftToLeft: int = shiftToRight - self.bitOffset
                 leftShiftValue = self.createChild(TACValue, True, TypeSpecifier.UCHAR.toBaseType(), str(shiftToLeft))
                 rightShiftValue = self.createChild(TACValue, True, TypeSpecifier.UCHAR.toBaseType(), str(shiftToRight))
@@ -857,7 +899,7 @@ class TACExpressionResult(TAC):
                 
                 # Now depending on the signedness, shift to the right using the right kind of shift.
                 rightShiftType: BinaryOperator
-                if self.processedType.isSigned():
+                if self.bitfieldType.isSigned():
                     # Keeps the sign.
                     rightShiftType = BinaryOperator.ARITHMETIC_RIGHT_SHIFT
                 else:
@@ -865,7 +907,10 @@ class TACExpressionResult(TAC):
 
                 shiftedRight = TACBinary(rightShiftType, shiftedLeft.result, rightShiftValue, 
                                          instructionsList=self.insts)
-                return shiftedRight.result
+
+                # Make a final cast to the variable type (not its unit type).
+                castedResult = self.makeCast(self.unitType, shiftedRight.result, self.processedType, self.insts)
+                return castedResult.value
             case _:
                 raise ValueError(f"Cannot convert {self} to lvalue")
 
@@ -888,11 +933,16 @@ class TACSubObject(TACExpressionResult):
 
 class TACBitfieldObject(TACExpressionResult):
     def __init__(self, value: TACValue, byteOffset: int, bitWidth: int, bitOffset: int,
-                 processedType: DeclaratorType, insts: list[TACInstruction], 
+                 bitfieldType: DeclaratorType, unitType: DeclaratorType, processedType: DeclaratorType, insts: list[TACInstruction], 
                  parentTAC: TAC | None = None) -> None:
         self.byteOffset = byteOffset
         self.bitWidth = bitWidth
         self.bitOffset = bitOffset
+        # Type described in the struct definition (used for storage capacity and range of values).
+        self.bitfieldType = bitfieldType
+        # The unit type describes where the field is stored. Use the bit offset to fetch from the unit the value of the
+        # bitfield.
+        self.unitType = unitType
         super().__init__(value, processedType, insts, parentTAC)
 
     def print(self) -> str:

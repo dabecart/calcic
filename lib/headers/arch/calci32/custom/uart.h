@@ -9,14 +9,8 @@
 #ifndef _CALCIC_CALCI32_UART_h
 #define _CALCIC_CALCI32_UART_h
 
+#include <stddef.h>
 #include <stdint.h>
-
-typedef struct UART_Handler {
-    uint32_t CTRL;
-    uint32_t STATUS;
-    uint32_t DIN;
-    uint32_t DOUT;
-} UART_Handler;
 
 typedef enum UART_Baudrate {
     UART_B9600    = 0b000,
@@ -31,13 +25,37 @@ typedef enum UART_Baudrate {
     UART_BUNKNOWN = -1
 } UART_Baudrate;
 
-UART_Baudrate uart_getBaudrate(UART_Handler *huart);
-int uart_setBaudrate(UART_Handler *huart, UART_Baudrate baudrate);
+typedef struct UART_RegCTRL {
+    UART_Baudrate   baudrate    : 3;
+    uint32_t                    : 13;
+    uint32_t        enable      : 1;
+    uint32_t                    : 15;
+} UART_RegCTRL;
 
-int uart_isEnabled(UART_Handler *huart);
-int uart_setEnabled(UART_Handler *huart, int enabled);
+typedef struct UART_RegSTATUS {
+    uint32_t        busy        : 1;
+    uint32_t        rxReady     : 1;
+    uint32_t                    : 30;
+} UART_RegSTATUS;
+
+typedef struct UART_Handler {
+    UART_RegCTRL    CTRL;
+    UART_RegSTATUS  STATUS;
+    uint32_t        DIN;
+    uint32_t        DOUT;
+} UART_Handler;
+
+UART_Baudrate uart_getBaudrate(volatile UART_Handler *huart);
+int uart_setBaudrate(volatile UART_Handler *huart, UART_Baudrate baudrate);
+
+int uart_isEnabled(volatile UART_Handler *huart);
+int uart_enable(volatile UART_Handler *huart);
+int uart_disable(volatile UART_Handler *huart);
+
+int uart_receive(volatile UART_Handler *huart, char *buf, const size_t len);
+int uart_transmit(volatile UART_Handler *huart, const char *buf, const size_t len);
 
 // Main UART handler declaration. Use as a parameter for the function above.
-extern UART_Handler *huart;
+volatile extern UART_Handler *huart;
 
 #endif // _CALCIC_CALCI32_UART_h
