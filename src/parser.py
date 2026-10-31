@@ -846,7 +846,8 @@ class AST(ABC):
                 self.expect(")")
 
         if ret is None:
-            self.raiseError(f"Unexpected token {tok} when parsing a Factor")
+            self.pop()
+            self.raiseError(f"Expected an expression")
 
         return ret
 
@@ -1138,9 +1139,16 @@ class AST(ABC):
                         mask = (1 << currentMember.bitWidth) - 1
                         maskedVal = val & mask
 
-                        if val != maskedVal:
-                            self.raiseWarning(f"{val} overflows to {maskedVal}")
-                        
+                        if currentMember.type.isSigned():
+                            minValue = -(1 << (currentMember.bitWidth - 1))
+                            maxValue = (1 << (currentMember.bitWidth - 1)) - 1
+                        else:
+                            minValue = 0
+                            maxValue = (1 << currentMember.bitWidth) - 1
+
+                        if not (minValue <= val <= maxValue):
+                            self.raiseWarning(f"{val} overflows to {maskedVal} in {currentMember.bitWidth}-bit field, range: [{minValue}, {maxValue}]")
+
                         if activeByteOffset == -1:
                             activeByteOffset = currentMember.offset
                             activeByteValue = 0
@@ -4664,9 +4672,14 @@ class Dot(Exp):
 
     def print(self, padding: int) -> str:
         pad = " " * padding
-        leftExpString = self.leftExp.print(0).replace("\n", "")
-        return f'{pad}{leftExpString}.{self.member}\n'
-    
+        pad2 = " " * (padding + PADDING_INCREMENT)
+        
+        ret  = f'{pad}{self.typeId} Dot(\n'
+        ret += self.leftExp.print(padding + PADDING_INCREMENT)
+        ret += f"{pad2}. {self.member}\n"
+        ret += f'{pad})\n'
+        return ret
+
 class Arrow(Exp):
     def parse(self, leftExp: Exp):
         # Kind of redundant, but needed for Pylance.
@@ -4724,8 +4737,13 @@ class Arrow(Exp):
     
     def print(self, padding: int) -> str:
         pad = " " * padding
-        leftExpString = self.leftExp.print(0).replace("\n", "")
-        return f'{pad}{leftExpString}->{self.member}\n'
+        pad2 = " " * (padding + PADDING_INCREMENT)
+        
+        ret  = f'{pad}{self.typeId} Dot(\n'
+        ret += self.leftExp.print(padding + PADDING_INCREMENT)
+        ret += f"{pad2}-> {self.member}\n"
+        ret += f'{pad})\n'
+        return ret
 
 class SizeOf(Exp):
     def parse(self, *args):
@@ -4896,80 +4914,153 @@ class CompoundInitializer(Initializer):
             return
 
         if isinstance(expectedType, ArrayDeclaratorType):
-            # Initializing an array.
+            initList: list[Initializer|None] = [None] * expectedType.size
+            currentIndex = 0
+
+            # Arrays of character type can be initialized directly with a string literal without braces.
             if self.peek().id == "string":
                 if not isinstance(expectedType.declarator, BaseDeclaratorType) or \
-                not expectedType.declarator.baseType.isCharacter():
+                   not expectedType.declarator.baseType.isCharacter():
                     self.raiseError("Cannot initialize a non char array with a string")
 
                 stringAST = self.createChild(String)
-                for ch in stringAST.value:
+
+                for i, ch in enumerate(stringAST.value):
+                    targetIdx = currentIndex + i
+                    if targetIdx >= expectedType.size:
+                        self.raiseError(f"String initializer overflows array of size {expectedType.size}")
+
                     single = SingleInitializer([], self.context, None, TypeSpecifier.CHAR.toBaseType(),   
                                                CharConstant([], self.context, None, str(ord(ch))))
-                    self.init.append(single)
+                    initList[targetIdx] = single
+                
+                currentIndex += len(stringAST.value)
             else:
                 self.expect("{")
-                # Parse initializers with the expected "inner" type. For example, if parsing a float[3][4],
-                # the first call to compound initializer expects float[4]; the second, float.
-                self.init.append(self.createChild(Initializer, expectedType.declarator))
-                
-                while self.peek().id == ",":
-                    self.pop()
 
-                    if self.peek().id == "}":
-                        # There can be a trailing comma.
-                        break
+                while True:
+                    # Check for array designator: [ constant-expression ]
+                    if self.peek().id == "[":
+                        self.pop()
+
+                        indexExp = self.createChild(Exp).preconvertExpression()
+                        evals = indexExp.staticEval()
+                        currentIndex = int(evals.value)
+                        
+                        self.expect("]")
+                        
+                        if self.peek().id == "=":
+                            self.pop()
+
+                    if currentIndex < 0 or currentIndex >= expectedType.size:
+                        self.raiseError(f"Array index {currentIndex} out of bounds for size {expectedType.size}")
+
+                    itemInit = self.createChild(Initializer, expectedType.declarator)
+                    initList[currentIndex] = itemInit
+                    currentIndex += 1
+
+                    if self.peek().id == ",":
+                        self.pop()
+                        if self.peek().id == "}":
+                            # Trailing comma.
+                            break
                     else:
-                        self.init.append(self.createChild(Initializer, expectedType.declarator))
+                        break
 
                 self.expect("}")
 
-            if len(self.init) > expectedType.size:
-                self.raiseError(f"Too many initializers: expected {expectedType.size}, received {len(self.init)}")
-
-            if len(self.init) < expectedType.size:
-                # Pad the remainder of the array with zeros.
-                remainingItems = expectedType.size - len(self.init)
-                # Create individual constants.
-                for _ in range(remainingItems):
-                    self.init.append(CompoundInitializer.createZeroInitializer(expectedType.declarator, self.context))
+            # Pad uninitialized slots with zeros
+            for i in range(expectedType.size):
+                toAppend: Initializer|None = initList[i]
+                if toAppend is None:
+                    toAppend = CompoundInitializer.createZeroInitializer(expectedType.declarator, self.context)
+                self.init.append(toAppend)
 
         elif isinstance(expectedType, BaseDeclaratorType) and expectedType.baseType.name == "STRUCT":
-            # Initializing a struct.
+            # Initializing a struct (supports positional, designated .member, and mixing).
+            members = expectedType.baseType.getMembers()
+            numMembers = len(members)
+            initList: list[Initializer | None] = [None] * numMembers
+            currentIndex = 0
+
             self.expect("{")
 
-            # Parse the inner initializers. Must always be more than one. Can be less than the 
-            # member count, but never more.
-            members = expectedType.baseType.getMembers()
-            self.init.append(self.createChild(Initializer, members[0].type))
+            while True:
+                # Check for struct designator: .member
+                if self.peek().id == ".":
+                    self.pop()
 
-            argCount: int = 0
-            while self.peek().id == ",":
-                argCount += 1
-                self.pop()
+                    memberName = self.expect("identifier").value
 
-                if self.peek().id == "}":
-                    break
+                    foundIdx = -1
+                    for idx, m in enumerate(members):
+                        if m.name == memberName:
+                            foundIdx = idx
+                            break
+                    
+                    if foundIdx < 0:
+                        self.raiseError(f"Struct {expectedType} has no member named '{memberName}'")
+                    
+                    currentIndex = foundIdx
 
-                if argCount >= len(members):
+                    if self.peek().id == "=":
+                        self.pop()
+
+                if currentIndex < 0 or currentIndex >= numMembers:
                     self.raiseError(f"Too many initializers for type {expectedType}")
-                
-                self.init.append(self.createChild(Initializer, members[argCount].type))
+
+                targetType = members[currentIndex].type
+                itemInit = self.createChild(Initializer, targetType)
+                initList[currentIndex] = itemInit
+                currentIndex += 1
+
+                if self.peek().id == ",":
+                    self.pop()
+                    if self.peek().id == "}":
+                        # Trailing comma.
+                        break
+                else:
+                    break
 
             self.expect("}")
 
-            if len(self.init) < len(members):
-                # Pad the initialized members with zeros.
-                for undefinedMember in members[len(self.init):]:
-                    self.init.append(CompoundInitializer.createZeroInitializer(undefinedMember.type, self.context))
+            # Pad uninitialized members with zeros
+            for i, member in enumerate(members):
+                toAppend: Initializer|None = initList[i]
+                if toAppend is None:
+                    toAppend = CompoundInitializer.createZeroInitializer(member.type, self.context)
+                self.init.append(toAppend)
 
         elif isinstance(expectedType, BaseDeclaratorType) and expectedType.baseType.name == "UNION":
-            # Initializing an union.
+            members = expectedType.baseType.getMembers()
             self.expect("{")
 
-            # Parse the inner initializers. Must be a single value surrounded by {}.
-            members = expectedType.baseType.getMembers()
-            self.init.append(self.createChild(Initializer, members[0].type))
+            selectedMemberIdx = 0
+            if self.peek().id == ".":
+                self.pop()
+                memberName = self.expect("identifier").value
+
+                foundIdx = -1
+                for idx, m in enumerate(members):
+                    if m.name == memberName:
+                        foundIdx = idx
+                        break
+
+                if foundIdx == -1:
+                    self.raiseError(f"Union {expectedType} has no member named '{memberName}'")
+                    
+                selectedMemberIdx = foundIdx
+
+                if self.peek().id == "=":
+                    self.pop()
+
+            memberType = members[selectedMemberIdx].type
+            itemInit = self.createChild(Initializer, memberType)
+            self.init.append(itemInit)
+
+            if self.peek().id == ",":
+                self.pop()
+
             self.expect("}")
 
         else:

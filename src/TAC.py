@@ -491,9 +491,22 @@ class TAC(ABC):
                                 dstPointer = self.createChild(TACValue, False, PointerDeclaratorType(exp.typeId))
                                 delta = TACValue(True, TypeSpecifier.ARCH_INT.toBaseType(), str(member.offset), self)
                                 self.createChild(TACAddToPointer, inner.value, delta, 1, dstPointer, insts)
-                                return TACDereferencedPointer(dstPointer, exp.typeId, insts)
                             else:
-                                return TACDereferencedPointer(inner.value, exp.typeId, insts)
+                                dstPointer = inner.value
+
+                            ret =  TACDereferencedPointer(dstPointer, exp.typeId, insts)
+                            
+                            if member.isBitfield:
+                                # As there are not "pointers to bitfields", we can just load its value and return it.
+                                assert member.bitfieldUnitType is not None
+                                memVal = ret.convert()
+                                return TACBitfieldObject(memVal, member.offset, 
+                                                    member.bitWidth, member.bitOffset, 
+                                                    member.type, member.bitfieldUnitType, 
+                                                    exp.typeId, insts)
+
+                            return ret
+                            
                 else:
                     # This is an union. Members have offset 0.
                     match inner:
