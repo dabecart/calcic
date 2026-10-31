@@ -149,6 +149,8 @@ class Context:
     insideAFunction: bool                       = False
     # The function the context is currently in.
     insideFunctionName: str                     = ""
+    # True when a static variable is being initialized.
+    initializingStaticVariable: bool            = False
 
     # Use it to assign the break to a loop or a switch.
     _switchOrLoop: list[str]                    = field(default_factory= lambda:[""])
@@ -970,8 +972,7 @@ class AST(ABC):
                             # The type is the same as the declaration type.
                             idType = typeDeclaration.typeId
                         else:
-                            # To shut Pylance...
-                            if objectType is None: raise ValueError()
+                            assert objectType is not None
                             idType = self.context.enumMap[objectType.mangledName]
                             # Pop the keyword and the identifier.
                             self.pop()
@@ -1074,21 +1075,28 @@ class AST(ABC):
         return (storageClass, idType.toBaseType(typeQualifiers), typeDeclaration)
     
     def parseConstantFromType(self, constantType: DeclaratorType, strict: bool = False) -> list[Constant]:
+        # Parse the initializer using the Initializer AST hierarchy (handles arrays, structs, unions, and scalars).
+        initializer = self.createChild(Initializer, constantType)
+
+        if strict and isinstance(initializer, SingleInitializer):
+            if constantType.isInteger() and not initializer.precastType.isInteger():
+                self.raiseError("Expected an integer constant")
+
+        # Convert the parsed Initializer tree into the flat list[Constant] required for memory layout.
+        return self._initializerToConstants(constantType, initializer, strict)
+
+    def _initializerToConstants(self, constantType: DeclaratorType, initializer: Initializer, strict: bool = False) -> list[Constant]:
         if isinstance(constantType, BaseDeclaratorType):
             baseConstType = constantType.baseType
 
-            # Structs and unions cannot be constructed with the common "Initializer" class as they 
-            # initialize members with single "zeroed" objects, and here we use ZeroPaddingInitializer.
+            # Structs.
             if baseConstType.name == "STRUCT":
-                # Get the members array.
+                assert isinstance(initializer, CompoundInitializer)
+                
                 members = baseConstType.getMembers()
-
-                # Iterate over the members.
                 ret: list[Constant] = []
 
                 memoryOffset: int = 0
-                memberIndex: int = 0
-
                 activeByteOffset: int = -1
                 activeByteValue: int = 0
 
@@ -1104,17 +1112,7 @@ class AST(ABC):
                         else:
                             activeByteOffset = -1
 
-                self.expect("{")
-
-                while True:
-                    if self.peek().id == "}":
-                        break
-
-                    if memberIndex >= len(members):
-                        self.raiseError(f"Too many initializers for {constantType}")
-
-                    currentMember = members[memberIndex]
-
+                for currentMember, memberInit in zip(members, initializer.init):
                     # Flush any active bitfield bytes that precede the current member's offset.
                     while activeByteOffset != -1 and activeByteOffset < currentMember.offset:
                         flushActiveByte()
@@ -1135,8 +1133,8 @@ class AST(ABC):
 
                     # Parse member (bitfield or regular).
                     if currentMember.isBitfield:
-                        parsed = self.parseConstantFromType(currentMember.type, strict)
-                        val = int(parsed[0].constValue)
+                        constVals = memberInit.staticEval()
+                        val = int(constVals[0].value)
                         mask = (1 << currentMember.bitWidth) - 1
                         maskedVal = val & mask
 
@@ -1153,15 +1151,8 @@ class AST(ABC):
                             while activeByteOffset != -1:
                                 flushActiveByte()
                         
-                        ret.extend(self.parseConstantFromType(currentMember.type, strict))
+                        ret.extend(self._initializerToConstants(currentMember.type, memberInit, strict))
                         memoryOffset = currentMember.offset + currentMember.type.getByteSize()
-
-                    memberIndex += 1
-
-                    if self.peek().id == ",":
-                        self.pop()
-                    else:
-                        break
 
                 # Flush any remaining active bitfield bytes
                 while activeByteOffset != -1:
@@ -1173,19 +1164,15 @@ class AST(ABC):
                                                 TypeSpecifier.VOID.toBaseType(), finalPadding)
                     ret.append(padding)
 
-                self.expect("}")
-
                 return ret
 
+            # Unions.
             if baseConstType.name == "UNION":
-                members = baseConstType.getMembers()
-                self.expect("{")
-                ret: list[Constant] = self.parseConstantFromType(members[0].type, strict)
-                self.expect("}")
+                assert isinstance(initializer, CompoundInitializer)
 
-                # Even though to initialize an union you parse a constant from the first type in 
-                # the declaration, its size must be taken into account. An union of an int and 
-                # double is initialized with an int, but its size is that of the double.
+                members = baseConstType.getMembers()
+                ret: list[Constant] = self._initializerToConstants(members[0].type, initializer.init[0], strict)
+
                 bytePadding: int = baseConstType.getByteSize() - members[0].type.getByteSize()
                 if bytePadding > 0:
                     padding = self.createChild(ZeroPaddingInitializer, 
@@ -1194,11 +1181,7 @@ class AST(ABC):
 
                 return ret
 
-            # Static evaluation, parse the initializer.
-            initializer = self.createChild(Initializer, constantType)
-            if strict and isinstance(initializer, SingleInitializer):
-                if baseConstType.isInteger() and not initializer.precastType.isInteger():
-                    self.raiseError("Expected an integer constant")
+            # Scalar types.
             constValues: list[StaticEvalValue] = initializer.staticEval()
 
             match baseConstType.name:
@@ -1227,115 +1210,49 @@ class AST(ABC):
             
             return [self.createChild(constClass, constValues[0].value)]
 
+        # Pointers.
         elif isinstance(constantType, PointerDeclaratorType):
-            if self.peek().id == "string":
-                # A char* can be initialized with a string. The string is stored as a constant and 
-                # a pointer to said constant is stored in the variable. Be mindful that char is 
-                # different to signed char and unsigned char, in a semantic sense.
-                if not isinstance(constantType.declarator, BaseDeclaratorType) or \
-                   not constantType.declarator.baseType == TypeSpecifier.CHAR:
-                    self.raiseError("Cannot initialize a non char pointer with a string")
+            if isinstance(initializer, SingleInitializer) and initializer.isStringPointer:
+                assert isinstance(initializer.init, PointerInitializer)
+                return [initializer.init]
 
-                strAST: String = self.createChild(String)
-                # We could start this with .L so that the linker "hides" this constant.
-                constantName: str = self.context.mangleIdentifier("str")
+            constValues: list[StaticEvalValue] = initializer.staticEval()
+            if len(constValues) > 1:
+                self.raiseError("Expected a single initializer")
 
-                self.context.staticVariablesMap[constantName] = StaticVariableContext(
-                    storageClass=None,
-                    idType=strAST.typeId,
-                    mangledName=constantName,
-                    isGlobal=False,
-                    isReadOnly=True,
-                    tentative=False,
-                    initialization=strAST.toConstantsList()
-                )
-                
-                cnst = self.createChild(PointerInitializer, constantType, constantName, 0)
-            else:
-                # Static evaluation, parse the initializer.
-                initializer = self.createChild(Initializer, constantType)
-                constValues: list[StaticEvalValue] = initializer.staticEval()
-                if len(constValues) > 1:
-                    self.raiseError("Expected a single initializer")
-
-                constVal = constValues[0]
-                if constVal.valType != StaticEvalType.POINTER:
-                    raise ValueError()
-
+            constVal = constValues[0]
+            if constVal.valType == StaticEvalType.POINTER:
                 if constVal.value == "":
-                    # Integer has been converted into pointer.
-                    cnst = self.createChild(ULongConstant, constVal.pointerOffset)
+                    if TypeSpecifier.ARCH_UINT == TypeSpecifier.ULONG:
+                        cnst = self.createChild(ULongConstant, constVal.pointerOffset)
+                    elif TypeSpecifier.ARCH_UINT == TypeSpecifier.UINT:
+                        cnst = self.createChild(UIntConstant, constVal.pointerOffset)
+                    else:
+                        self.raiseError("Cannot evaluate static pointer")
+
                 else:
-                    # Another variable has been used to create this pointer.
                     cnst = self.createChild(PointerInitializer, 
                                             constantType, 
                                             constVal.value, 
                                             constVal.pointerOffset)
+            
+            elif constVal.valType == StaticEvalType.INTEGER:
+                if TypeSpecifier.ARCH_UINT == TypeSpecifier.ULONG:
+                    cnst = self.createChild(ULongConstant, int(constVal.value))
+                elif TypeSpecifier.ARCH_UINT == TypeSpecifier.UINT:
+                    cnst = self.createChild(UIntConstant, int(constVal.value))
+                else:
+                    self.raiseError("Cannot evaluate static pointer")
+
             return [cnst]
         
+        # Arrays.
         elif isinstance(constantType, ArrayDeclaratorType):
-            # This list contains a flat array of the variables.
+            assert isinstance(initializer, CompoundInitializer)
+
             ret: list[Constant] = []
-
-            def processCompoundInitializer(typ: ArrayDeclaratorType):
-                currentLevel: list[Constant] = []
-                # Number of children. Do not mix with len(currentLevel), remember memory is linear
-                # for constant arrays: if an inner children is an array, the number of items added
-                # to currentLevel are the size of the array, but that's only one child more of the 
-                # top or current level array.
-                currentLevelChildren: int
-
-                if self.peek().id == "string":
-                    if not isinstance(typ.declarator, BaseDeclaratorType) or \
-                       not typ.declarator.baseType.isCharacter():
-                        self.raiseError("Cannot initialize a non char array with a string")
-
-                    stringValue = self.createChild(String).value
-                    chConsts = [CharConstant([], self.context, None, str(ord(ch))) for ch in stringValue]
-                    currentLevel.extend(chConsts)
-                    
-                    currentLevelChildren = len(stringValue)
-
-                else:
-                    self.expect("{")
-
-                    # Fill with constants. Must be at least one.
-                    if isinstance(typ.declarator, ArrayDeclaratorType):
-                        # Recursive calls to initialize inner arrays.
-                        processCompoundInitializer(typ.declarator)
-                    else:
-                        currentLevel.extend(self.parseConstantFromType(typ.declarator))
-
-                    currentLevelChildren = 1
-
-                    while self.peek().id == ",":
-                        self.pop()
-                        if self.peek().id == "}":
-                            break
-
-                        if isinstance(typ.declarator, ArrayDeclaratorType):
-                            # Recursive calls to initialize inner arrays.
-                            processCompoundInitializer(typ.declarator)
-                        else:
-                            currentLevel.extend(self.parseConstantFromType(typ.declarator))
-
-                        currentLevelChildren += 1
-
-                    self.expect("}")
-
-                if currentLevelChildren > typ.size:
-                    self.raiseError(f"Too many initializers: expected {typ.size}, received {len(currentLevel)}")
-
-                # Append ZeroPaddings until the array is filled. 
-                if currentLevelChildren < typ.size:
-                    padBytes = (typ.size - currentLevelChildren) * typ.declarator.getByteSize()
-                    padding = self.createChild(ZeroPaddingInitializer, typ.declarator, padBytes)
-                    currentLevel.append(padding)
-
-                # Add to the return list.
-                ret.extend(currentLevel)
-
-            processCompoundInitializer(constantType)
+            for itemInit in initializer.init:
+                ret.extend(self._initializerToConstants(constantType.declarator, itemInit, strict))
             return ret
 
         else:
@@ -2449,7 +2366,9 @@ class VariableDeclaration(Declaration):
             elif self.storageClass == StorageClass.STATIC:
                 if self.peek().id == "=":
                     self.pop()
+                    self.context.initializingStaticVariable = True
                     self.initialization = self.parseConstantFromType(self.typeId)
+                    self.context.initializingStaticVariable = False
                 else:
                     self.initialization = [self.createChild(ZeroPaddingInitializer, self.typeId, self.typeId.getByteSize())]
 
@@ -2488,7 +2407,9 @@ class VariableDeclaration(Declaration):
             # This is a File Scope Variable Declaration.
             if self.peek().id == "=":
                 self.pop()
+                self.context.initializingStaticVariable = True
                 self.initialization = self.parseConstantFromType(self.typeId)
+                self.context.initializingStaticVariable = False
             else:
                 if self.storageClass == StorageClass.EXTERN:
                     # Initialization is already []
@@ -2536,7 +2457,7 @@ class VariableDeclaration(Declaration):
                 isGlobal=self.isGlobal,
                 isReadOnly=self.typeId.getTypeQualifiers().const,
                 tentative=tentative,
-                initialization=self.initialization # type: ignore
+                initialization=self.initialization
             )
 
             # Add the variable to the identifiers context.
@@ -3156,7 +3077,7 @@ class StaticEvalValue:
 class Exp(AST):
     def __init__(self, tokens: list[Token], 
                  context: Context | None = None, parentAST: AST | None = None, *args) -> None:
-        self.typeId: DeclaratorType = None # type: ignore
+        self.typeId: DeclaratorType
         super().__init__(tokens, context, parentAST, *args)
         if self.typeId is None:
             self.raiseError("Expression type is None")
@@ -4318,8 +4239,7 @@ class Binary(Exp):
 
         if self.binaryOperator == BinaryOperator.SUM:
             if isExp1Pointer and not isExp2Pointer:
-                if not isinstance(self.exp1.typeId, PointerDeclaratorType):
-                    raise ValueError()
+                assert isinstance(self.exp1.typeId, PointerDeclaratorType)
                 
                 # Pointer sum: exp2 is long.
                 index = exp2Eval.getIntegerValue(self.exp2)
@@ -4328,8 +4248,7 @@ class Binary(Exp):
                                         exp1Eval.pointerOffset + index * self.exp1.typeId.declarator.getByteSize())
 
             if isExp2Pointer and not isExp1Pointer:
-                if not isinstance(self.exp2.typeId, PointerDeclaratorType):
-                    raise ValueError()
+                assert isinstance(self.exp2.typeId, PointerDeclaratorType)
 
                 # Pointer sum: exp1 is long.
                 index = exp1Eval.getIntegerValue(self.exp1)
@@ -4339,8 +4258,7 @@ class Binary(Exp):
 
         if self.binaryOperator == BinaryOperator.SUBTRACT:
             if isExp1Pointer and not isExp2Pointer:
-                if not isinstance(self.exp1.typeId, PointerDeclaratorType):
-                    raise ValueError()
+                assert isinstance(self.exp1.typeId, PointerDeclaratorType)
                 
                 # Pointer subtraction: exp2 is a long.
                 index = exp2Eval.getIntegerValue(self.exp2)
@@ -4349,8 +4267,7 @@ class Binary(Exp):
                                         exp1Eval.pointerOffset - index * self.exp1.typeId.declarator.getByteSize())
 
             if isExp2Pointer and isExp1Pointer:
-                if not isinstance(self.exp1.typeId, PointerDeclaratorType):
-                    raise ValueError()
+                assert isinstance(self.exp1.typeId, PointerDeclaratorType)
                 
                 # Pointer subtraction: the result is a long. In this case, the base address of both
                 # must be the same.
@@ -4661,8 +4578,7 @@ class Subscript(Exp):
         self.typeId = self.pointer.typeId.declarator
 
     def staticEval(self) -> StaticEvalValue:
-        if not isinstance(self.pointer.typeId, PointerDeclaratorType):
-            raise ValueError()
+        assert isinstance(self.pointer.typeId, PointerDeclaratorType)
 
         innerEval = self.pointer.staticEval()
         if innerEval.valType != StaticEvalType.POINTER:
@@ -4741,8 +4657,7 @@ class Dot(Exp):
     def staticEval(self) -> StaticEvalValue:
         leftEval = self.leftExp.staticEval()
         # Calculate the byte offset of the member and add it to the offset of leftEval.
-        if self.memberInfo is None:
-            raise ValueError()
+        assert self.memberInfo is not None
         return StaticEvalValue(StaticEvalType.VARIABLE, 
                                leftEval.value, 
                                leftEval.pointerOffset + self.memberInfo.offset)
@@ -4802,8 +4717,7 @@ class Arrow(Exp):
     def staticEval(self) -> StaticEvalValue:
         leftEval = self.leftExp.staticEval()
         # Calculate the byte offset of the member and add it to the offset of leftEval.
-        if self.memberInfo is None:
-            raise ValueError()
+        assert self.memberInfo is not None
         return StaticEvalValue(StaticEvalType.VARIABLE, 
                                leftEval.value, 
                                leftEval.pointerOffset + self.memberInfo.offset)
@@ -4881,16 +4795,45 @@ class Initializer(AST):
 class SingleInitializer(Initializer):
     def parse(self, expectedType: DeclaratorType, initExp: Exp|None = None):
         self.typeId = expectedType
+        self.isStringPointer: bool = False
+        self.init: Exp
         
         if initExp is None:
-            self.init: Exp = self.createChild(Exp).preconvertExpression()
+            if self.context.initializingStaticVariable and \
+               isinstance(expectedType, PointerDeclaratorType) and \
+               self.peek().id == "string" \
+            :
+                # This is a string used in a static variable initialization.
+                if not isinstance(expectedType.declarator, BaseDeclaratorType) or \
+                   expectedType.declarator.baseType != TypeSpecifier.CHAR:
+                    # Strings decay to char*.
+                    self.raiseError(f"Cannot initialize {expectedType} with a string (char*)")
+
+                strAST: String = self.createChild(String)
+                constantName: str = self.context.mangleIdentifier("str")
+
+                self.context.staticVariablesMap[constantName] = StaticVariableContext(
+                    storageClass=None,
+                    idType=strAST.typeId,
+                    mangledName=constantName,
+                    isGlobal=False,
+                    isReadOnly=True,
+                    tentative=False,
+                    initialization=strAST.toConstantsList()
+                )
+                
+                self.init = self.createChild(PointerInitializer, expectedType, constantName, 0)
+                self.isStringPointer = True
+            else:
+                self.init = self.createChild(Exp).preconvertExpression()
+                
+                # Store the original type. Needed for strict initializers.
+                self.precastType = self.init.typeId
+                if self.init.typeId.unqualified() != expectedType.unqualified():
+                    self.init = self.createChild(Cast, expectedType, self.init, True)
         else:
-            self.init: Exp = initExp
-        
-        # Store the original type. Needed for strict initializers.
-        self.precastType = self.init.typeId
-        if self.init.typeId.unqualified() != expectedType.unqualified():
-            self.init = self.createChild(Cast, expectedType, self.init, True)
+            self.init = initExp
+            self.isStringPointer = isinstance(initExp, PointerInitializer)
 
     def staticEval(self) -> list[StaticEvalValue]:
         return [self.init.staticEval()]
@@ -4932,7 +4875,12 @@ class SingleInitializer(Initializer):
             return SingleInitializer([], context, None, initializerType.baseType.toBaseType(),  constRetType([], context, None, "0"))
 
         elif isinstance(initializerType, PointerDeclaratorType):
-            return SingleInitializer([], context, None, initializerType, ULongConstant([], context, None, "0"))
+            if TypeSpecifier.ARCH_UINT == TypeSpecifier.ULONG:
+                return SingleInitializer([], context, None, initializerType, ULongConstant([], context, None, "0"))
+            elif TypeSpecifier.ARCH_UINT == TypeSpecifier.UINT:
+                return SingleInitializer([], context, None, initializerType, UIntConstant([], context, None, "0"))
+            else:
+                raise ValueError(f"Cannot create zero initializer of type {initializerType}")
         
         else:
             raise ValueError(f"Cannot create zero initializer of type {initializerType}")
