@@ -550,6 +550,7 @@ class TAC(ABC):
                                 return TACSubObject(inner.value, inner.offset + member.offset, exp.typeId, insts)
                         case TACDereferencedPointer():
                             # If the offset is 0, no need to add it to the pointer.
+                            dstPointer: TACValue
                             if member.offset != 0:
                                 dstPointer = self.createChild(TACValue, False, PointerDeclaratorType(exp.typeId))
                                 delta = TACValue(True, TypeSpecifier.ARCH_INT.toBaseType(), str(member.offset), self)
@@ -564,7 +565,7 @@ class TAC(ABC):
                                                                       member.type, member.bitfieldUnitType, 
                                                                       exp.typeId, insts)
                             else:
-                                return  TACDereferencedPointer(dstPointer, exp.typeId, insts)
+                                return TACDereferencedPointer(dstPointer, exp.typeId, insts)
                             
                 else:
                     # This is an union. Members have offset 0.
@@ -590,13 +591,23 @@ class TAC(ABC):
                         raise ValueError("Couldn't find the member")
 
                     # If the offset is 0, no need to add it to the pointer.
+                    dstPointer: TACValue
                     if member.offset != 0:
                         delta = TACValue(True, TypeSpecifier.ARCH_INT.toBaseType(), str(member.offset), self)
                         dstPointer = self.createChild(TACValue, False, PointerDeclaratorType(exp.typeId))
                         self.createChild(TACAddToPointer, inner, delta, 1, dstPointer, insts)
-                        return TACDereferencedPointer(dstPointer, exp.typeId, insts)
                     else:
-                        return TACDereferencedPointer(inner, exp.typeId, insts)
+                        dstPointer = inner
+
+                    if member.isBitfield:
+                        assert member.bitfieldUnitType is not None
+                        return TACDereferencedBitfieldPointer(dstPointer, 
+                                                              member.bitWidth, member.bitOffset, 
+                                                              member.type, member.bitfieldUnitType, 
+                                                              exp.typeId, insts)
+                    else:
+                        return TACDereferencedPointer(dstPointer, exp.typeId, insts)
+                    
                 else:
                     # This is an union. Offset is zero for all members.
                     return TACDereferencedPointer(inner, exp.typeId, insts)

@@ -2619,23 +2619,8 @@ class StructDeclaration(Declaration):
             # The struct is going to be defined.
             self.byteSize = 0
 
-            # State tracking for active bitfield storage units.
-            activeUnitType: DeclaratorType|None = None
-            activeUnitTypeSize: int|None = None
-            activeUnitByteOffset: int = 0
-            bitsUsedInUnit: int = 0
-
-            # Closes the current active bitfield storage unit and updates byteSize.
-            def flushBitfieldUnit():
-                nonlocal activeUnitType, activeUnitTypeSize, activeUnitByteOffset, bitsUsedInUnit
-                if activeUnitType is not None and activeUnitTypeSize is not None:
-                    self.unitTypesByOffset[activeUnitByteOffset] = activeUnitType
-
-                    usedBytes = math.ceil(bitsUsedInUnit / 8)
-                    self.byteSize = max(self.byteSize, activeUnitByteOffset + usedBytes)
-                    activeUnitType = None
-                    activeUnitTypeSize = None
-                    bitsUsedInUnit = 0
+            # Running position (in bits) of the next free bit in the struct.
+            bitPos: int = 0
 
             # Must always have at least one member.
             while True:
@@ -2643,76 +2628,51 @@ class StructDeclaration(Declaration):
                 decls = self.createChild(MemberDeclaration).declarations
 
                 for decl in decls:
+                    typeSize = decl.typeId.getByteSize()
+                    typeAlign = decl.typeId.getAlignment()
+
                     if not decl.isBitfield:
                         # ------------------ Normal Member ------------------
-                        # Any active bitfield group must be closed before a normal member.
-                        flushBitfieldUnit()
-
-                        declAlignment = decl.typeId.getAlignment()
-                        decl.offset = declAlignment * math.ceil(self.byteSize / declAlignment)
+                        startByte = math.ceil(bitPos / 8)
+                        decl.offset = typeAlign * math.ceil(startByte / typeAlign)
 
                         # The alignment of the structure must be the greatest alignment of its members.
-                        if declAlignment > self.alignment:
-                            self.alignment = declAlignment
+                        if typeAlign > self.alignment:
+                            self.alignment = typeAlign
 
-                        # Add the size of the member plus the offset added between the current member and the
-                        # previous one.
-                        self.byteSize = decl.offset + decl.typeId.getByteSize()
+                        bitPos = (decl.offset + typeSize) * 8
+
+                    elif decl.bitWidth == 0:
+                        # ------------------ Zero-width Bitfield ------------------
+                        # Forces the next member to start at the next boundary of the declared type.
+                        # Per the System V ABI, it does not affect the struct's alignment.
+                        alignBits = typeAlign * 8
+                        bitPos = alignBits * math.ceil(bitPos / alignBits)
+                        decl.offset = bitPos // 8
 
                     else:
-                        # ------------------ Bitfield Member ------------------
-                        typeSize = decl.typeId.getByteSize()
-                        typeAlign = decl.typeId.getAlignment()
+                        # ------------------ Standard Bitfield ------------------
+                        # A bitfield may start at any bit, but it must not straddle a boundary of
+                        # its declared type's storage unit (typeSize bytes, naturally aligned).
+                        unitBits = typeSize * 8
+                        if (bitPos // unitBits) != ((bitPos + decl.bitWidth - 1) // unitBits):
+                            bitPos = unitBits * math.ceil(bitPos / unitBits)
 
-                        if decl.bitWidth == 0:
-                            # ------------------ Zero-width Bitfield ------------------
-                            # Acts as a boundary/separator; flushes current unit and forces 
-                            # the next bitfield to align to its declared type boundary.
-                            flushBitfieldUnit()
+                        # First byte touched by the bitfield, and the bit offset inside that byte.
+                        decl.offset = bitPos // 8
+                        decl.bitOffset = bitPos % 8
+                        bitPos += decl.bitWidth
 
-                            decl.offset = typeAlign * math.ceil(self.byteSize / typeAlign)
-                            self.byteSize = decl.offset
+                        # Remember the storage type used at this offset (keep the widest one).
+                        prev = self.unitTypesByOffset.get(decl.offset)
+                        if prev is None or prev.getByteSize() < typeSize:
+                            self.unitTypesByOffset[decl.offset] = decl.typeId
 
-                            if typeAlign > self.alignment:
-                                self.alignment = typeAlign
+                        # Named bitfields contribute to the struct's alignment (unnamed ones don't).
+                        if decl.name and typeAlign > self.alignment:
+                            self.alignment = typeAlign
 
-                        else:
-                            # ------------------ Standard Bitfield ------------------
-                            canPack = False
-                            if activeUnitTypeSize is not None:
-                                # Ensure the active unit base offset satisfies the new type's alignment.
-                                if activeUnitByteOffset % typeAlign == 0:
-                                    newTypeSize = max(activeUnitTypeSize, typeSize)
-                                    if (bitsUsedInUnit + decl.bitWidth) <= (newTypeSize * 8):
-                                        canPack = True
-                            
-                            # The alignment of the structure must account for all member types,
-                            # even if they are packed into an existing storage unit.
-                            if typeAlign > self.alignment:
-                                self.alignment = typeAlign
-
-                            if canPack:
-                                assert activeUnitTypeSize is not None
-                                decl.offset = activeUnitByteOffset
-                                decl.bitOffset = bitsUsedInUnit
-                                bitsUsedInUnit += decl.bitWidth
-
-                                if typeSize > activeUnitTypeSize:
-                                    activeUnitTypeSize = typeSize
-                                    activeUnitType = decl.typeId
-                            else:
-                                # Flush existing unit and start a new naturally aligned one.
-                                flushBitfieldUnit()
-
-                                activeUnitByteOffset = typeAlign * math.ceil(self.byteSize / typeAlign)
-
-                                activeUnitTypeSize = typeSize
-                                activeUnitType = decl.typeId
-                                bitsUsedInUnit = decl.bitWidth
-
-                                decl.offset = activeUnitByteOffset
-                                decl.bitOffset = 0
-                                self.byteSize = activeUnitByteOffset
+                    self.byteSize = math.ceil(bitPos / 8)
 
                     # The name of the declaration must not be repeated. Do not include padding members, which
                     # are unnammed.
@@ -2724,9 +2684,6 @@ class StructDeclaration(Declaration):
 
                 if self.peek().id == "}":
                     break
-
-            # Flush any trailing bitfield unit left open at the end of the struct
-            flushBitfieldUnit()
 
             # Round up the byteSize depending on the struct's alignment.
             self.byteSize = self.alignment * math.ceil(self.byteSize / self.alignment)
