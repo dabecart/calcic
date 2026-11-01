@@ -158,6 +158,69 @@ class TAC(ABC):
                 castedResult = self.makeCast(lValue.unitType, shiftedRight.result, resultType, insts)
                 
                 return TACBaseOperand(castedResult.value, resultType, insts)
+
+            case TACDereferencedBitfieldPointer():
+                # Calculate the mask for the rvalue.
+                bitMask = (1 << lValue.bitWidth) - 1
+                rvalMask = self.createChild(TACValue, True, lValue.unitType, str(bitMask))
+
+                # Calculate the bitmask for the destination.
+                bitMask = ~(bitMask << lValue.bitOffset)
+                destMask = self.createChild(TACValue, True, lValue.unitType, str(bitMask))
+                
+                # Cast the rValue to the unit type.
+                castRValue = self.makeCast(rValue.valueType, rValue, lValue.unitType, insts)
+                
+                # Apply the mask to rval. This value is the expression result.
+                rValMask = TACBinary(BinaryOperator.BITWISE_AND, castRValue.value, rvalMask, 
+                                     instructionsList=insts)
+                # Bitshift the masked rvalue.
+                shiftValue = self.createChild(TACValue, True, TypeSpecifier.UCHAR.toBaseType(), str(lValue.bitOffset))
+                rValMaskAndShift = TACBinary(BinaryOperator.LOGIC_LEFT_SHIFT, rValMask.result, shiftValue, 
+                                             instructionsList=insts)
+                
+                # Load the value from the destination into a temporary copy.
+                destCopy = self.createChild(TACValue, False, lValue.unitType)
+                self.createChild(TACLoad, lValue.value, destCopy, insts)
+                # Mask the destination copy with an inverted mask.
+                maskedDest = TACBinary(BinaryOperator.BITWISE_AND, destCopy, destMask, 
+                                       instructionsList=insts)
+                # OR the shifted and masked rval into the masked destination to get the final result.
+                finalResult = TACBinary(BinaryOperator.BITWISE_OR, maskedDest.result, rValMaskAndShift.result, 
+                                        instructionsList=insts)
+                # Move the final result to the destination. Notice that it's the full init what is stored, not
+                # the individual value.
+                self.createChild(TACStore, finalResult.result, lValue.value, insts)
+
+                # Convert the result to resultType. We cannot use a cast as values are N-bits long. Use bitshift
+                # operations like in the TACExpressionResult::convert function.
+                
+                # We're going to move the whole value to the left, so the most significant bit of the value is at
+                # the most significant bit of the return type. Then, we're going to shift to the right until the 
+                # least significant bit of the value is at the least significant bit of the return type.
+                resultShift: int = lValue.unitType.getByteSize() * 8 - lValue.bitWidth
+                resultShiftValue = self.createChild(TACValue, True, TypeSpecifier.UCHAR.toBaseType(), str(resultShift))
+
+                # Shift the value to the leftmost bit of the result type.
+                shiftedLeft = TACBinary(BinaryOperator.LOGIC_LEFT_SHIFT, rValMask.result, resultShiftValue, 
+                                        instructionsList=insts)
+                
+                # Now depending on the signedness, shift to the right using the right kind of shift.
+                rightShiftType: BinaryOperator
+                if lValue.bitfieldType.isSigned():
+                    # Keeps the sign.
+                    rightShiftType = BinaryOperator.ARITHMETIC_RIGHT_SHIFT
+                else:
+                    rightShiftType = BinaryOperator.LOGIC_RIGHT_SHIFT
+
+                shiftedRight = TACBinary(rightShiftType, shiftedLeft.result, resultShiftValue, 
+                                         instructionsList=insts)
+
+                # Make a final cast to the variable type (not its unit type).
+                castedResult = self.makeCast(lValue.unitType, shiftedRight.result, resultType, insts)
+                
+                return TACBaseOperand(castedResult.value, resultType, insts)
+            
             case _:
                 raise ValueError("Invalid lvalue in the assignment")
 
@@ -494,18 +557,14 @@ class TAC(ABC):
                             else:
                                 dstPointer = inner.value
 
-                            ret =  TACDereferencedPointer(dstPointer, exp.typeId, insts)
-                            
                             if member.isBitfield:
-                                # As there are not "pointers to bitfields", we can just load its value and return it.
                                 assert member.bitfieldUnitType is not None
-                                memVal = ret.convert()
-                                return TACBitfieldObject(memVal, member.offset, 
-                                                    member.bitWidth, member.bitOffset, 
-                                                    member.type, member.bitfieldUnitType, 
-                                                    exp.typeId, insts)
-
-                            return ret
+                                return TACDereferencedBitfieldPointer(dstPointer, 
+                                                                      member.bitWidth, member.bitOffset, 
+                                                                      member.type, member.bitfieldUnitType, 
+                                                                      exp.typeId, insts)
+                            else:
+                                return  TACDereferencedPointer(dstPointer, exp.typeId, insts)
                             
                 else:
                     # This is an union. Members have offset 0.
@@ -924,6 +983,18 @@ class TACExpressionResult(TAC):
                 # Make a final cast to the variable type (not its unit type).
                 castedResult = self.makeCast(self.unitType, shiftedRight.result, self.processedType, self.insts)
                 return castedResult.value
+
+            case TACDereferencedBitfieldPointer():
+                # First treat it as a normal dereferenced pointer.
+                derefP = TACDereferencedPointer(self.value, self.processedType, self.insts)
+                loadedP = derefP.convert()
+                # Now from the loaded unit, extract the value as a TACBitfieldObject.
+                bitfieldObj = TACBitfieldObject(loadedP, 0, 
+                                                self.bitWidth, self.bitOffset, 
+                                                self.bitfieldType, self.unitType, 
+                                                self.processedType, self.insts)
+                return bitfieldObj.convert()
+        
             case _:
                 raise ValueError(f"Cannot convert {self} to lvalue")
 
@@ -960,6 +1031,22 @@ class TACBitfieldObject(TACExpressionResult):
 
     def print(self) -> str:
         return f"BitfieldObject({self.value})"
+
+class TACDereferencedBitfieldPointer(TACExpressionResult):
+    def __init__(self, value: TACValue, bitWidth: int, bitOffset: int,
+                 bitfieldType: DeclaratorType, unitType: DeclaratorType, processedType: DeclaratorType, insts: list[TACInstruction], 
+                 parentTAC: TAC | None = None) -> None:
+        self.bitWidth = bitWidth
+        self.bitOffset = bitOffset
+        # Type described in the struct definition (used for storage capacity and range of values).
+        self.bitfieldType = bitfieldType
+        # The unit type describes where the field is stored. Use the bit offset to fetch from the unit the value of the
+        # bitfield.
+        self.unitType = unitType
+        super().__init__(value, processedType, insts, parentTAC)
+
+    def print(self) -> str:
+        return f"DereferencedBitfieldPointer({self.value})"
 
 class TACProgram(TAC):
     def __init__(self, program: Program, parentTAC: TAC | None = None) -> None:
