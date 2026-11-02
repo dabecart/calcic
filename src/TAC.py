@@ -1558,6 +1558,13 @@ class TACBinary(TACInstruction):
                 # composed of multiple single instructions.
                 self.removeThisFromInsts = True
 
+            case BinaryOperator.COMMA:
+                self.exp1: TACValue = self.parseTACExpression(self.binaryAST.exp1, self.insts).convert()
+                self.exp2: TACValue = self.parseTACExpression(self.binaryAST.exp2, self.insts).convert()
+                dest = self.exp2
+                
+                self.removeThisFromInsts = True
+
             case _:
                 if self.binaryAST.exp1IsCasted:
                     if not isinstance(self.binaryAST.exp1, Cast):

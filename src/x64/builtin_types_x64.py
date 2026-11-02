@@ -49,7 +49,7 @@ class BuiltInTypes_x64:
         self.context.completeStruct(originalIdentifier, byteSize, alignment, members)
 
         # Array type.
-        arrT = ArrayDeclaratorType(t.toBaseType(), 1)
+        arrT = ArrayDeclaratorType(t.toBaseType(), 1, undimensioned=False)
 
         # Setup the typedef.
         arrIdentifier = "__builtin_va_list"

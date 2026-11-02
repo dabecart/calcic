@@ -347,6 +347,8 @@ class DeclaratorType(ABC):
         elif isinstance(self, PointerDeclaratorType):
             return CALCIC_ADDRS_LEN
         elif isinstance(self, ArrayDeclaratorType):
+            if self.undimensioned:
+                raise ValueError("Cannot calculate size of undimensioned array")
             return self.declarator.getByteSize() * self.size
 
         raise ValueError("Not implemented")
@@ -454,9 +456,10 @@ class PointerDeclaratorType(DeclaratorType):
         self.qualifiers = newQualifiers
 
 class ArrayDeclaratorType(DeclaratorType):
-    def __init__(self, declarator: DeclaratorType, size: int) -> None:
+    def __init__(self, declarator: DeclaratorType, size: int, undimensioned: bool) -> None:
         self.declarator = declarator
         self.size = size
+        self.undimensioned = undimensioned
         super().__init__()
 
     def decay(self) -> DeclaratorType:
@@ -464,17 +467,28 @@ class ArrayDeclaratorType(DeclaratorType):
         # For example, int[3][4] decays to int (*)[4].
         # Another example, *int[4] decays to int**.
         return PointerDeclaratorType(self.declarator, self.getTypeQualifiers())
+
+    def setDimension(self, size: int):
+        if not self.undimensioned:
+            raise ValueError("Cannot set dimension of an already sized array")
+        self.size = size
+        self.undimensioned = False
     
     def _internal_copy(self) -> ArrayDeclaratorType:
-        return ArrayDeclaratorType(self.declarator, self.size)
+        return ArrayDeclaratorType(self.declarator, self.size, self.undimensioned)
 
     def _internal_str(self) -> str:
-        return f"array[{self.size}] of {self.declarator}"
+        if self.undimensioned:
+            return f"array[] of {self.declarator}"
+        else:
+            return f"array[{self.size}] of {self.declarator}"
     
     def __eq__(self, other):
         if not isinstance(other, ArrayDeclaratorType):
             return False
-        return self.declarator == other.declarator and self.size == other.size
+        return self.declarator == other.declarator and \
+               self.size == other.size and \
+               self.undimensioned == other.undimensioned
 
     def getTypeQualifiers(self) -> TypeQualifier:
         return self.declarator.getTypeQualifiers()
@@ -771,6 +785,8 @@ class StaticEvaluation:
                 ret = 1 if v1 and v2 else 0
             elif op == "||":
                 ret = 1 if v1 or v2 else 0
+            elif op == ",":
+                ret = v2
             else:
                 raise ValueError(f"Invalid operation {op} found during static evaluation")
 
@@ -787,9 +803,8 @@ class StaticEvaluation:
     # Similar to above but using declarators instead of type specifiers.
     @staticmethod
     def evalDecl(op: str, tinput: DeclaratorType, tresult: DeclaratorType,
-                v1: str|int|float, v2: str|int|float|None = None) -> tuple[int|float, StaticEvalMsg]:
-        
-
+                v1: str|int|float, v2: str|int|float|None = None) -> tuple[int|float, StaticEvalMsg] \
+    :
         if isinstance(tinput, BaseDeclaratorType):
             inputBaseType = tinput.baseType
         elif isinstance(tinput, PointerDeclaratorType) and int(v1) == 0:
