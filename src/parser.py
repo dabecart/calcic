@@ -686,8 +686,11 @@ class AST(ABC):
             self.expect(")")
 
             if self.peek().id == "{":
-                # This is a compound literal. After the type in the parenthesis, an initializer list follows.
-                pass
+                # Compound literal: (type){ initializer-list }
+                literal = self.createChild(CompoundLiteral, typeId)
+                # A compound literal is a postfix-expression's primary, so let the postfix loop
+                # handle things like (struct P){1,2}.x or (int[]){1,2,3}[1].
+                return self._parsePostfixExpression(literal)
             else:
                 # This is a cast. After the type in the parenthesis, get the inner expression.
                 inner: Exp = self._parseFactor().preconvertExpression()
@@ -730,8 +733,9 @@ class AST(ABC):
 
         return self._parsePostfixExpression()
     
-    def _parsePostfixExpression(self) -> Exp:
-        primary: Exp = self._parsePrimaryExpression()
+    def _parsePostfixExpression(self, primary: Exp|None = None) -> Exp:
+        if primary is None:
+            primary = self._parsePrimaryExpression()
         
         ret: Exp = primary
         while True:
@@ -2406,6 +2410,8 @@ class VariableDeclaration(Declaration):
         tentative: bool = False
         self.isGlobal: bool = True
 
+        self.identifier: str
+
         # Check if there's a variable already declared but with different type.
         if self.originalIdentifier in self.context.identifierMap:
             idCtx = self.context.identifierMap[self.originalIdentifier]
@@ -3184,7 +3190,7 @@ class Exp(AST):
         pass
 
     def isLvalue(self) -> bool:
-        return isinstance(self, (Variable, Dereference, Subscript, String, Arrow)) or \
+        return isinstance(self, (Variable, Dereference, Subscript, String, Arrow, CompoundLiteral)) or \
             (isinstance(self, Dot) and self.getFirstDotOperand().isLvalue())
 
     def isBitfield(self) -> bool:
@@ -3605,6 +3611,82 @@ class String(Exp):
         # Add the null terminator.
         chars.append(CharConstant([], self.context, None, "0"))
         return chars
+
+class CompoundLiteral(Exp):
+    def parse(self, literalType: DeclaratorType):
+        # The tokens start at the '{' (the "(type)" part was consumed in _parseFactor).
+        self.typeId = literalType
+
+        isUndimensionedArray = isinstance(literalType, ArrayDeclaratorType) and literalType.undimensioned
+        if not literalType.isComplete() and not isUndimensionedArray:
+            self.raiseError(f"Cannot create a compound literal of incomplete type {literalType}")
+        if isinstance(literalType, FunctionDeclaratorType):
+            self.raiseError("Cannot create a compound literal of function type")
+
+        # At file scope the literal has static storage duration; inside a function, automatic.
+        self.isStatic: bool = not self.context.insideAFunction
+        self.initialization: Initializer
+        self.constants: list[Constant] = []
+
+        prevInitStatic = self.context.initializingStaticVariable
+        if self.isStatic:
+            self.context.initializingStaticVariable = True
+
+        if isinstance(literalType, (ArrayDeclaratorType, BaseDeclaratorType)) and \
+           (isinstance(literalType, ArrayDeclaratorType) or literalType.baseType.name in ("STRUCT", "UNION")):
+            # Aggregates: the CompoundInitializer handles the braces (and sets the size of
+            # undimensioned arrays).
+            self.initialization = self.createChild(Initializer, literalType)
+        else:
+            # Scalars may also be written as (int){ 5 }.
+            self.expect("{")
+            disCommaExp = self.context.disableCommaExpressions
+            self.context.disableCommaExpressions = True
+
+            self.initialization = self.createChild(SingleInitializer, literalType)
+            if self.peek().id == ",":
+                self.pop()
+            self.expect("}")
+
+            self.context.disableCommaExpressions = disCommaExp
+
+        self.context.initializingStaticVariable = prevInitStatic
+
+        # The type may have been completed by the initializer (e.g. (int[]){1,2,3}).
+        if not self.typeId.isComplete():
+            self.raiseError("Incomplete type after the initializer")
+
+        self.identifier: str = self.context.mangleIdentifier("compound")
+
+        if self.isStatic:
+            # Same treatment as static variables: flatten to a constants list and register it.
+            self.constants = self._initializerToConstants(self.typeId, self.initialization)
+            self.context.staticVariablesMap[self.identifier] = StaticVariableContext(
+                storageClass=StorageClass.STATIC,
+                idType=self.typeId,
+                mangledName=self.identifier,
+                isGlobal=False,
+                isReadOnly=self.typeId.getTypeQualifiers().const,
+                tentative=False,
+                initialization=self.constants
+            )
+        # Register the type so Variable-like lookups by mangled name work. It is not added
+        # to identifierMap, since a compound literal has no name in the source.
+        self.context.variablesMap[self.identifier] = VariableIdentifier(idType=self.typeId)
+
+    def staticEval(self) -> StaticEvalValue:
+        # Only file-scope literals have a constant address (6.5.2.5, 6.6).
+        if not self.isStatic:
+            self.raiseError("Compound literal is not a constant expression in block scope")
+        # Behaves like a variable, so AddressOf / decay / Subscript / Dot can fold it into a pointer.
+        return StaticEvalValue(StaticEvalType.VARIABLE, self.identifier)
+
+    def print(self, padding: int) -> str:
+        pad = " " * padding
+        ret  = f'{pad}{self.typeId} CompoundLiteral {self.identifier}(\n'
+        ret += self.initialization.print(padding + PADDING_INCREMENT)
+        ret += f'{pad})\n'
+        return ret
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 # v These constants are used to initialize static variables v
@@ -4984,7 +5066,10 @@ class SingleInitializer(Initializer):
                 case TypeSpecifier.FLOAT:   
                     constRetType = FloatConstant
                 case _:
-                    raise ValueError(f"Cannot create zero initializer of type {initializerType}")
+                    if initializerType.baseType.name == "ENUM":
+                        constRetType = IntConstant
+                    else:
+                        raise ValueError(f"Cannot create zero initializer of type {initializerType}")
                 
             return SingleInitializer([], context, None, initializerType.baseType.toBaseType(),  constRetType([], context, None, "0"))
 

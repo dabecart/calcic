@@ -224,6 +224,98 @@ class TAC(ABC):
             case _:
                 raise ValueError("Invalid lvalue in the assignment")
 
+    def initializeObject(self, target: TACValue, targetType: DeclaratorType,
+                        initialization: Initializer, insts: list[TACInstruction], debugAST: AST):
+        """Emits the instructions that store `initialization` into the object `target`."""
+
+        def declareArray(initialOffset: int, arrayType: DeclaratorType, input: Initializer):
+            if not isinstance(arrayType, ArrayDeclaratorType):
+                raise ValueError(f"Cannot declare array with input type {arrayType}")
+
+            offset: int = initialOffset
+            offsetStep: int = arrayType.getArrayBaseType().getByteSize()
+
+            def declareArrayInitializer(subArrayType: DeclaratorType, inInit: Initializer):
+                nonlocal offset
+
+                if isinstance(inInit, CompoundInitializer):
+                    for inner in inInit.init:
+                        if isinstance(subArrayType, BaseDeclaratorType) and subArrayType.baseType.name in ("STRUCT", "UNION"):
+                            declareAggregate(offset, subArrayType, inner)
+                            offset += offsetStep
+                        elif isinstance(subArrayType, ArrayDeclaratorType):
+                            declareArrayInitializer(subArrayType.declarator, inner)
+                        else:
+                            declareArrayInitializer(subArrayType, inner)
+
+                elif isinstance(inInit, SingleInitializer):
+                    if isinstance(subArrayType, BaseDeclaratorType) and subArrayType.baseType.name in ("STRUCT", "UNION"):
+                        declareAggregate(offset, subArrayType, inInit)
+                    else:
+                        expr = self.parseTACExpression(inInit.init, insts).convert()
+                        self.addDebugInformation(debugAST, insts)
+                        self.createChild(TACCopyToOffset, expr, target, offset, insts)
+                    offset += offsetStep
+                else:
+                    raise ValueError()
+
+            declareArrayInitializer(arrayType.declarator, input)
+
+        def declareAggregate(baseOffset: int, aggregateType: DeclaratorType, inInit: Initializer):
+            if not isinstance(aggregateType, BaseDeclaratorType) or aggregateType.baseType.name not in ("STRUCT", "UNION"):
+                raise ValueError(f"Cannot declare aggregate with input type {aggregateType}")
+
+            isUnion = aggregateType.baseType.name == "UNION"
+
+            if isinstance(inInit, SingleInitializer):
+                # Initialize aggregate from another aggregate of the same type (also covers a nested
+                # struct-typed compound literal used as a member initializer).
+                expr = self.parseTACExpression(inInit.init, insts).convert()
+                self.createChild(TACCopyToOffset, expr, target, baseOffset, insts)
+            elif isinstance(inInit, CompoundInitializer):
+                for memberInfo, memberInit in zip(aggregateType.baseType.getMembers(), inInit.init):
+                    memberOffset = baseOffset if isUnion else baseOffset + memberInfo.offset
+
+                    if isinstance(memberInfo.type, ArrayDeclaratorType):
+                        declareArray(memberOffset, memberInfo.type, memberInit)
+                    elif isinstance(memberInfo.type, BaseDeclaratorType) and memberInfo.type.baseType.name in ("STRUCT", "UNION"):
+                        declareAggregate(memberOffset, memberInfo.type, memberInit)
+                    elif isinstance(memberInit, SingleInitializer):
+                        expr = self.parseTACExpression(memberInit.init, insts).convert()
+                        self.addDebugInformation(debugAST, insts)
+
+                        dest: TACExpressionResult
+                        if memberInfo.isBitfield:
+                            assert memberInfo.bitfieldUnitType is not None
+                            dest = TACBitfieldObject(target, memberOffset,
+                                                    memberInfo.bitWidth, memberInfo.bitOffset,
+                                                    memberInfo.type, memberInfo.bitfieldUnitType,
+                                                    expr.valueType, insts)
+                        else:
+                            dest = TACSubObject(target, memberOffset, expr.valueType, insts)
+
+                        self.makeAssignment(expr.valueType, dest, expr, insts)
+                    else:
+                        raise ValueError()
+            else:
+                raise ValueError()
+
+        if isinstance(initialization, SingleInitializer):
+            # Scalars (also used by (int){5}) and aggregates copied from another aggregate.
+            rightResult = self.parseTACExpression(initialization.init, insts).convert()
+            self.addDebugInformation(debugAST, insts)
+            self.createChild(TACCopy, rightResult, target, insts)
+
+        elif isinstance(initialization, CompoundInitializer):
+            if isinstance(targetType, ArrayDeclaratorType):
+                declareArray(0, targetType, initialization)
+            elif isinstance(targetType, BaseDeclaratorType) and targetType.baseType.name in ("STRUCT", "UNION"):
+                declareAggregate(0, targetType, initialization)
+            else:
+                raise ValueError(f"Cannot initialize {targetType} with the current initialization")
+        else:
+            raise ValueError("Invalid initializer")
+
     def parseTACExpression(self, exp: Exp, insts: list[TACInstruction]) -> TACExpressionResult:
         # Verify if the expression is a built in function. If so, run the code in the 
         # builtin_functions.py file
@@ -274,6 +366,13 @@ class TAC(ABC):
             case String():
                 stringConstant = self.createChild(TACValue, True, exp.typeId, exp.identifier)
                 return TACBaseOperand(stringConstant, exp.typeId, insts)
+
+            case CompoundLiteral():
+                target = self.createChild(TACValue, False, exp.typeId, exp.identifier)
+                if not exp.isStatic:
+                    self.addDebugInformation(exp, insts)
+                    self.initializeObject(target, exp.typeId, exp.initialization, insts, exp)
+                return TACBaseOperand(target, exp.typeId, insts)
             
             case Variable():
                 if isinstance(exp.typeId, FunctionDeclaratorType):
@@ -771,96 +870,11 @@ class TAC(ABC):
                 if blockItem.identifier in blockItem.context.staticVariablesMap:
                     return
 
-                if isinstance(blockItem.initialization, SingleInitializer):
-                    rightResult = self.parseTACExpression(blockItem.initialization.init, insts).convert()
-                    self.addDebugInformation(blockItem, insts)
-                    leftVariable = self.createChild(TACValue, False, blockItem.typeId, blockItem.identifier)
-                    self.createChild(TACCopy, rightResult, leftVariable, insts)
-                    
-                elif isinstance(blockItem.initialization, CompoundInitializer):
-                    leftVariable = self.createChild(TACValue, False, blockItem.typeId, blockItem.identifier)
-                    
-                    def declareArray(initialOffset: int, arrayType: DeclaratorType, input: Initializer):
-                        if not isinstance(arrayType, ArrayDeclaratorType):
-                            raise ValueError(f"Cannot declare array with input type {arrayType}")
-                        
-                        offset: int = initialOffset
-                        offsetStep: int = arrayType.getArrayBaseType().getByteSize()
-                    
-                        def declareArrayInitializer(subArrayType: DeclaratorType, inInit: Initializer):
-                            nonlocal offset
+                # Without "=", `initialization` is an empty list and there is nothing to emit.
+                if isinstance(blockItem.initialization, Initializer):
+                    target = self.createChild(TACValue, False, blockItem.typeId, blockItem.identifier)
+                    self.initializeObject(target, blockItem.typeId, blockItem.initialization, insts, blockItem)
 
-                            # TODO: this could be optimized by grouping the array's items inside ints or longs.
-                            if isinstance(inInit, CompoundInitializer):
-                                for inner in inInit.init:
-                                    if isinstance(subArrayType, BaseDeclaratorType) and subArrayType.baseType.name in ("STRUCT", "UNION"):
-                                        declareAggregate(offset, subArrayType, inner)
-                                        offset += offsetStep
-                                    elif isinstance(subArrayType, ArrayDeclaratorType):
-                                        declareArrayInitializer(subArrayType.declarator, inner)
-                                    else:
-                                        declareArrayInitializer(subArrayType, inner)
-                                    
-                            elif isinstance(inInit, SingleInitializer):
-                                if isinstance(subArrayType, BaseDeclaratorType) and subArrayType.baseType.name in ("STRUCT", "UNION"):
-                                    declareAggregate(offset, subArrayType, inInit)
-                                else:
-                                    expr = self.parseTACExpression(inInit.init, insts).convert()
-                                    self.addDebugInformation(blockItem, insts)
-                                    self.createChild(TACCopyToOffset, expr, leftVariable, offset, insts)
-                                offset += offsetStep
-                            else:
-                                raise ValueError()
-                            
-                        declareArrayInitializer(arrayType.declarator, input)
-                    
-                    def declareAggregate(baseOffset: int, aggregateType: DeclaratorType, inInit: Initializer):
-                        if not isinstance(aggregateType, BaseDeclaratorType) or aggregateType.baseType.name not in ("STRUCT", "UNION"):
-                            raise ValueError(f"Cannot declare aggregate with input type {aggregateType}")
-                        
-                        isUnion = aggregateType.baseType.name == "UNION"
-
-                        if isinstance(inInit, SingleInitializer):
-                            # Initialize aggregate from another aggregate of the same type.
-                            expr = self.parseTACExpression(inInit.init, insts).convert()
-                            self.createChild(TACCopyToOffset, expr, leftVariable, baseOffset, insts)
-                        elif isinstance(inInit, CompoundInitializer):
-                            for memberInfo, memberInit in zip(aggregateType.baseType.getMembers(), inInit.init):
-                                memberOffset = baseOffset if isUnion else baseOffset + memberInfo.offset
-                                
-                                if isinstance(memberInfo.type, ArrayDeclaratorType):
-                                    declareArray(memberOffset, memberInfo.type, memberInit)
-                                elif isinstance(memberInfo.type, BaseDeclaratorType) and memberInfo.type.baseType.name in ("STRUCT", "UNION"):
-                                    declareAggregate(memberOffset, memberInfo.type, memberInit)
-                                elif isinstance(memberInit, SingleInitializer):
-                                    expr = self.parseTACExpression(memberInit.init, insts).convert()
-                                    self.addDebugInformation(blockItem, insts)
-
-                                    # I make use of the makeAssignment function so that I don't repeat the bitfield 
-                                    # code to instantiate bitfield values.
-                                    dest: TACExpressionResult
-                                    if memberInfo.isBitfield:
-                                        assert memberInfo.bitfieldUnitType is not None
-                                        dest = TACBitfieldObject(leftVariable, memberOffset, 
-                                                                 memberInfo.bitWidth, memberInfo.bitOffset, 
-                                                                 memberInfo.type, memberInfo.bitfieldUnitType, 
-                                                                 expr.valueType, insts)
-                                    else:
-                                        dest = TACSubObject(leftVariable, memberOffset, expr.valueType, insts)
-
-                                    self.makeAssignment(expr.valueType, dest, expr, insts)
-                                else:
-                                    raise ValueError()
-                        else:
-                            raise ValueError()
-
-                    if isinstance(blockItem.typeId, ArrayDeclaratorType):
-                        declareArray(0, blockItem.typeId, blockItem.initialization)
-                    elif isinstance(blockItem.typeId, BaseDeclaratorType) and blockItem.typeId.baseType.name in ("STRUCT", "UNION"):
-                        declareAggregate(0, blockItem.typeId, blockItem.initialization)
-                    else:
-                        raise ValueError(f"Cannot initialize {blockItem.typeId} with the current initialization")
-    
             case StructDeclaration() | UnionDeclaration() | EnumDeclaration() | FunctionDeclaration() | TypedefDeclaration():
                 # Nothing to generate with struct, union, enum or typedef declarations.
                 # Function declarations can only be defined from an ASTProgram. These declarations 
