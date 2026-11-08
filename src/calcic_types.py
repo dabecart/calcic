@@ -456,10 +456,12 @@ class PointerDeclaratorType(DeclaratorType):
         self.qualifiers = newQualifiers
 
 class ArrayDeclaratorType(DeclaratorType):
-    def __init__(self, declarator: DeclaratorType, size: int, undimensioned: bool) -> None:
+    def __init__(self, declarator: DeclaratorType, size: int, undimensioned: bool, 
+                 qualifiers: TypeQualifier = TypeQualifier()) -> None:
         self.declarator = declarator
         self.size = size
         self.undimensioned = undimensioned
+        self.qualifiers = qualifiers
         super().__init__()
 
     def decay(self) -> DeclaratorType:
@@ -491,7 +493,7 @@ class ArrayDeclaratorType(DeclaratorType):
                self.undimensioned == other.undimensioned
 
     def getTypeQualifiers(self) -> TypeQualifier:
-        return self.declarator.getTypeQualifiers()
+        return self.qualifiers
     
     def setTypeQualifiers(self, newQualifiers: TypeQualifier):
         self.qualifiers = newQualifiers

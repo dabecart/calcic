@@ -147,6 +147,8 @@ class Context:
     switchTracking: list[SwitchContext]         = field(default_factory=list)
     labelTracking: dict[str, LabelContext]      = field(default_factory=dict)
     insideAFunction: bool                       = False
+    # Used to know where the array qualifiers for function arguments are valid to parse.
+    parsingFunctionDeclArguments: bool          = False
     # The function the context is currently in.
     insideFunctionName: str                     = ""
     # True when a static variable is being initialized.
@@ -673,7 +675,23 @@ class AST(ABC):
         tok = self.peek()
 
         if tok.id == "(" and self.isTokenACastIdentifierType(self.peek(1)):
-            return self.createChild(Cast)
+            self.expect("(")
+            _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+            if self.peek().id != ")":
+                declarator = self.createChild(TopAbstractDeclarator)
+                info: DeclaratorInformation = declarator.process(declType)
+                typeId = info.type
+            else:
+                typeId = declType
+            self.expect(")")
+
+            if self.peek().id == "{":
+                # This is a compound literal. After the type in the parenthesis, an initializer list follows.
+                pass
+            else:
+                # This is a cast. After the type in the parenthesis, get the inner expression.
+                inner: Exp = self._parseFactor().preconvertExpression()
+                return self.createChild(Cast, typeId, inner, False)
         
         return self._parseUnaryExpression()
 
@@ -1364,6 +1382,7 @@ class FunctionParameterDeclarator(DeclaratorAST):
             self.isEllipsis = True
         else:
             self.isEllipsis = False
+            self.context.parsingFunctionDeclArguments = True
             _, self.declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
 
             self.decl: TopDeclarator|TopAbstractDeclarator|None = None
@@ -1381,6 +1400,8 @@ class FunctionParameterDeclarator(DeclaratorAST):
                     self.isAnonymous = False
                 except:
                     self.decl = self.createChild(TopAbstractDeclarator)
+
+            self.context.parsingFunctionDeclArguments = False
 
     def process(self, baseType: DeclaratorType) -> DeclaratorInformation:
         if self.decl is None:
@@ -1438,25 +1459,54 @@ class DirectDeclarator(DeclaratorAST):
             self.arrayDimensions: list[int] = []
             self.arrayWithoutDimension: bool = False
 
-            if self.peek(1).id == "]":
-                # Dimension of the array is to be given by the initializer. If not given, this type is incomplete, but
-                # it can decay to a pointer.
-                self.expect("[")
-                self.expect("]")
-                self.arrayWithoutDimension = True
+            self.pointerQualifier = TypeQualifier()
+            self.hasStaticQualifier: bool = False
+
+            subscriptCount: int = 0
 
             while self.peek().id == "[":
                 self.pop()
 
-                if self.peek().id == "]":
-                    self.raiseError("Expected a dimension for the array")
+                while (qualifier := self.peek().id) in ("static", *Token.TYPE_QUALIFIER):
+                    # Qualifiers used before the expression of an array. Only used for the declaration of function 
+                    # arguments.
+                    self.pop()
+                    
+                    if not self.context.parsingFunctionDeclArguments or subscriptCount > 0:
+                        self.raiseError(f"Cannot use {qualifier} outside a function declaration argument")
 
+                    if qualifier == "const":
+                        self.pointerQualifier.const = True
+                    elif qualifier == "volatile":
+                        self.pointerQualifier.volatile = True
+                    elif qualifier == "static":
+                        self.hasStaticQualifier = True
+                    else:
+                        raise ValueError()
+
+                if self.peek().id == "]":
+                    if subscriptCount == 0:
+                        if self.hasStaticQualifier:
+                            # The static qualifier expects a size expression.
+                            self.raiseError("An static array argument needs a fixed size")
+
+                        # Dimension of the array is to be given by the initializer. If not given, this type is incomplete, but
+                        # it can decay to a pointer.
+                        self.pop()
+                        self.arrayWithoutDimension = True
+                        subscriptCount += 1
+                        continue
+
+                    else:
+                        self.raiseError("Expected a dimension for the array")
+                
                 arrayDim = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType(), strict=True)[0]
                 dim = int(arrayDim.constValue)
                 if dim <= 0:
                     self.raiseError("Array dimension must be greater than zero")
                 
                 self.expect("]")
+                subscriptCount += 1
 
                 self.arrayDimensions.insert(0, dim)
 
@@ -1483,6 +1533,9 @@ class DirectDeclarator(DeclaratorAST):
 
             if self.arrayWithoutDimension:
                 arrayDecl = ArrayDeclaratorType(arrayDecl, 0, undimensioned=True)
+
+            arrayDecl.setTypeQualifiers(self.pointerQualifier)
+            # TODO: Use the static qualifier to give hint of the size of the array.
 
             return self.simple.process(arrayDecl)
 
@@ -1603,18 +1656,46 @@ class DirectAbstractDeclarator(DeclaratorAST):
             self.arrayDimensions: list[int] = []
             self.arrayWithoutDimension: bool = False
 
-            if self.peek(1).id == "]":
-                # Dimension of the array is to be given by the initializer. If not given, this type is incomplete, but
-                # it can decay to a pointer.
-                self.expect("[")
-                self.expect("]")
-                self.arrayWithoutDimension = True
+            self.pointerQualifier = TypeQualifier()
+            self.hasStaticQualifier: bool = False
+
+            subscriptCount: int = 0
 
             while self.peek().id == "[":
                 self.pop()
 
+                while (qualifier := self.peek().id) in ("static", *Token.TYPE_QUALIFIER):
+                    # Qualifiers used before the expression of an array. Only used for the declaration of function 
+                    # arguments.
+                    self.pop()
+                    
+                    if not self.context.parsingFunctionDeclArguments or subscriptCount > 0:
+                        self.raiseError(f"Cannot use {qualifier} outside a function declaration argument")
+
+                    if qualifier == "const":
+                        self.pointerQualifier.const = True
+                    elif qualifier == "volatile":
+                        self.pointerQualifier.volatile = True
+                    elif qualifier == "static":
+                        self.hasStaticQualifier = True
+                    else:
+                        raise ValueError()
+
                 if self.peek().id == "]":
-                    self.raiseError("Expected a dimension for the array")
+                    if subscriptCount == 0:
+                        if self.hasStaticQualifier:
+                            # The static qualifier expects a size expression.
+                            self.raiseError("An static array argument needs a fixed size")
+
+                        # Dimension of the array is to be given by the initializer. If not given, this type is incomplete, but
+                        # it can decay to a pointer.
+                        self.pop()
+                        self.arrayWithoutDimension = True
+                        subscriptCount += 1
+                        continue
+
+                    else:
+                        self.raiseError("Expected a dimension for the array")
 
                 arrayDim = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType(), strict=True)[0]
                 dim = int(arrayDim.constValue)
@@ -1622,6 +1703,7 @@ class DirectAbstractDeclarator(DeclaratorAST):
                     self.raiseError("Array dimension must be greater than zero")
                 
                 self.expect("]")
+                subscriptCount += 1
 
                 self.arrayDimensions.insert(0, dim)
 
@@ -1648,6 +1730,9 @@ class DirectAbstractDeclarator(DeclaratorAST):
 
             if self.arrayWithoutDimension:
                 arrayDecl = ArrayDeclaratorType(arrayDecl, 0, undimensioned=True)
+
+            arrayDecl.setTypeQualifiers(self.pointerQualifier)
+            # TODO: Use the static qualifier to give hint of the size of the array.
 
             return self.simple.process(arrayDecl)
 
@@ -2286,14 +2371,25 @@ class FunctionDeclaration(Declaration):
         return ret
 
 class VariableDeclaration(Declaration):
+    ANONYMOUS_VAR_COUNT: ClassVar[int] = 0
+
+    @classmethod
+    def createAnonymousVariableName(cls) -> str:
+        mangledName= f"anon.{VariableDeclaration.ANONYMOUS_VAR_COUNT}"
+        VariableDeclaration.ANONYMOUS_VAR_COUNT += 1
+        return mangledName
+
     def parse(self, *args):
+        self.storageClass: StorageClass | None
+        info: DeclaratorInformation
+
         if len(args) > 0:
-            self.storageClass: StorageClass | None = args[0]
-            info: DeclaratorInformation = args[1]
+            self.storageClass = args[0]
+            info = args[1]
         else:
             self.storageClass, declType, _ = self.getStorageClassAndDeclaratorType()
             declarator = self.createChild(TopDeclarator)
-            info: DeclaratorInformation = declarator.process(declType)
+            info = declarator.process(declType)
 
         if isinstance(info.type, FunctionDeclaratorType):
             self.raiseError("Expected a variable declaration")
@@ -2316,29 +2412,30 @@ class VariableDeclaration(Declaration):
             if idCtx.identifierType != IdentifierType.VARIABLE and idCtx.alreadyDeclared:
                self.raiseError(f"{self.originalIdentifier} was already defined in this scope")
 
-            ctxType = self.context.variablesMap[idCtx.mangledName].idType
-            typesMatch = ctxType == self.typeId
-            # Undimensioned arrays can be one fully dimensioned and the other not and still they'd refer
-            # to the same variable, so long as its inner type match.
-            undimensionedMatch = isinstance(ctxType, ArrayDeclaratorType) and \
-                                 isinstance(self.typeId, ArrayDeclaratorType) and \
-                                 (ctxType.undimensioned or self.typeId.undimensioned) and \
-                                 ctxType.declarator == self.typeId.declarator
+            if idCtx.alreadyDeclared:
+                ctxType = self.context.variablesMap[idCtx.mangledName].idType
+                typesMatch = ctxType == self.typeId
+                # Undimensioned arrays can be one fully dimensioned and the other not and still they'd refer
+                # to the same variable, so long as its inner type match.
+                undimensionedMatch = isinstance(ctxType, ArrayDeclaratorType) and \
+                                    isinstance(self.typeId, ArrayDeclaratorType) and \
+                                    (ctxType.undimensioned or self.typeId.undimensioned) and \
+                                    ctxType.declarator == self.typeId.declarator
 
-            if idCtx.alreadyDeclared and not(typesMatch or undimensionedMatch):
-                self.raiseError(f"{self.originalIdentifier} already defined as {ctxType}, not {self.typeId}")
+                if not(typesMatch or undimensionedMatch):
+                    self.raiseError(f"{self.originalIdentifier} already defined as {ctxType}, not {self.typeId}")
 
-            if undimensionedMatch:
-                assert isinstance(ctxType, ArrayDeclaratorType)
-                assert isinstance(self.typeId, ArrayDeclaratorType)
-                
-                if not ctxType.undimensioned:
-                    # We can complete the current type if it's undimensioned.
-                    self.typeId = ctxType
-                elif not self.typeId.undimensioned:
-                    # This variable is dimensioned and it's the previous which is not yet dimensioned. Update it.
-                    ctxType.setDimension(self.typeId.size)
-                    self.context.variablesMap[idCtx.mangledName].idType = ctxType
+                if undimensionedMatch:
+                    assert isinstance(ctxType, ArrayDeclaratorType)
+                    assert isinstance(self.typeId, ArrayDeclaratorType)
+                    
+                    if not ctxType.undimensioned:
+                        # We can complete the current type if it's undimensioned.
+                        self.typeId = ctxType
+                    elif not self.typeId.undimensioned:
+                        # This variable is dimensioned and it's the previous which is not yet dimensioned. Update it.
+                        ctxType.setDimension(self.typeId.size)
+                        self.context.variablesMap[idCtx.mangledName].idType = ctxType
 
         if self.context.insideAFunction:
             # This declaration is a Block Scope Variable Declaration.
@@ -2389,13 +2486,13 @@ class VariableDeclaration(Declaration):
 
             elif self.storageClass == StorageClass.STATIC:
                 if self.peek().id == "=":
-                    self.pop()
+                    self.expect("=")
                     self.context.initializingStaticVariable = True
                     self.initialization = self.parseConstantFromType(self.typeId)
                     self.context.initializingStaticVariable = False
                 else:
                     if undimensionedArray:
-                        self.raiseError("Incompleted type, cannot initialize with zeros")
+                        self.raiseError("Incomplete type, cannot initialize with zeros")
 
                     self.initialization = [self.createChild(ZeroPaddingInitializer, self.typeId, self.typeId.getByteSize())]
 
@@ -2424,16 +2521,19 @@ class VariableDeclaration(Declaration):
                 self.context.addVariableIdentifier(self.originalIdentifier, self.identifier, self.typeId)
 
                 if self.peek().id == "=":
-                    self.pop()
+                    self.expect("=")
                     self.initialization = self.createChild(Initializer, self.typeId)
                 else:
-                    # Initialization is already []
+                    if undimensionedArray:
+                        self.raiseError("Incomplete type not allowed")
+
+                    # Initialization is already an empty list.
                     pass
 
         else:
             # This is a File Scope Variable Declaration.
             if self.peek().id == "=":
-                self.pop()
+                self.expect("=")
                 self.context.initializingStaticVariable = True
                 self.initialization = self.parseConstantFromType(self.typeId)
                 self.context.initializingStaticVariable = False
@@ -2451,8 +2551,6 @@ class VariableDeclaration(Declaration):
                 varCtx: StaticVariableContext = self.context.staticVariablesMap[self.originalIdentifier]
 
                 self.identifier = varCtx.mangledName
-                if varCtx.idType != self.typeId:
-                    self.raiseError(f"{self.identifier} already defined as {varCtx.idType}")
 
                 if self.storageClass == StorageClass.EXTERN:
                     self.isGlobal = varCtx.isGlobal
@@ -4913,31 +5011,50 @@ class CompoundInitializer(Initializer):
 
         if isinstance(expectedType, ArrayDeclaratorType):
             initDict: dict[int, Initializer] = {}
-            currentIndex = 0
 
             # Arrays of character type can be initialized directly with a string literal without braces.
-            if self.peek().id == "string":
-                if not isinstance(expectedType.declarator, BaseDeclaratorType) or \
-                   not expectedType.declarator.baseType.isCharacter():
-                    self.raiseError("Cannot initialize a non char array with a string")
+            singleString: bool = self.peek().id == "string"
+            # A { string } works also as a simple string.
+            bracketedString: bool = self.peek().id == "{"
+            stringIndex: int = 1
+            while self.peek(stringIndex).id == "string":
+                stringIndex += 1
+            bracketedString = bracketedString and (stringIndex > 1) and (self.peek(stringIndex).id == "}")
+            # True if it's a char array.
+            canUseSingleString = isinstance(expectedType.declarator, BaseDeclaratorType) and \
+                                 expectedType.declarator.baseType.isCharacter()
+
+            if canUseSingleString and (singleString or bracketedString):
+                if bracketedString:
+                    self.expect("{")
 
                 stringAST = self.createChild(String)
 
-                for i, ch in enumerate(stringAST.value):
-                    targetIdx = currentIndex + i
-                    if targetIdx >= expectedType.size and not expectedType.undimensioned:
+                if bracketedString:
+                    self.expect("}")
+
+                for index, ch in enumerate(stringAST.value):
+                    if index >= expectedType.size and not expectedType.undimensioned:
                         self.raiseError(f"String initializer overflows array of size {expectedType.size}")
 
                     single = SingleInitializer([], self.context, None, TypeSpecifier.CHAR.toBaseType(),   
                                                CharConstant([], self.context, None, str(ord(ch))))
-                    initDict[targetIdx] = single
-                
-                currentIndex += len(stringAST.value)
+                    initDict[index] = single
+
+                if expectedType.undimensioned:
+                    # If the type is undimensioned, add the null terminator.
+                    initDict[len(stringAST.value)] = CompoundInitializer.createZeroInitializer(expectedType.declarator, 
+                                                                                               self.context)
+
             else:
+                if singleString:
+                    self.raiseError(f"Cannot initialize {expectedType} with a string")
+
                 self.expect("{")
                 disCommaExp = self.context.disableCommaExpressions
                 self.context.disableCommaExpressions = True
 
+                currentIndex: int = 0
                 while True:
                     # Check for array designator: [ constant-expression ]
                     if self.peek().id == "[":
@@ -4980,7 +5097,7 @@ class CompoundInitializer(Initializer):
                 # The number of initializers is given by the size of the array.
                 initializerLen = expectedType.size
 
-            # Pad uninitialized slots with zeros
+            # Pad uninitialized slots with zeros.
             for i in range(initializerLen):
                 toAppend: Initializer|None = initDict.get(i, None)
                 if toAppend is None:
@@ -4992,7 +5109,7 @@ class CompoundInitializer(Initializer):
             members = expectedType.baseType.getMembers()
             numMembers = len(members)
             initList: list[Initializer | None] = [None] * numMembers
-            currentIndex = 0
+            currentIndex: int = 0
 
             self.expect("{")
             disCommaExp = self.context.disableCommaExpressions
@@ -5038,7 +5155,7 @@ class CompoundInitializer(Initializer):
             self.expect("}")
             self.context.disableCommaExpressions = disCommaExp
 
-            # Pad uninitialized members with zeros
+            # Pad uninitialized members with zeros.
             for i, member in enumerate(members):
                 toAppend: Initializer|None = initList[i]
                 if toAppend is None:
@@ -5052,7 +5169,7 @@ class CompoundInitializer(Initializer):
             disCommaExp = self.context.disableCommaExpressions
             self.context.disableCommaExpressions = True
 
-            selectedMemberIdx = 0
+            selectedMemberIdx: int = 0
             if self.peek().id == ".":
                 self.pop()
                 memberName = self.expect("identifier").value
