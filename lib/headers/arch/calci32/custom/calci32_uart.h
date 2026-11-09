@@ -1,5 +1,5 @@
 /***************************************************************************************************
- * <uart.h>
+ * <calci32_uart.h>
  * 
  * Function and definitions used on UART communications in the 'calci32' architecture.
  * 

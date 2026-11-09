@@ -2836,9 +2836,13 @@ class StructDeclaration(Declaration):
                         decl.bitOffset = bitPos - decl.offset * 8
                         bitPos += decl.bitWidth
 
-                        # Remember the storage unit type at this unit offset (keep the widest one).
+                        # Remember the storage unit type at this unit offset (keep the widest one 
+                        # and least restrictive).
                         prev = self.unitTypesByOffset.get(decl.offset)
-                        if prev is None or prev.getByteSize() < typeSize:
+                        if prev is None or \
+                           typeSize > (prevSize := prev.getByteSize()) or \
+                           ((typeSize == prevSize) and not decl.typeId.isSigned()) \
+                        :
                             self.unitTypesByOffset[decl.offset] = decl.typeId
 
                         # Named bitfields contribute to the struct's alignment (unnamed ones don't).
@@ -3138,7 +3142,7 @@ class EnumDeclaration(Declaration):
         if len(self.members) > 0:
             ret  = f'{pad}Enum({self.typeId} = {{\n'
             for member in self.members:
-                ret += f'{pad}  - {member.name} = {member.value}\n'
+                ret += f'{pad}  - {member.name} => {member.value}'
             ret += f'{pad}}}\n'
         else:
             ret =f'{pad}Enum({self.typeId})\n'
@@ -3147,7 +3151,7 @@ class EnumDeclaration(Declaration):
 class TypedefDeclaration(Declaration):
     def parse(self, *args):
         self.expect("typedef")
-        _, declType, _ = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
+        _, declType, self.typeDecl = self.getStorageClassAndDeclaratorType(expectsStorageClass=False)
         declarator = self.createChild(TopDeclarator)
         info: DeclaratorInformation = declarator.process(declType)
 
@@ -3166,7 +3170,13 @@ class TypedefDeclaration(Declaration):
 
     def print(self, padding: int) -> str:
         pad = " " * padding
-        return f"{pad}Typedef {self.originalIdentifier} ({self.typeId})"
+        if self.typeDecl is None:
+            ret  = f"{pad}Typedef {self.originalIdentifier} ({self.typeId})\n"
+        else:
+            ret  = f"{pad}Typedef {self.originalIdentifier} ({self.typeId}) {{\n"
+            ret += self.typeDecl.print(padding + PADDING_INCREMENT)
+            ret += "}\n"
+        return ret
 
 # A block is a list of BlockItems enclosed by {}.
 class Block(AST):

@@ -73,7 +73,8 @@ def main() -> None:
                            dest="debug")
     argParser.add_argument("-v", "--verbose",
                            help="Prints insightful information.",
-                           action="store_true")
+                           action="count",
+                           default=0)
     argParser.add_argument("-O", "--optimize",
                            help="Enables all optimizations. You can specify the number of iterations of the optimization algorithm.",
                            type=int, 
@@ -194,7 +195,7 @@ def main() -> None:
         """
         try:
             tokens = lexer.lex(preprocessedOutput)
-            if args.verbose:
+            if args.verbose >= 2:
                 print(f"Tokens:\n{tokens}\n")
         except Exception as e:
             os.remove(preprocessedOutput)

@@ -1,22 +1,16 @@
 /***************************************************************************************************
- * uart.c
+ * calci32_uart.c
  * 
  * Function and definitions used on UART communications in the 'calci32' architecture.
  * 
  * This library is part of the calcic compiler, written by @dabecart. 2026.
 ***************************************************************************************************/
 
-#include <arch/calci32/custom/uart.h>
+#include <calci32_uart.h>
 #include <stddef.h>
 
 // External definition found in <uart.h>
 volatile UART_Handler *huart = (volatile UART_Handler*) 0x01000000;
-
-#define UART_CTRL_BAUDRATE_MASK 0x00000007U
-#define UART_CTRL_BAUDRATE_BIT  0U
-
-#define UART_CTRL_ENABLE_MASK   0x00010000U
-#define UART_CTRL_ENABLE_BIT    16U
 
 UART_Baudrate uart_getBaudrate(volatile UART_Handler *huart) {
     if (huart == NULL) {
