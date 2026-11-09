@@ -259,8 +259,6 @@ def main() -> None:
         """
         try:
             tacProgram = TAC.TACProgram(program)
-            if args.verbose:
-                print(f"TAC:\n{tacProgram}")
         except Exception as e:
             print(f"TAC exception:\n{e}", file=sys.stderr)
             if args.verbose:
@@ -295,13 +293,14 @@ def main() -> None:
             tacOptimizer = optimizer.TACOptimizer(optimizationFlags)
             # Modifies the inner instructions of the program.
             tacOptimizer.optimize(tacProgram)
-            if args.verbose:
-                print(f"Optimizer:\n{tacProgram}")
         except Exception as e:
             print(f"Optimizer exception:\n{e}", file=sys.stderr)
             if args.verbose:
                 print(traceback.format_exc(), file=sys.stderr)
             exit(1)
+
+        if args.verbose:
+            print(f"TAC:\n{tacProgram}")
 
         """
         xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

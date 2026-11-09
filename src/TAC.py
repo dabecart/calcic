@@ -1083,7 +1083,10 @@ class TACProgram(TAC):
         # First initialize all static variables.
         for staticVar in self.program.context.staticVariablesMap.values():
             if staticVar.tentative:
-                # Set to zero by default.
+                # Undimensioned arrays are dimensioned as size one arrays (6.9.2.2).
+                if isinstance(staticVar.idType, ArrayDeclaratorType) and staticVar.idType.undimensioned:
+                    staticVar.idType.setDimension(1)
+                # Tentative variables get set to zero by default.
                 topLevelDecl = self.createChild(
                     TACStaticVariable, staticVar.idType, staticVar.mangledName, 
                     staticVar.isGlobal, staticVar.isReadOnly,

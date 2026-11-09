@@ -348,7 +348,7 @@ class DeclaratorType(ABC):
             return CALCIC_ADDRS_LEN
         elif isinstance(self, ArrayDeclaratorType):
             if self.undimensioned:
-                raise ValueError("Cannot calculate size of undimensioned array")
+                raise ValueError(f"Cannot calculate size of undimensioned {self}")
             return self.declarator.getByteSize() * self.size
 
         raise ValueError("Not implemented")
@@ -488,9 +488,14 @@ class ArrayDeclaratorType(DeclaratorType):
     def __eq__(self, other):
         if not isinstance(other, ArrayDeclaratorType):
             return False
-        return self.declarator == other.declarator and \
-               self.size == other.size and \
-               self.undimensioned == other.undimensioned
+        # Sizes are to be compared when both are dimensioned arrays. If one of them is undimensioned, 
+        # then the size does not matter to the comparison.
+        checkSizes = not self.undimensioned and not other.undimensioned
+
+        ret = (self.declarator == other.declarator)
+        if checkSizes:
+               ret = ret and (self.size == other.size)
+        return ret
 
     def getTypeQualifiers(self) -> TypeQualifier:
         return self.qualifiers

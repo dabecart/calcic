@@ -2469,6 +2469,19 @@ class VariableDeclaration(Declaration):
                     if varCtx.idType != self.typeId:
                         self.raiseError(f"{self.originalIdentifier} already defined as {varCtx.idType}, not {self.typeId}")
 
+                    # A previous declaration (file scope or block scope extern) may have left an undimensioned
+                    # array type. Expressions already parsed hold that type object, so it has to be completed
+                    # in place (or reused, if this declaration is the one without dimension).
+                    prevType = varCtx.idType
+                    if isinstance(prevType, ArrayDeclaratorType) and \
+                       isinstance(self.typeId, ArrayDeclaratorType) and \
+                       prevType.declarator == self.typeId.declarator \
+                    :
+                        if prevType.undimensioned and not self.typeId.undimensioned:
+                            prevType.setDimension(self.typeId.size)
+                        elif not prevType.undimensioned and self.typeId.undimensioned:
+                            self.typeId = prevType
+                        
                     self.identifier = varCtx.mangledName
                 else:
                     # By default, take it as an external linkage variable.
@@ -2557,6 +2570,19 @@ class VariableDeclaration(Declaration):
                 varCtx: StaticVariableContext = self.context.staticVariablesMap[self.originalIdentifier]
 
                 self.identifier = varCtx.mangledName
+
+                # A previous declaration (file scope or block scope extern) may have left an undimensioned
+                # array type. Expressions already parsed hold that type object, so it has to be completed
+                # in place (or reused, if this declaration is the one without dimension).
+                prevType = varCtx.idType
+                if isinstance(prevType, ArrayDeclaratorType) and \
+                   isinstance(self.typeId, ArrayDeclaratorType) and \
+                   prevType.declarator == self.typeId.declarator \
+                :
+                    if prevType.undimensioned and not self.typeId.undimensioned:
+                        prevType.setDimension(self.typeId.size)
+                    elif not prevType.undimensioned and self.typeId.undimensioned:
+                        self.typeId = prevType
 
                 if self.storageClass == StorageClass.EXTERN:
                     self.isGlobal = varCtx.isGlobal
