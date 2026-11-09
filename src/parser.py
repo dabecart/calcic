@@ -303,6 +303,24 @@ class Context:
                 else:
                     raise ValueError(f"{label.gotoToken.getPositionString()} Missing declaration of label {label.originalName}")
 
+    @contextmanager
+    def enterDisabledCommaExpressions(self):
+        prev = self.disableCommaExpressions
+        self.disableCommaExpressions = True
+
+        yield
+
+        self.disableCommaExpressions = prev
+
+    @contextmanager
+    def enterEnabledCommaExpressions(self):
+        prev = self.disableCommaExpressions
+        self.disableCommaExpressions = False
+
+        yield
+
+        self.disableCommaExpressions = prev
+
     # Use it to return the most recent struct, union or enum.
     STRUCT_ORDER: int = 0
     UNION_ORDER: int = 0
@@ -656,7 +674,8 @@ class AST(ABC):
                 leftTerm = self.createChild(Binary, op, leftTerm, rightTerm) 
             elif op == BinaryOperator.CONDITIONAL:
                 # Right-associative but funky (is a ternary operator).
-                ifExp = self._parseExpression(0)
+                with self.context.enterEnabledCommaExpressions():
+                    ifExp = self._parseExpression(0)
                 self.expect(":")
                 thenExp = self._parseExpression(opPrecedence)
                 leftTerm = self.createChild(TernaryConditional, leftTerm, ifExp, thenExp)
@@ -845,7 +864,7 @@ class AST(ABC):
                 )
 
             case "identifier":
-                if tok.value in self.context.identifierMap is not None:
+                if tok.value in self.context.identifierMap:
                     # Remove the token.
                     tok = self.pop()
                     
@@ -872,10 +891,8 @@ class AST(ABC):
             case "(":
                 self.expect("(")
 
-                disComma = self.context.disableCommaExpressions
-                self.context.disableCommaExpressions = False
-                ret = self._parseExpression()
-                self.context.disableCommaExpressions = disComma
+                with self.context.enterEnabledCommaExpressions():
+                    ret = self._parseExpression()
                 
                 self.expect(")")
 
@@ -937,12 +954,7 @@ class AST(ABC):
                             # is defined when it has a body.
                             break
                     else:
-                        disCommaExp = self.context.disableCommaExpressions
-                        self.context.disableCommaExpressions = True
-
                         ret.addDeclaration(self.createChild(VariableDeclaration, storageClass, info))
-        
-                        self.context.disableCommaExpressions = disCommaExp
 
                     # Parsing the declaration list.
                     nextToken = self.expect(",", ";")
@@ -1142,15 +1154,24 @@ class AST(ABC):
 
                 def flushActiveByte():
                     nonlocal activeByteOffset, activeByteValue, memoryOffset
-                    if activeByteOffset != -1:
-                        byteConst = self.createChild(UCharConstant, activeByteValue & 0xFF)
-                        ret.append(byteConst)
+                    if activeByteOffset == -1:
+                        return
+
+                    byteVal = activeByteValue & 0xFF
+
+                    if activeByteOffset < memoryOffset:
+                        # This byte was already emitted by a previous member that shares the
+                        # storage unit. No bitfield bit can live there.
+                        assert byteVal == 0, "Bitfield bits overlap an already emitted member"
+                    else:
+                        gap = activeByteOffset - memoryOffset
+                        if gap > 0:
+                            ret.extend([self.createChild(UCharConstant, 0)] * gap)
+                        ret.append(self.createChild(UCharConstant, byteVal))
                         memoryOffset = activeByteOffset + 1
-                        activeByteValue >>= 8
-                        if activeByteValue > 0:
-                            activeByteOffset += 1
-                        else:
-                            activeByteOffset = -1
+
+                    activeByteValue >>= 8
+                    activeByteOffset = activeByteOffset + 1 if activeByteValue > 0 else -1
 
                 for currentMember, memberInit in zip(members, initializer.init):
                     # Flush any active bitfield bytes that precede the current member's offset.
@@ -1217,10 +1238,10 @@ class AST(ABC):
             if baseConstType.name == "UNION":
                 assert isinstance(initializer, CompoundInitializer)
 
-                members = baseConstType.getMembers()
-                ret: list[Constant] = self._initializerToConstants(members[0].type, initializer.init[0], strict)
+                unionInit = initializer.init[0]
+                ret: list[Constant] = self._initializerToConstants(unionInit.typeId, unionInit, strict)
 
-                bytePadding: int = baseConstType.getByteSize() - members[0].type.getByteSize()
+                bytePadding: int = baseConstType.getByteSize() - unionInit.typeId.getByteSize()
                 if bytePadding > 0:
                     padding = self.createChild(ZeroPaddingInitializer, 
                                                 TypeSpecifier.VOID.toBaseType(), bytePadding)
@@ -1503,7 +1524,7 @@ class DirectDeclarator(DeclaratorAST):
 
                     else:
                         self.raiseError("Expected a dimension for the array")
-                
+
                 arrayDim = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType(), strict=True)[0]
                 dim = int(arrayDim.constValue)
                 if dim <= 0:
@@ -2009,12 +2030,7 @@ class ForStatement(Statement):
                     declarator = self.createChild(TopDeclarator)
                     info: DeclaratorInformation = declarator.process(declType)
 
-                    disCommaExp = self.context.disableCommaExpressions
-                    self.context.disableCommaExpressions = True
-
                     self.init.append(self.createChild(VariableDeclaration, None, info))
-
-                    self.context.disableCommaExpressions = disCommaExp
 
                     # Parsing the declaration list.
                     nextToken = self.expect(",", ";")
@@ -2557,7 +2573,12 @@ class VariableDeclaration(Declaration):
                 self.initialization = self.parseConstantFromType(self.typeId)
                 self.context.initializingStaticVariable = False
             else:
-                if self.storageClass == StorageClass.EXTERN:
+                if self.storageClass == StorageClass.STATIC and not self.typeId.isComplete():
+                    # 6.9.2p3: If the declaration of an identifier for an object is a tentative 
+                    # definition and has internal linkage, the declared type shall not be an 
+                    # incomplete type.
+                    self.raiseError("Internal linkage variable requires complete type")
+                elif self.storageClass == StorageClass.EXTERN:
                     # Initialization is already an empty list.
                     pass
                 else:
@@ -2677,7 +2698,8 @@ class MemberDeclaration(AST):
                 if not memType.isInteger():
                     self.raiseError("Invalid type for a bitfield, must be of integer type")
 
-                bitfieldConst = self.parseConstantFromType(TypeSpecifier.ARCH_INT.toBaseType(), strict=True)[0]
+                bitfieldConst = self.parseConstantFromType(TypeSpecifier.INT.toBaseType(), strict=True)[0]
+
                 decl.bitWidth = int(bitfieldConst.constValue)
 
                 if decl.bitWidth < 0:
@@ -3015,10 +3037,7 @@ class EnumMemberDeclaration(AST):
         if self.peek().id == "=":
             self.pop()
 
-            disCommaExp = self.context.disableCommaExpressions
-            self.context.disableCommaExpressions = True
             self.value = self.parseConstantFromType(TypeSpecifier.INT.toBaseType(), True)[0]
-            self.context.disableCommaExpressions = disCommaExp
             
             self.hasSetValue = True
 
@@ -3666,15 +3685,13 @@ class CompoundLiteral(Exp):
         else:
             # Scalars may also be written as (int){ 5 }.
             self.expect("{")
-            disCommaExp = self.context.disableCommaExpressions
-            self.context.disableCommaExpressions = True
 
             self.initialization = self.createChild(SingleInitializer, literalType)
+            
             if self.peek().id == ",":
                 self.pop()
-            self.expect("}")
 
-            self.context.disableCommaExpressions = disCommaExp
+            self.expect("}")
 
         self.context.initializingStaticVariable = prevInitStatic
 
@@ -4016,6 +4033,10 @@ class Unary(Exp):
                 self.raiseError("Cannot bitwise-complement a non-integer number")
 
     def staticEval(self) -> StaticEvalValue:
+        if self.unaryOperator in (UnaryOperator.PRE_INCREMENT, UnaryOperator.PRE_DECREMENT,
+                                UnaryOperator.POST_INCREMENT, UnaryOperator.POST_DECREMENT):
+            self.raiseError("Increment/decrement is not allowed in a constant expression")
+
         innerValue = self.inner.staticEval()
 
         if self.unaryOperator == UnaryOperator.NOT and innerValue.valType == StaticEvalType.POINTER:
@@ -4438,6 +4459,9 @@ class Binary(Exp):
                 self.typeId = commonType
 
     def staticEval(self) -> StaticEvalValue:
+        if self.binaryOperator == BinaryOperator.COMMA:
+            self.raiseError("Comma operator is not allowed in a constant expression")
+
         exp1Eval = self.exp1.staticEval()
         exp2Eval = self.exp2.staticEval()
 
@@ -4560,7 +4584,7 @@ class Assignment(Exp):
         self.typeId = self.exp1.typeId.unqualified()
 
     def staticEval(self) -> StaticEvalValue:
-        raise ValueError()
+        self.raiseError("Assignment is not allowed in a constant expression")
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -4596,10 +4620,8 @@ class TernaryConditional(Exp):
 
     def staticEval(self) -> StaticEvalValue:
         conditionEval = self.condition.staticEval()
-        thenEval = self.thenExp.staticEval()
-        elseEval = self.elseExp.staticEval()
-
-        return thenEval if conditionEval.getIntegerValue(self.condition) else elseEval
+        branch = self.thenExp if conditionEval.getIntegerValue(self.condition) else self.elseExp
+        return branch.staticEval()
 
     def print(self, padding: int) -> str:
         pad = " " * padding
@@ -4644,15 +4666,14 @@ class FunctionCall(Exp):
         funcArgs = funcType.params
 
         self.expect("(")
-        disCommaExp = self.context.disableCommaExpressions
-        self.context.disableCommaExpressions = True
 
         self.argumentList: list[Exp] = []
         
         if self.peek().id != ")":
             argumentIndex: int = 0
             while True:
-                argExp: Exp = self.createChild(Exp).preconvertExpression()
+                with self.context.enterDisabledCommaExpressions():
+                    argExp: Exp = self.createChild(Exp).preconvertExpression()
                 
                 if argumentIndex < len(funcArgs):
                     # See if this argument needs a cast before being passed to the function.
@@ -4685,7 +4706,6 @@ class FunctionCall(Exp):
                     break
 
         self.expect(")")
-        self.context.disableCommaExpressions = disCommaExp
 
         passedArgsLen = len(self.argumentList)
         funcDeclLen = len(funcArgs)
@@ -4737,7 +4757,7 @@ class AddressOf(Exp):
         if inner is None:
             self.inner: Exp = self._parseFactor()
             if not self.inner.isLvalue():
-                self.raiseError(f"Cannot take the address of non-lvalue: {self.inner}")
+                self.raiseError(f"Cannot take the address of a non-lvalue")
             elif self.inner.isBitfield():
                 self.raiseError(f"Cannot take the address of a bitfield")
         else:
@@ -4764,7 +4784,8 @@ class Subscript(Exp):
         self.pointer = inner.preconvertExpression()
 
         self.expect("[")
-        self.index: Exp = self.createChild(Exp).preconvertExpression()
+        with self.context.enterEnabledCommaExpressions():
+            self.index: Exp = self.createChild(Exp).preconvertExpression()
         self.expect("]")
 
         # Switch in case the index is the pointer.
@@ -5002,6 +5023,12 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 """
 
 class Initializer(AST):
+    def __init__(self, tokens: list[Token], 
+                 context: Context | None = None, parentAST: AST | None = None, *args) \
+    :
+        super().__init__(tokens, context, parentAST, *args)
+        self.typeId: DeclaratorType
+
     @abstractmethod
     def parse(self, *args):
         pass
@@ -5047,7 +5074,9 @@ class SingleInitializer(Initializer):
                 self.init = self.createChild(PointerInitializer, expectedType, constantName, 0)
                 self.isStringPointer = True
             else:
-                self.init = self.createChild(Exp).preconvertExpression()
+                # C99 assignment-expression / constant-expression: no top-level comma operator.
+                with self.context.enterDisabledCommaExpressions():
+                    self.init = self.createChild(Exp).preconvertExpression()
                 
                 # Store the original type. Needed for strict initializers.
                 self.precastType = self.init.typeId
@@ -5162,8 +5191,6 @@ class CompoundInitializer(Initializer):
                     self.raiseError(f"Cannot initialize {expectedType} with a string")
 
                 self.expect("{")
-                disCommaExp = self.context.disableCommaExpressions
-                self.context.disableCommaExpressions = True
 
                 currentIndex: int = 0
                 while True:
@@ -5171,7 +5198,9 @@ class CompoundInitializer(Initializer):
                     if self.peek().id == "[":
                         self.pop()
 
-                        indexExp = self.createChild(Exp).preconvertExpression()
+                        with self.context.enterDisabledCommaExpressions():
+                            indexExp = self.createChild(Exp).preconvertExpression()
+
                         evals = indexExp.staticEval()
                         currentIndex = int(evals.value)
                         
@@ -5197,8 +5226,6 @@ class CompoundInitializer(Initializer):
 
                 self.expect("}")
 
-                self.context.disableCommaExpressions = disCommaExp
-
             initializerLen: int
             if expectedType.undimensioned:
                 # Set the dimension of the array.
@@ -5223,8 +5250,6 @@ class CompoundInitializer(Initializer):
             currentIndex: int = 0
 
             self.expect("{")
-            disCommaExp = self.context.disableCommaExpressions
-            self.context.disableCommaExpressions = True
 
             while True:
                 # Check for struct designator: .member
@@ -5251,7 +5276,9 @@ class CompoundInitializer(Initializer):
                     self.raiseError(f"Too many initializers for type {expectedType}")
 
                 targetType = members[currentIndex].type
+
                 itemInit = self.createChild(Initializer, targetType)
+
                 initList[currentIndex] = itemInit
                 currentIndex += 1
 
@@ -5264,7 +5291,6 @@ class CompoundInitializer(Initializer):
                     break
 
             self.expect("}")
-            self.context.disableCommaExpressions = disCommaExp
 
             # Pad uninitialized members with zeros.
             for i, member in enumerate(members):
@@ -5277,8 +5303,6 @@ class CompoundInitializer(Initializer):
             members = expectedType.baseType.getMembers()
 
             self.expect("{")
-            disCommaExp = self.context.disableCommaExpressions
-            self.context.disableCommaExpressions = True
 
             selectedMemberIdx: int = 0
             if self.peek().id == ".":
@@ -5300,6 +5324,7 @@ class CompoundInitializer(Initializer):
                     self.pop()
 
             memberType = members[selectedMemberIdx].type
+
             itemInit = self.createChild(Initializer, memberType)
             self.init.append(itemInit)
 
@@ -5307,7 +5332,6 @@ class CompoundInitializer(Initializer):
                 self.pop()
 
             self.expect("}")
-            self.context.disableCommaExpressions = disCommaExp
 
         else:
             self.raiseError(f"Cannot create {expectedType} with a compound initializer")

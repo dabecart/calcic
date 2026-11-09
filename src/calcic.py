@@ -180,7 +180,7 @@ def main() -> None:
             archHeadersSubolders = [root for root, _, _ in os.walk(str(archHeadersFolder))]
             for p in archHeadersSubolders:
                 preprocessCommand += ["-isystem", str(p)]
-        
+
         preprocessStatus = subprocess.run(preprocessCommand)
         retCode = preprocessStatus.returncode
 

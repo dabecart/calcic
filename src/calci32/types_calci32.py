@@ -135,6 +135,10 @@ class AssemblyType:
             # There may be an incomplete eightbyte at the end.
             if byteCount != 0:
                 memberClass.append(AssemblyClass(currentClass, byteCount))
+
+        if structSize >= 0:
+            assert (s := sum(c.byteSize for c in memberClass)) == structSize, \
+                    f"{structDeclarator} member size {s} does not match the struct's size {structSize}"
         
         return memberClass
     

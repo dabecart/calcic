@@ -212,33 +212,44 @@ class TypeSpecifier:
             member: ParameterInformation = self.members[index]
             memberByteSize: int = member.type.getByteSize()
 
-            addPadding(member.offset - lastOffset)
-
             if isinstance(member.type, BaseDeclaratorType) and member.type.baseType.name == "STRUCT":
+                addPadding(member.offset - lastOffset)
                 ret.extend(member.type.baseType.flattenStruct())
+                lastOffset = member.offset + memberByteSize
+
             elif isinstance(member.type, ArrayDeclaratorType):
+                addPadding(member.offset - lastOffset)
                 arrayBaseType = member.type.getArrayBaseType()
                 totalArrayLength = member.type.getByteSize() // arrayBaseType.getByteSize()
                 ret.extend([arrayBaseType] * totalArrayLength)
+                lastOffset = member.offset + memberByteSize
+
             elif member.isBitfield:
-                # Bitfield members are packed together in "units". Iterate over bitfields shared 
-                # among the same unit (they have the same offset) and add its unit type.
+                # Gather all the bitfields sharing this storage unit (same offset).
                 tempIndex = index + 1
-                while tempIndex < len(self.members):
-                    if member.offset == self.members[tempIndex].offset:
-                        tempIndex += 1
-                    else:
-                        break
+                while tempIndex < len(self.members) and \
+                    self.members[tempIndex].isBitfield and \
+                    self.members[tempIndex].offset == member.offset:
+                    tempIndex += 1
 
+                group = self.members[index:tempIndex]
                 index = tempIndex - 1
-                # Index points to the last member with the same byte offset.
-                unitType = self.members[index].bitfieldUnitType
-                assert unitType is not None
-                ret.append(unitType)
-            else:
-                ret.append(member.type)
 
-            lastOffset = member.offset + memberByteSize
+                lowestBit  = min(m.bitOffset for m in group)
+                highestBit = max(m.bitOffset + m.bitWidth for m in group)
+                firstByte  = member.offset + lowestBit // 8
+                lastByte   = member.offset + (highestBit + 7) // 8   # exclusive
+
+                addPadding(firstByte - lastOffset)
+                memberByteSize = lastByte - firstByte
+
+                ret.extend([TypeSpecifier.UCHAR.toBaseType()] * memberByteSize)
+                lastOffset = lastByte
+                
+            else:
+                addPadding(member.offset - lastOffset)
+                ret.append(member.type)
+                lastOffset = member.offset + memberByteSize
 
             index += 1
 

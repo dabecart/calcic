@@ -21,7 +21,8 @@ class BuiltInFunctionCall(Exp):
 
         self.expect("(")
 
-        self.typeId = self.parseArguments(args)
+        with self.context.enterDisabledCommaExpressions():
+            self.typeId = self.parseArguments(args)
 
         self.expect(")")
 
