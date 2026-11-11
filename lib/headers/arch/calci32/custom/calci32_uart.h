@@ -52,8 +52,8 @@ int uart_isEnabled(volatile UART_Handler *huart);
 int uart_enable(volatile UART_Handler *huart);
 int uart_disable(volatile UART_Handler *huart);
 
-int uart_receive(volatile UART_Handler *huart, char *buf, const size_t len);
-int uart_transmit(volatile UART_Handler *huart, const char *buf, const size_t len);
+int uart_receive(volatile UART_Handler *huart, uint8_t *buf, const size_t len);
+int uart_transmit(volatile UART_Handler *huart, const uint8_t *buf, const size_t len);
 
 // Main UART handler declaration. Use as a parameter for the function above.
 volatile extern UART_Handler *huart;

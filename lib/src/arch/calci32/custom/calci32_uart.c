@@ -55,7 +55,7 @@ int uart_disable(volatile UART_Handler *huart) {
     return 1;
 }
 
-int uart_receive(volatile UART_Handler *huart, char *buf, const size_t len) {
+int uart_receive(volatile UART_Handler *huart, uint8_t *buf, const size_t len) {
     if (huart == NULL || !huart->CTRL.enable) {
         return 0;
     }
@@ -71,7 +71,7 @@ int uart_receive(volatile UART_Handler *huart, char *buf, const size_t len) {
     return len;
 }
 
-int uart_transmit(volatile UART_Handler *huart, const char *buf, const size_t len) {
+int uart_transmit(volatile UART_Handler *huart, const uint8_t *buf, const size_t len) {
     if (huart == NULL || !huart->CTRL.enable) {
         return 0;
     }
