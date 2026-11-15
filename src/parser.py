@@ -3246,7 +3246,7 @@ class Exp(AST):
 
     def isLvalue(self) -> bool:
         return isinstance(self, (Variable, Dereference, Subscript, String, Arrow, CompoundLiteral)) or \
-            (isinstance(self, Dot) and self.getFirstDotOperand().isLvalue())
+               (isinstance(self, Dot) and self.getFirstDotOperand().isLvalue())
 
     def isBitfield(self) -> bool:
         return isinstance(self, (Dot, Arrow)) and self.containsBitfield()

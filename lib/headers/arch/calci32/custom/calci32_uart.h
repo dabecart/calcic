@@ -29,13 +29,13 @@ typedef struct UART_RegCTRL {
     UART_Baudrate   baudrate    : 3;
     uint32_t                    : 13;
     uint32_t        enable      : 1;
-    uint32_t                    : 15;
+    uint32_t                    : 0;
 } UART_RegCTRL;
 
 typedef struct UART_RegSTATUS {
     uint32_t        busy        : 1;
     uint32_t        rxReady     : 1;
-    uint32_t                    : 30;
+    uint32_t                    : 0;
 } UART_RegSTATUS;
 
 typedef struct UART_Handler {
@@ -55,7 +55,15 @@ int uart_disable(volatile UART_Handler *huart);
 int uart_receive(volatile UART_Handler *huart, uint8_t *buf, const size_t len);
 int uart_transmit(volatile UART_Handler *huart, const uint8_t *buf, const size_t len);
 
-// Main UART handler declaration. Use as a parameter for the function above.
-volatile extern UART_Handler *huart;
+int uart_enableIRQ(volatile UART_Handler *huart);
+int uart_disableIRQ(volatile UART_Handler *huart);
+int uart_receiveIRQ(volatile UART_Handler *huart, uint8_t *buf, const size_t len);
+int uart_transmitIRQ(volatile UART_Handler *huart, const uint8_t *buf, const size_t len);
+
+// Main UART handler declaration. Use as a parameter for the functions above.
+volatile extern UART_Handler *huart0;
+
+extern void (*UART_IRQ_RxFinishedCallback)(volatile UART_Handler *huart);
+extern void (*UART_IRQ_TxFinishedCallback)(volatile UART_Handler *huart);
 
 #endif // _CALCIC_CALCI32_UART_h

@@ -15,9 +15,6 @@ import struct
 import math
 from typing import TypeVar
 
-# Set from the global context inside calcic.py.
-CALCIC_ADDRS_LEN:   int = 8
-
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TYPES
@@ -356,7 +353,7 @@ class DeclaratorType(ABC):
         if isinstance(self, BaseDeclaratorType):
             return self.baseType.getByteSize()
         elif isinstance(self, PointerDeclaratorType):
-            return CALCIC_ADDRS_LEN
+            return TypeSpecifier.ARCH_UINT.getByteSize()
         elif isinstance(self, ArrayDeclaratorType):
             if self.undimensioned:
                 raise ValueError(f"Cannot calculate size of undimensioned {self}")
@@ -368,7 +365,7 @@ class DeclaratorType(ABC):
         if isinstance(self, BaseDeclaratorType):
             return self.baseType.getAlignment()
         elif isinstance(self, PointerDeclaratorType):
-            return CALCIC_ADDRS_LEN
+            return TypeSpecifier.ARCH_UINT.getAlignment()
         elif isinstance(self, ArrayDeclaratorType):
             # ABI says that for arrays bigger or equal to 16 bytes, the alignment is 16. 
             # return 16 if self.getByteSize() >= 16 else self.declarator.getAlignment()
@@ -827,12 +824,7 @@ class StaticEvaluation:
             inputBaseType = tinput.baseType
         elif isinstance(tinput, PointerDeclaratorType) and int(v1) == 0:
             # This is a null pointer, which can be constant folded.
-            if CALCIC_ADDRS_LEN == 8:
-                inputBaseType = TypeSpecifier.ULONG
-            elif CALCIC_ADDRS_LEN == 4:
-                inputBaseType = TypeSpecifier.UINT
-            else:
-                raise ValueError()
+            inputBaseType = TypeSpecifier.ARCH_UINT
         else:
             raise ValueError(f"Invalid input declarator {tinput} in static evaluation")
         
