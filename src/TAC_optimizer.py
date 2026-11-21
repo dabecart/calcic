@@ -900,9 +900,6 @@ class ControlFlowGraph:
     def _calculateLiveVariablesFromNode(self, node: ControlFlowNode) -> set[TACValue]:
         successorList = [self._getNodeByID(id) for id in list(node.successors)]
         
-        if len(successorList) == 0:
-            return set()
-        
         # All variables which are alive at the start of the successors must be alive at the end of 
         # the parent node. 
         liveVars: set[TACValue] = set()

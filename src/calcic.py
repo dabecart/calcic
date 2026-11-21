@@ -316,7 +316,10 @@ def main() -> None:
                     assemblyProgram = assembler_calci32.AssemblerProgram(tacProgram)
                 case _:
                     raise ValueError("Invalid architecture")
-                
+
+            if args.verbose >= 2:
+                print(f"Assembly stage:\n{assemblyProgram.print()}")
+
         except Exception as e:
             print(f"Assembler exception:\n{e}", file=sys.stderr)
             if args.verbose:

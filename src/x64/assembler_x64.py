@@ -22,9 +22,16 @@ from src.x64.types_x64 import *
 
 AssemblyT = TypeVar("AssemblyT", bound="AssemblyAST")
 
+@dataclass
+class AssemblyContext:
+    pass
+
 class AssemblyAST(ABC):
-    def __init__(self, parentAST: AssemblyAST|None = None) -> None:
+    def __init__(self, 
+                 asmbContext: AssemblyContext|None = None, 
+                 parentAST: AssemblyAST|None = None) -> None:
         super().__init__()
+        self.asmbContext = asmbContext if asmbContext is not None else AssemblyContext()
         # Assembly AST containing this Assembly AST node.
         self.parent = parentAST
 
@@ -193,9 +200,11 @@ class AssemblyAST(ABC):
         return instList
 
 class AssemblerProgram(AssemblyAST):
-    def __init__(self, program: TACProgram, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, program: TACProgram,
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.program = program
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
         self.secondPass()
         self.thirdPass()
 
@@ -258,14 +267,16 @@ class AssemblerProgram(AssemblyAST):
         return ret
 
 class AssemblerStaticVariable(AssemblyAST):
-    def __init__(self, assemblyType: AssemblyType, isGlobal: bool, 
+    def __init__(self, 
+                 assemblyType: AssemblyType, isGlobal: bool, 
                  identifier: str, initialization: list[Constant],
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.assemblyType = assemblyType
         self.isGlobal = isGlobal
         self.identifier = identifier
         self.initialization = initialization
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
 
     def firstPass(self):
         pass
@@ -386,20 +397,24 @@ class AssemblerStaticConstant(AssemblyAST):
         return ret
 
     # "initialization" is a list of (data section name, value)
-    def __init__(self, valueType: DeclaratorType, identifier: str, isGlobal: bool, 
+    def __init__(self, 
+                 valueType: DeclaratorType, identifier: str, isGlobal: bool, 
                  initialization: list[tuple[str, str]], 
-                 alignment: int, parentAST: AssemblyAST | None = None) -> None:
+                 alignment: int,
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.valueType = valueType
         self.identifier = identifier
         self.isGlobal = isGlobal
         self.initialization = initialization
         self.alignment = alignment
     
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
 
     def copy(self) -> AssemblerStaticConstant:
         return AssemblerStaticConstant(
-            self.valueType, self.identifier, self.isGlobal, self.initialization, self.alignment, self.parent)
+            self.valueType, self.identifier, self.isGlobal, self.initialization, self.alignment, 
+            self.asmbContext, self.parent)
 
     def firstPass(self):
         pass
@@ -471,17 +486,27 @@ class AssemblerStaticConstant(AssemblyAST):
         return f"StaticConstant({self.initialization})\n"
 
 class AssemblerFunction(AssemblyAST):
-    def __init__(self, function: TACFunction, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, function: TACFunction, 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.function = function
 
         self.identifier: str = self.function.identifier
         self.instructions: list[AssemblerInstruction] = []
-        super().__init__(parentAST)
+        self.calleeSavedRegs: list[REG] = []
+        super().__init__(asmbContext, parentAST)
+        # super() calls the first pass.
+
+        # Substitute Pseudo values (which would be stored in memory) for Registers where possible.
+        # regAlloc = RegisterAllocator(self.instructions)
+        # self.instructions = regAlloc.allocateRegisters()
+        # self.calleeSavedRegs = regAlloc.getCalleeSavedRegisters()
+
         self.secondPass()
         self.thirdPass()
 
     def createInst(self, assemblerType: Type[AssemblerInstruction], *args) -> AssemblerInstruction:
-        ret = assemblerType(*args, parentAST=self)
+        ret = assemblerType(*args, asmbContext=self.asmbContext, parentAST=self)
         self.instructions.append(ret)
 
         # Set the parent of all the args to be this new instruction.
@@ -661,6 +686,7 @@ class AssemblerFunction(AssemblyAST):
         # Classify them.
         self.intRegArgs, self.doubleRegArgs, self.stackInputArgs = self.classifyArguments(tacArgs, 
                                                                                           self.returnInStack)
+        
 
         if not self.function.funDecl.attributes.crude:
             if self.returnInStack:
@@ -759,8 +785,8 @@ class AssemblerFunction(AssemblyAST):
 
                 case TACReturn():
                     if inst.result.valueType != TypeSpecifier.VOID.toBaseType():
-                        self.intRegArgs, self.doubleRegArgs, self.returnInStack = self.classifyReturnValue(inst.result)
-                        if self.returnInStack:
+                        intRegRet, doubleRegRet, retInStack = self.classifyReturnValue(inst.result)
+                        if retInStack:
                             # Get the address of where the return value should be stored.
                             self.createInst(MOV, 
                                             AssemblyType.QUADWORD,
@@ -775,7 +801,7 @@ class AssemblerFunction(AssemblyAST):
                             INT_RETURN_REGS = [REG.AX, REG.DX]
                             DOUBLE_RETURN_REGS = [REG.XMM0, REG.XMM1]
 
-                            for (value, movAsmbType), reg in zip(self.intRegArgs, INT_RETURN_REGS):
+                            for (value, movAsmbType), reg in zip(intRegRet, INT_RETURN_REGS):
                                 if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                                     self.instructions.extend(self.copyBytesToRegister(value, reg, movAsmbType.size))
                                 else:
@@ -784,7 +810,7 @@ class AssemblerFunction(AssemblyAST):
                                                     value, 
                                                     Register(value.assemblyType, reg))
 
-                            for (value, movAsmbType), reg in zip(self.doubleRegArgs, DOUBLE_RETURN_REGS):
+                            for (value, movAsmbType), reg in zip(doubleRegRet, DOUBLE_RETURN_REGS):
                                 self.createInst(MOV, 
                                                 movAsmbType, 
                                                 value, 
@@ -1089,13 +1115,13 @@ class AssemblerFunction(AssemblyAST):
                 case TACFunctionCall() | TACIndirectFunctionCall():
                     returnIntRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
                     returnDoubleRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
-                    self.returnInStack: bool = False
+                    returnInStack: bool = False
 
                     # Classify the return value.
                     if inst.returnType != TypeSpecifier.VOID.toBaseType():
-                        returnIntRegs, returnDoubleRegs, self.returnInStack = self.classifyReturnValue(inst.result)
+                        returnIntRegs, returnDoubleRegs, returnInStack = self.classifyReturnValue(inst.result)
 
-                    if self.returnInStack:
+                    if returnInStack:
                         # When the value is returned in the stack, the return value's space is 
                         # reserved on the caller. It's address is stored in DI.
                         retAsmbVal = self.fromTACValue(inst.result)
@@ -1103,7 +1129,7 @@ class AssemblerFunction(AssemblyAST):
                         self.createInst(LEA, retAsmbVal, Register(AssemblyType.QUADWORD, REG.DI))
 
                     # Split between arguments stored in registers and arguments stored in the stack.
-                    intRegisterArgs, doubleRegisterArgs, stackArgs = self.classifyArguments(inst.arguments, self.returnInStack)
+                    intRegisterArgs, doubleRegisterArgs, stackArgs = self.classifyArguments(inst.arguments, returnInStack)
 
                     # The stack needs to be padded so that the function arguments start from a 
                     # multiple of 16. Each cell in the stack is 8 bytes long.
@@ -1125,7 +1151,7 @@ class AssemblerFunction(AssemblyAST):
                     # reversed order).
                     # Skip DI if the return value is saved in the stack, it contains the address of 
                     # the return value.
-                    for (value, movAsmbType), reg in zip(intRegisterArgs, INT_REG_ORDER[(1 if self.returnInStack else 0):]):
+                    for (value, movAsmbType), reg in zip(intRegisterArgs, INT_REG_ORDER[(1 if returnInStack else 0):]):
                         if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                             # There may be part of a struct/union returned in a register whose byte 
                             # size is not standard, i.e. 3, 5, 6 or 7 bytes.
@@ -1182,9 +1208,9 @@ class AssemblerFunction(AssemblyAST):
                                         AssemblyType.QUADWORD,
                                         funcAddrs, 
                                         Register(funcAddrs.assemblyType, REG.AX))
-                        self.createInst(CALL, Register(funcAddrs.assemblyType, REG.AX))
+                        self.createInst(CALL, Register(funcAddrs.assemblyType, REG.AX), inst.arguments)
                     else:
-                        self.createInst(CALL, inst.identifier)
+                        self.createInst(CALL, inst.identifier, inst.arguments)
 
                     # Readjust the stack pointer.
                     deallocBytes = 8 * len(stackArgs) + stackPadding
@@ -1197,7 +1223,7 @@ class AssemblerFunction(AssemblyAST):
                     
                     # Retrieve the return value if function is not void and the return value is not 
                     # stored in the stack.
-                    if inst.returnType != TypeSpecifier.VOID.toBaseType() and not self.returnInStack:
+                    if inst.returnType != TypeSpecifier.VOID.toBaseType() and not returnInStack:
                         INT_RETURN_REGS = [REG.AX, REG.DX]
                         DOUBLE_RETURN_REGS = [REG.XMM0, REG.XMM1]
 
@@ -1660,10 +1686,14 @@ class AssemblerFunction(AssemblyAST):
     def thirdPass(self):
         newInstructions: list[AssemblerInstruction] = []
 
-        # Allocate the stack.
-        functionStackAlloc = -Memory.STACK_OFFSET
+        # Allocate the stack. It must be 16-byte aligned.
+        # Remember STACK_OFFSET is negative. Add the bytes from the callee-saved registers.
+        calleeSavedRegSize = 8*len(self.calleeSavedRegs)
+        functionStackAlloc = -Memory.STACK_OFFSET + calleeSavedRegSize
         # Round to the next multiple of 16. Makes it easier to align function calls.
         functionStackAlloc = 16 * math.ceil(functionStackAlloc / 16)
+        # Subtract the bytes from the callee-saved registers.
+        functionStackAlloc -= calleeSavedRegSize
 
         if functionStackAlloc > 0:
             # ALLOCATE_STACK: functionStackAlloc
@@ -1673,8 +1703,21 @@ class AssemblerFunction(AssemblyAST):
                 Register(AssemblyType.QUADWORD, REG.SP))
             newInstructions.append(stackAllocInstruction)
 
+        # We have to save the callee-saved registers.
+        for reg in self.calleeSavedRegs:
+            newInstructions.append(
+                PUSH(Register(AssemblyType.QUADWORD, reg))
+            )
+
         # Fix the instructions.
         for inst in self.instructions:
+            if isinstance(inst, RET):
+                # Pop (in reversed order) the calle-saved registers.
+                for reg in reversed(self.calleeSavedRegs):
+                    newInstructions.append(
+                        POP(Register(AssemblyType.QUADWORD, reg))
+                    )
+
             newInstructions.extend(inst.thirdPass())
 
         self.instructions = newInstructions
@@ -1714,8 +1757,33 @@ class AssemblerFunction(AssemblyAST):
 INSTRUCTIONS
 """
 class AssemblerInstruction(AssemblyAST):
+    def __init__(self, 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
+        super().__init__(asmbContext, parentAST)
+
+        # Used on the register allocator stage.
+        self.liveRegisters: set[REG|str] = set()
+
     def firstPass(self):
         pass
+
+    # Returns a list with all the operands being used by the instruction. Can be overriden.
+    def getOperands(self) -> list[AssemblerOperand]:
+        return []
+
+    # Returns a list of operands needed to run the instruction.
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return []
+
+    # Returns a list of operands which get updated by this instruction.
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return []
+
+    # Converts the operands and results of the instruction to registers, when possible. 
+    # Returns True if the function can be pruned.
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        return False
 
     # Can be overriden.
     def secondPass(self):
@@ -1734,7 +1802,7 @@ class AssemblerInstruction(AssemblyAST):
     def print(self) -> str:
         pass
 
-    def convertFromPseudo(self, var): # var is an AssemblerOperand
+    def convertFromPseudo(self, var: AssemblerOperand) -> AssemblerOperand:
         if isinstance(var, Pseudo):
             if var.name in TACStaticVariable.staticVariables:
                 return Data(var.assemblyType, var.name, 0, var.parent)
@@ -1750,6 +1818,7 @@ class AssemblerInstruction(AssemblyAST):
 
 class MOV(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, src: AssemblerOperand, dst: AssemblerOperand,
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         if not isinstance(src, AssemblerOperand):
             raise ValueError(f"Invalid argument {src}: MOV only receives AssemblerOperands")
@@ -1760,7 +1829,26 @@ class MOV(AssemblerInstruction):
         self.src = src
         self.dst = dst
 
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.src, self.dst]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.src]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [self.dst]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
+            self.src = Register(self.src.assemblyType, newSrcReg)
+
+        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
+            self.dst = Register(self.dst.assemblyType, newDstReg)
+
+        # Moving from one register to the other doesn't do much.
+        return isinstance(self.src, Register) and isinstance(self.dst, Register) and self.src.reg == self.dst.reg
 
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
@@ -1808,13 +1896,32 @@ class MOV(AssemblerInstruction):
 class MOVS(AssemblerInstruction):
     def __init__(self, srcAsmbType: AssemblyType, dstAsmbType: AssemblyType, 
                  src: AssemblerOperand, dst: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         
         self.srcAsmbType = srcAsmbType
         self.dstAsmbType = dstAsmbType
         self.src = src
         self.dst = dst
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.src, self.dst]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.src]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [self.dst]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
+            self.src = Register(self.src.assemblyType, newSrcReg)
+
+        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
+            self.dst = Register(self.dst.assemblyType, newDstReg)
+
+        return False
 
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
@@ -1857,12 +1964,31 @@ class MOVS(AssemblerInstruction):
 class MOVZ(AssemblerInstruction):
     def __init__(self, srcAsmbType: AssemblyType, dstAsmbType: AssemblyType,
                  src: AssemblerOperand, dst: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.srcAsmbType = srcAsmbType
         self.dstAsmbType = dstAsmbType
         self.src = src
         self.dst = dst
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.src, self.dst]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.src]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [self.dst]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
+            self.src = Register(self.src.assemblyType, newSrcReg)
+
+        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
+            self.dst = Register(self.dst.assemblyType, newDstReg)
+
+        return False
 
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
@@ -1929,6 +2055,7 @@ class MOVZ(AssemblerInstruction):
 
 class LEA(AssemblerInstruction):
     def __init__(self, src: AssemblerOperand, dst: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         
         if dst.assemblyType != AssemblyType.QUADWORD:
@@ -1936,7 +2063,25 @@ class LEA(AssemblerInstruction):
 
         self.src = src
         self.dst = dst
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.src, self.dst]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.src]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [self.dst]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
+            self.src = Register(self.src.assemblyType, newSrcReg)
+
+        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
+            self.dst = Register(self.dst.assemblyType, newDstReg)
+
+        return False
 
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
@@ -1966,13 +2111,32 @@ class LEA(AssemblerInstruction):
 class DEC2INT(AssemblerInstruction):
     def __init__(self, srcAsmbType: AssemblyType, dstAsmbType: AssemblyType,
                  src: AssemblerOperand, dst: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         
         self.srcAsmbType = srcAsmbType
         self.dstAsmbType = dstAsmbType
         self.src = src
         self.dst = dst
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.src, self.dst]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.src]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [self.dst]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
+            self.src = Register(self.src.assemblyType, newSrcReg)
+
+        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
+            self.dst = Register(self.dst.assemblyType, newDstReg)
+
+        return False
 
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
@@ -2012,13 +2176,32 @@ class DEC2INT(AssemblerInstruction):
 class INT2DEC(AssemblerInstruction):
     def __init__(self, srcAsmbType: AssemblyType, dstAsmbType: AssemblyType,
                  src: AssemblerOperand, dst: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         
         self.srcAsmbType = srcAsmbType
         self.dstAsmbType = dstAsmbType
         self.src = src
         self.dst = dst
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.src, self.dst]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.src]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [self.dst]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
+            self.src = Register(self.src.assemblyType, newSrcReg)
+
+        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
+            self.dst = Register(self.dst.assemblyType, newDstReg)
+
+        return False
 
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
@@ -2088,13 +2271,32 @@ class INT2DEC(AssemblerInstruction):
 class DEC2DEC(AssemblerInstruction):
     def __init__(self, srcAsmbType: AssemblyType, dstAsmbType: AssemblyType,
                  src: AssemblerOperand, dst: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         
         self.srcAsmbType = srcAsmbType
         self.dstAsmbType = dstAsmbType
         self.src = src
         self.dst = dst
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.src, self.dst]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.src]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [self.dst]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
+            self.src = Register(self.src.assemblyType, newSrcReg)
+
+        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
+            self.dst = Register(self.dst.assemblyType, newDstReg)
+
+        return False
 
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
@@ -2160,11 +2362,27 @@ class DEC2DEC(AssemblerInstruction):
 
 class UNARY(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, operator: UnaryOperator, operand: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
         self.operator = operator
         self.operand = operand
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.operand]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.operand]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [self.operand]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.operand, Pseudo) and (newOperandReg := registerMap.get(self.operand.name)) is not None:
+            self.operand = Register(self.operand.assemblyType, newOperandReg)
+
+        return False
 
     def secondPass(self):
         self.operand = self.convertFromPseudo(self.operand)
@@ -2197,9 +2415,26 @@ class UNARY(AssemblerInstruction):
                 raise ValueError(f"Invalid operator {self.operator} in UNARY")
 
 class PUSH(AssemblerInstruction):
-    def __init__(self, operand: AssemblerOperand, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, operand: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.operand = operand
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.operand]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.operand]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return []
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.operand, Pseudo) and (newOperandReg := registerMap.get(self.operand.name)) is not None:
+            self.operand = Register(self.operand.assemblyType, newOperandReg)
+
+        return False
 
     def secondPass(self):
         self.operand = self.convertFromPseudo(self.operand)
@@ -2208,13 +2443,13 @@ class PUSH(AssemblerInstruction):
         if isinstance(self.operand, (Memory, Data)) \
             or \
            (isinstance(self.operand, Immediate) and self.operand.isQuadImmediate()):
-            # - Stack cannot have a memory address. Save the src into temporary register AX and then
-            # push the 64 bit AX.
+            # - Stack cannot have a memory address. Save the src into temporary register REG.R10 and then
+            # push the 64 bit REG.R10.
             # - Cannot push a 64-bit immediate, instead move it to a register and then push it.
             
             asmbType = self.operand.assemblyType
-            movToReg = self.createChild(MOV, asmbType, self.operand, Register(asmbType, REG.AX))
-            pushFromReg = self.createChild(PUSH, Register(AssemblyType.QUADWORD, REG.AX))
+            movToReg = self.createChild(MOV, asmbType, self.operand, Register(asmbType, REG.R10))
+            pushFromReg = self.createChild(PUSH, Register(AssemblyType.QUADWORD, REG.R10))
             return [movToReg, pushFromReg]
         
         return [self]
@@ -2224,11 +2459,73 @@ class PUSH(AssemblerInstruction):
     
     def print(self) -> str:
         return f"Push({self.operand})\n"
+
+class POP(AssemblerInstruction):
+    def __init__(self, operand: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
+        self.operand = operand
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.operand]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.operand]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return []
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.operand, Pseudo) and (newOperandReg := registerMap.get(self.operand.name)) is not None:
+            self.operand = Register(self.operand.assemblyType, newOperandReg)
+
+        return False
+
+    def secondPass(self):
+        self.operand = self.convertFromPseudo(self.operand)
+
+    def thirdPass(self) -> list[AssemblerInstruction]:
+        if isinstance(self.operand, (Memory, Data)):
+            # - Stack cannot have a memory address. Save the src into temporary register R10 and then
+            # push the 64 bit R10.
+            
+            asmbType = self.operand.assemblyType
+            movToReg = self.createChild(MOV, asmbType, self.operand, Register(asmbType, REG.R10))
+            pushFromReg = self.createChild(PUSH, Register(AssemblyType.QUADWORD, REG.R10))
+            return [movToReg, pushFromReg]
+        
+        return [self]
+
+    def emitCode(self) -> str:
+        return f"\tpopq\t{self.operand.emitCode()}\n"
+    
+    def print(self) -> str:
+        return f"Pop({self.operand})\n"
     
 class CALL(AssemblerInstruction):
-    def __init__(self, callArgument: str|Register, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, callArgument: str|Register, tacArguments: list[TACValue], 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.callArgument = callArgument
-        super().__init__(parentAST)
+        self.tacArguments = tacArguments
+        super().__init__(asmbContext, parentAST)
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        ret: list[AssemblerOperand] = [self.fromTACValue(t) for t in self.tacArguments]
+
+        if isinstance(self.callArgument, Register):
+            ret.append(self.callArgument)
+
+        return ret
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        # A function updates all caller-saved registers (this is the safest approach).
+        modifiedRegs = [REG.DI, REG.SI, REG.DX, REG.CX, REG.R8, REG.R9, REG.AX]
+        ret: list[AssemblerOperand] = []
+        for reg in modifiedRegs:
+            ret.append(Register(AssemblyType.QUADWORD, reg))
+        return ret
 
     def emitCode(self) -> str:
         if isinstance(self.callArgument, str):
@@ -2251,9 +2548,6 @@ class CALL(AssemblerInstruction):
         return f'Call({self.callArgument})\n'
 
 class RET(AssemblerInstruction):
-    def __init__(self, parentAST: AssemblyAST | None = None) -> None:
-        super().__init__(parentAST)
-
     def emitCode(self) -> str:
         ret  = f"\tmovq\t%rbp, %rsp\n"
         ret += f"\tpopq\t%rbp\n"
@@ -2266,6 +2560,7 @@ class RET(AssemblerInstruction):
 class BINARY(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, operator: BinaryOperator, 
                  op1: AssemblerOperand, op2: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
         self.operator = operator
@@ -2273,7 +2568,25 @@ class BINARY(AssemblerInstruction):
         self.op1 = op1
         self.op2 = op2
 
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.op1, self.op2]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.op1, self.op2]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [self.op2]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.op1, Pseudo) and (newOperandReg := registerMap.get(self.op1.name)) is not None:
+            self.op1 = Register(self.op1.assemblyType, newOperandReg)
+
+        if isinstance(self.op2, Pseudo) and (newOperandReg := registerMap.get(self.op2.name)) is not None:
+            self.op2 = Register(self.op2.assemblyType, newOperandReg)
+
+        return False
 
     def secondPass(self):
         self.op1 = self.convertFromPseudo(self.op1)
@@ -2412,11 +2725,27 @@ class BINARY(AssemblerInstruction):
 # Integer division.
 class IDIV(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, operator: BinaryOperator, op: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
         self.operator = operator
         self.op = op
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.op]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.op, Register(AssemblyType.QUADWORD, REG.AX), Register(AssemblyType.QUADWORD, REG.DX)]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [Register(AssemblyType.QUADWORD, REG.AX), Register(AssemblyType.QUADWORD, REG.DX)]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.op, Pseudo) and (newOperandReg := registerMap.get(self.op.name)) is not None:
+            self.op = Register(self.op.assemblyType, newOperandReg)
+
+        return False
 
     def secondPass(self):
         self.op = self.convertFromPseudo(self.op)
@@ -2445,11 +2774,21 @@ class IDIV(AssemblerInstruction):
 # Float division.
 class DIV(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, operator: BinaryOperator, op: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
         self.operator = operator
         self.op = op
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.op]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.op, Pseudo) and (newOperandReg := registerMap.get(self.op.name)) is not None:
+            self.op = Register(self.op.assemblyType, newOperandReg)
+
+        return False
 
     def secondPass(self):
         self.op = self.convertFromPseudo(self.op)
@@ -2476,9 +2815,17 @@ class DIV(AssemblerInstruction):
 
 # Sign extend AX register.
 class CDQ(AssemblerInstruction):
-    def __init__(self, asmbType: AssemblyType, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, asmbType: AssemblyType, 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [Register(AssemblyType.QUADWORD, REG.AX)]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [Register(AssemblyType.QUADWORD, REG.DX)]
 
     def emitCode(self) -> str:
         match self.asmbType:
@@ -2494,12 +2841,31 @@ class CDQ(AssemblerInstruction):
 
 class CMP(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, op1: AssemblerOperand, op2: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
         self.op1 = op1
         self.op2 = op2
 
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.op1, self.op2]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.op1, self.op2]
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return []
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.op1, Pseudo) and (newOperandReg := registerMap.get(self.op1.name)) is not None:
+            self.op1 = Register(self.op1.assemblyType, newOperandReg)
+
+        if isinstance(self.op2, Pseudo) and (newOperandReg := registerMap.get(self.op2.name)) is not None:
+            self.op2 = Register(self.op2.assemblyType, newOperandReg)
+
+        return False
 
     def secondPass(self):
         self.op1 = self.convertFromPseudo(self.op1)
@@ -2581,9 +2947,11 @@ class CMP(AssemblerInstruction):
         return f"Compare({self.op1}, {self.op2})\n"
 
 class JMP(AssemblerInstruction):
-    def __init__(self, identifier: str, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, identifier: str, 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.identifier = identifier
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
 
     def emitCode(self) -> str:
         return f"\tjmp \t.L{self.identifier}\n"
@@ -2637,10 +3005,12 @@ class ConditionCode(enum.Enum):
         return matchUnsignedOperations(op)
         
 class JMPIF(AssemblerInstruction):
-    def __init__(self, condition: ConditionCode, identifier: str, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, condition: ConditionCode, identifier: str, 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.condition = condition
         self.identifier = identifier
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
 
     def emitCode(self) -> str:
         return f"\tj{self.condition.value}\t.L{self.identifier}\n"
@@ -2649,10 +3019,27 @@ class JMPIF(AssemblerInstruction):
         return f"JumpIf({self.condition.name}, {self.identifier})\n"
 
 class SETIF(AssemblerInstruction):
-    def __init__(self, condition: ConditionCode, op: AssemblerOperand, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, condition: ConditionCode, op: AssemblerOperand, 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.condition = condition
         self.op = op
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
+
+    def getOperands(self) -> list[AssemblerOperand]:
+        return [self.op]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return []
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [self.op]
+
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        if isinstance(self.op, Pseudo) and (newOperandReg := registerMap.get(self.op.name)) is not None:
+            self.op = Register(self.op.assemblyType, newOperandReg)
+
+        return False
 
     def secondPass(self):
         self.op = self.convertFromPseudo(self.op)
@@ -2675,9 +3062,11 @@ class LABEL(AssemblerInstruction):
         LABEL.GENERAL_LABEL_COUNT += 1
         return label
 
-    def __init__(self, identifier: str, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, identifier: str, 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.identifier = identifier
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
 
     def emitCode(self) -> str:
         return f"\n.L{self.identifier}:\n"
@@ -2686,9 +3075,11 @@ class LABEL(AssemblerInstruction):
         return f"Label({self.identifier})\n"
 
 class COMMENT(AssemblerInstruction):
-    def __init__(self, comment: str, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, comment: str, 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.comment = comment
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
 
     def emitCode(self) -> str:
         return f"\t# {self.comment}"
@@ -2698,9 +3089,11 @@ class COMMENT(AssemblerInstruction):
 
 # Writes raw code into the assembly output.
 class CODE(AssemblerInstruction):
-    def __init__(self, asmbCode: str, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, asmbCode: str, 
+                 asmbContext: AssemblyContext | None = None, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.asmbCode = asmbCode
-        super().__init__(parentAST)
+        super().__init__(asmbContext, parentAST)
 
     def emitCode(self) -> str:
         return self.asmbCode
@@ -2712,9 +3105,11 @@ class CODE(AssemblerInstruction):
 OPERANDS
 """
 class AssemblerOperand(AssemblyAST):
-    def __init__(self, assemblyType: AssemblyType, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, assemblyType: AssemblyType, 
+                 parentAST: AssemblyAST | None = None) -> None:
         self.assemblyType = assemblyType
-        super().__init__(parentAST)
+        # Assembly operands do not need context, only instructions.
+        super().__init__(None, parentAST)
 
     def firstPass(self):
         # Nothing to do when parsing.
@@ -2808,6 +3203,9 @@ class REG(enum.Enum):
         return d[self.value][2] if self.value in d else self.value
     def isFloatRegister(self) -> bool:
         return self.name.startswith("XMM")
+
+    def isCalleeSaved(self) -> bool:
+        return self in (REG.BX, REG.SP, REG.BP, REG.R12, REG.R13, REG.R14, REG.R15)
 
 class Register(AssemblerOperand):
     def __init__(self, assemblyType: AssemblyType, reg: REG, parentAST: AssemblyAST | None = None) -> None:
@@ -3031,3 +3429,494 @@ class Indexed(AssemblerOperand):
 
     def print(self) -> str:
         return f"Indexed({self.base}, {self.index}, {self.offset})"
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+REGISTER ALLOCATOR
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+"""
+
+# Do not use these registers during the register allocation process. These registers are removed 
+# from the base graphs as they are used in intermediary processes.
+UNUSED_REGISTERS: list[REG] = [REG.SP, REG.BP, REG.R10, REG.R11]
+
+class RegisterAllocator:
+    def __init__(self, instructions: list[AssemblerInstruction]) -> None:
+        self.instructions: list[AssemblerInstruction] = instructions
+        self.calleeSavedRegisters: set[REG]|None = None
+
+    def allocateRegisters(self) -> list[AssemblerInstruction]:
+        interferenceGraph = self._buildGraph()
+        interferenceGraph.calculateSpillCosts(self.instructions)
+        interferenceGraph.colorGraph()
+        registerMap, self.calleeSavedRegisters = self._createRegisterMap(interferenceGraph)
+        return self._substitutePseudo(registerMap)
+
+    def getCalleeSavedRegisters(self) -> list[REG]:
+        assert self.calleeSavedRegisters is not None, "Call first allocateRegisters()"
+        # Return it as a list so that they maintain order and they can be pushed and popped in a
+        # known order.
+        return list(self.calleeSavedRegisters)
+
+    def _buildGraph(self) -> InterferenceGraph:
+        interferenceGraph = InterferenceGraph.BASE_INT_GRAPH()
+
+        # Add the pseudo register operands from the instruction list. Skip static variables as they 
+        # should always be read from memory.
+        for inst in self.instructions:
+            for op in inst.getOperands():
+                if isinstance(op, Pseudo) and op.name not in TACStaticVariable.staticVariables:
+                    interferenceGraph.addPseudoRegister(op)
+
+        # Analyze liveness of nodes.
+        cfg = ControlFlowGraph(self.instructions)
+        cfg.calculateLiveRegisters()
+
+        # Use the liveness information to create the edges of the graph.
+        for node in cfg.nodes.values():
+            if node.nodeID < 0:
+                # If the node is the entry or exit node...
+                continue
+
+            for inst in node.instructions:
+                for live in inst.liveRegisters:
+                    if isinstance(inst, MOV) and ( \
+                        (isinstance(inst.src, Register) and live == inst.src.reg) or 
+                        (isinstance(inst.src, Pseudo) and live == inst.src.name) \
+                    ):
+                        # Skips the edge of a MOV between source and destination.
+                        continue
+
+                    for upd in inst.getUpdatedOperands():
+                        if isinstance(upd, Register) and upd.reg not in UNUSED_REGISTERS:
+                            updNode = upd.reg
+                        elif isinstance(upd, Pseudo) and upd.name not in TACStaticVariable.staticVariables:
+                            updNode = upd.name
+                        else:
+                            continue
+
+                        if live != updNode:
+                            interferenceGraph.addEdge(live, updNode)
+
+        return interferenceGraph
+
+    def _createRegisterMap(self, coloredGraph: InterferenceGraph) -> tuple[dict[str, REG], set[REG]]:
+        # Find the color of hard registers.
+        colorMap: dict[int, REG] = {}
+        for node in coloredGraph.nodes:
+            if isinstance(node.id, REG):
+                assert node.color is not None
+                colorMap[node.color] = node.id
+
+        # Convert pseudo to hard registers. Calculate the callee saved registers too being used by 
+        # the substituted pseudo operands.
+        registerMap: dict[str, REG] = {}
+        calleeSavedRegisters: set[REG] = set()
+        for node in coloredGraph.nodes:
+            if isinstance(node.id, str):
+                # This is a pseudo value (the id is a string).
+                if node.color is not None:
+                    hardReg = colorMap[node.color]
+                    registerMap[node.id] = hardReg
+                    if hardReg.isCalleeSaved():
+                        calleeSavedRegisters.add(hardReg)
+
+        return registerMap, calleeSavedRegisters
+
+    def _substitutePseudo(self, registerMap: dict[str, REG]) -> list[AssemblerInstruction]:
+        ret: list[AssemblerInstruction] = []
+        for inst in self.instructions:
+            # Remove instructions which aren't making any change to the result of the code.
+            if not inst.replacePseudo(registerMap):
+                ret.append(inst)
+        return ret
+
+@dataclass
+class RegAllocNode:
+    id: REG|str
+    neighbors: set[REG|str]         = field(default_factory=set)
+    spillCost: float                = 0.0
+    color: int|None                 = None
+    pruned: bool                    = False
+
+class InterferenceGraph:
+    def __init__(self, nodes: list[RegAllocNode], k: int) -> None:
+        self.nodes = nodes
+        self.nodesByID: dict[REG|str, RegAllocNode] = {node.id : node for node in nodes}
+        # Number of colors to color the graph. Is the number of hard registers available.
+        self.k = k
+
+    def addPseudoRegister(self, pseudo: Pseudo):
+        # Check that the pseudo register is not in the graph yet.
+        if pseudo.name in self.nodesByID:
+            return
+
+        allocNode = RegAllocNode(id=pseudo.name)
+        self.nodes.append(allocNode)
+        self.nodesByID[pseudo.name] = allocNode
+
+    def addEdge(self, node1: REG|str, node2: REG|str):
+        n1 = self.nodesByID.get(node1)
+        n2 = self.nodesByID.get(node2)
+
+        assert n1 is not None, f"Could not find {node1} inside the InterferenceGraph"
+        assert n2 is not None, f"Could not find {node2} inside the InterferenceGraph"
+        
+        n1.neighbors.add(n2.id)
+        n2.neighbors.add(n1.id)
+
+    def calculateSpillCosts(self, instructions: list[AssemblerInstruction]):
+        for inst in instructions:
+            # TODO: Implement loop detection. At the moment, variables get its spill cost by the 
+            # number of times they appear inside code, but if they're inside a loop they should be
+            # accounted for a lot more.
+            for op in inst.getOperands():
+                # Only calculate for non-static Pseudo. REG have inf spill (they cannot be spilled).
+                if isinstance(op, Pseudo) and op.name not in TACStaticVariable.staticVariables:
+                    node = self.nodesByID.get(op.name)
+                    assert node is not None, f"Could not find {op} inside the InterferenceGraph"
+
+                    node.spillCost += 1.0
+
+    def colorGraph(self):
+        unprunedNodes = self._getUnprunedNodes()
+        if len(unprunedNodes) == 0:
+            return
+
+        chosenNode: RegAllocNode|None = None
+        for n in unprunedNodes:
+            degree = len(self._getUnprunedNeighborsOfNode(n))
+            if degree < self.k:
+                # We can prune this node as it can be easily colored by the degree < k rule.
+                chosenNode = n
+                break
+
+        if chosenNode is None:
+            # We couldn't prune a node so we'll need to spill one candidate. We'll use the spill 
+            # cost divided by the degree of the node as a spilling metric.
+            minimalSpillMetric = float("inf")
+            for n in unprunedNodes:
+                degree = len(self._getUnprunedNeighborsOfNode(n))
+                spillMetric = n.spillCost / degree
+                if spillMetric < minimalSpillMetric:
+                    chosenNode = n
+                    minimalSpillMetric = spillMetric
+
+        assert chosenNode is not None
+        chosenNode.pruned = True
+
+        # Color the rest of the graph.
+        self.colorGraph()
+
+        # If this is reached, all previous nodes have been pruned except "chosenNode", which is the 
+        # first node to be colored. The previous calls will be coloring the nodes in order.
+
+        # Get the used colors by the neighbors of "chosenNode". Those colors are taken.
+        usedColors: set[int] = {
+            color
+            for neighborID in chosenNode.neighbors
+            if (color := self.nodesByID[neighborID].color) is not None
+        }
+        # Get all free colors from 0 to k-1.
+        availableColors: list[int] = [c for c in range(self.k) if c not in usedColors]
+
+        if len(availableColors) > 0:
+            if isinstance(chosenNode.id, REG) and chosenNode.id.isCalleeSaved():
+                chosenNode.color = max(availableColors)
+            else:
+                chosenNode.color = min(availableColors)
+
+            chosenNode.pruned = False
+
+    def _getUnprunedNodes(self):
+        ret: list[RegAllocNode] = []
+        for n in self.nodes:
+            if not n.pruned:
+                ret.append(n)
+        return ret
+
+    def _getUnprunedNeighborsOfNode(self, n: RegAllocNode):
+        neighbors: list[RegAllocNode] = [self.nodesByID[neigh] for neigh in n.neighbors]
+        ret: list[RegAllocNode] = []
+        for n in neighbors:
+            if not n.pruned:
+                ret.append(n)
+        return ret
+
+    def print(self, showNeighbors: bool = True) -> str:
+        ordered = sorted(self.nodes, key=lambda n: str(n.id))
+
+        lines: list[str] = [
+            f"=== InterferenceGraph (k={self.k}, nodes={len(ordered)}) ===",
+            f"{'NODE':<18} {'DEG':>4} {'SPILL':>8} {'COLOR':>6} {'PRUNED':<6}",
+            "-" * 68,
+        ]
+
+        conflicts: list[str] = []
+
+        for node in ordered:
+            deg = len(node.neighbors)
+            colorStr = "-" if node.color is None else str(node.color)
+            prunedStr = "yes" if node.pruned else "no"
+
+            if node.color is not None:
+                for neighborID in sorted(node.neighbors, key=str):
+                    nb = self.nodesByID.get(neighborID)
+                    if nb is not None and nb.color == node.color:
+                        conflicts.append(f"{node.id} and {neighborID} both have color {node.color}")
+
+            lines.append(
+                f"{str(node.id):<18} {deg:>4} {node.spillCost:>8.2f} {colorStr:>6} {prunedStr:<6}"
+            )
+
+            if showNeighbors:
+                nb_list = ", ".join(str(x) for x in sorted(node.neighbors, key=str))
+                lines.append(f"    neighbors: [{nb_list}]")
+
+        if conflicts:
+            lines.append("-" * 68)
+            lines.append("COLOR CONFLICTS DETECTED:")
+            for c in conflicts:
+                lines.append(f"  ! {c}")
+
+        output = "\n".join(lines)
+        return output
+
+    @classmethod
+    def BASE_INT_GRAPH(cls) -> InterferenceGraph:
+        # All x64 registers except RSP, RSB and the fix-up pass registers R10 and R11.
+        REG_NODES: list[REG] = [REG.AX, REG.CX, REG.DX, REG.BX, REG.SI, REG.DI, REG.R8, REG.R9, 
+                                REG.R12, REG.R13, REG.R14, REG.R15]
+        # All nodes are connected to each other as they are not compatible between each other.
+        nodes: list[RegAllocNode] = []
+        for reg in REG_NODES:
+            node = RegAllocNode(
+                id=reg,
+                neighbors={r for r in REG_NODES if r != reg},
+                # Hard registers cannot be spilled.
+                spillCost=float("inf")
+            )
+            nodes.append(node)
+
+        return InterferenceGraph(nodes, k=len(REG_NODES))
+
+"""
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+CONTROL FLOW NODE
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Used to calculate the edges of the interference graph. Closely related to the Dead Store Elimination
+code from the TAC_optimizer.
+"""
+@dataclass(eq=False)
+class ControlFlowNode:
+    nodeID: int
+    instructions: list[AssemblerInstruction]    = field(default_factory=list)
+    predecessors: set[int]                      = field(default_factory=set)
+    successors: set[int]                        = field(default_factory=set)
+
+    # For the liveness analysis algorithm:
+    # Stores the registered values that are alive at the start of the node's instruction.
+    liveRegisters: set[REG|str]              = field(default_factory=set)
+
+    def connectSuccessor(self, successor: ControlFlowNode):
+        self.successors.add(successor.nodeID)
+        successor.predecessors.add(self.nodeID)
+
+    def __hash__(self) -> int:
+        return hash(self.nodeID)
+
+    # Returns the first instruction, which is usually a label.
+    def getInitiator(self) -> AssemblerInstruction|None:
+        return self.instructions[0] if len(self.instructions) > 0 else None
+
+    # Returns the last instruction, which usually dictates the jump.
+    def getTerminator(self) -> AssemblerInstruction|None:
+        return self.instructions[-1] if len(self.instructions) > 0 else None
+
+    # Starting from the latest instruction in the node, annotate which variables are alive just
+    # before each instruction. 
+    def anotateLiveRegisters(self, endLiveRegisters: set[REG|str]):
+        liveRegisters = endLiveRegisters
+
+        for inst in reversed(self.instructions):
+            inst.liveRegisters = set(liveRegisters)
+
+            updated = inst.getUpdatedOperands()
+            for op in updated:
+                if isinstance(op, Pseudo) and op.name in liveRegisters:
+                    liveRegisters.remove(op.name)
+                elif isinstance(op, Register) and op.reg in liveRegisters:
+                    liveRegisters.remove(op.reg)
+
+            used = inst.getUsedOperands()
+            for op in used:
+                if isinstance(op, Pseudo) and op.name not in TACStaticVariable.staticVariables:
+                    liveRegisters.add(op.name)
+                elif isinstance(op, Register) and op.reg not in UNUSED_REGISTERS:
+                    liveRegisters.add(op.reg)
+
+        self.liveRegisters = liveRegisters
+
+class ControlFlowGraph:
+    def __init__(self, insts: list[AssemblerInstruction]) -> None:
+        self.entryNode = ControlFlowNode(-1)
+        self.exitNode  = ControlFlowNode(-2)
+        
+        self.nodes, self.names = self._createNodes(insts)
+        self._connectAllNodes()
+
+    def toInstructionList(self) -> list[AssemblerInstruction]:
+        ret: list[AssemblerInstruction] = []
+        for nodeID in sorted(self.nodes.keys()):
+            ret.extend(self.nodes[nodeID].instructions)
+        return ret
+    
+    # Traverse the graph in using Depth First Search (DFS).
+    # Returns a list of all the visited node's IDs in postorder (the children are added before the 
+    # parent).
+    #       A
+    #     /   \   
+    #    B     C        -> [D, B, C, A]
+    #     \   /
+    #       D
+    def traverse(self) -> list[int]:
+        # Use the set to keep track of visited nodes, for O(1) search.
+        visitedNodesSet: set[int] = set()
+        # Use the list to keep track of the order.
+        orderedNodes: list[int] = []
+
+        def postorder(nodeId: int):
+            # The node is now visited.
+            visitedNodesSet.add(nodeId)
+            # Order the successors.
+            for succ in self._getNodeByID(nodeId).successors:
+                if succ not in visitedNodesSet:
+                    postorder(succ)
+            # When the successors have been added, add the current node.
+            orderedNodes.append(nodeId)
+
+        postorder(self.entryNode.nodeID)
+        return orderedNodes
+
+    def _createNodes(self, insts: list[AssemblerInstruction]) -> tuple[dict[int, ControlFlowNode], dict[str, int]]:
+        # Key: ID of the node. Value: the node.
+        nodes: dict[int, ControlFlowNode] = {}
+        # Key: the name of the node (the top label). Value: the node.
+        names: dict[str, int] = {}
+
+        currentNode = ControlFlowNode(0)
+        for inst in insts:
+            if isinstance(inst, LABEL):
+                # If there's a current node, it is being closed by this label. Time to create a new
+                # one, whose first instruction will be the LABEL.
+                if len(currentNode.instructions) > 0:
+                    nodes[len(nodes)] = currentNode
+                
+                currentNode = ControlFlowNode(len(nodes))
+                currentNode.instructions.append(inst)
+
+                # Associate label name with the new node's ID.
+                names[inst.identifier] = currentNode.nodeID
+
+            elif isinstance(inst, (JMP, JMPIF, RET)):
+                # This is the last instruction of the current node.
+                currentNode.instructions.append(inst)
+                nodes[len(nodes)] = currentNode
+
+                currentNode = ControlFlowNode(len(nodes))
+
+            else:
+                currentNode.instructions.append(inst)
+
+        # Close the final node.
+        if len(currentNode.instructions) > 0:
+            nodes[len(nodes)] = currentNode
+
+        return (nodes, names)
+    
+    # Connects the nodes by setting their predecessor and successors.
+    def _connectAllNodes(self):
+        # First, connect the entry node with the first node of the list.
+        self.entryNode.connectSuccessor(self.nodes[0])
+
+        # Then, connect all nodes.
+        for id, node in self.nodes.items():
+            if id == len(self.nodes) - 1:
+                nextNode = self.exitNode
+            else:
+                nextNode = self.nodes[id + 1]
+
+            # Depending on the latest instruction in the node...
+            finalInst = node.getTerminator()
+            match finalInst:
+                case RET():
+                    node.connectSuccessor(self.exitNode)
+                case JMP():
+                    # Connect the target node with the current one. Use the name of the tag to do 
+                    # so.
+                    targetNode = self.nodes[self.names[finalInst.identifier]]
+                    node.connectSuccessor(targetNode)
+                case JMPIF():
+                    # Connect to the target node and the next one, the target will be reached in 
+                    # case the condition is met, and the next node otherwise.
+                    targetNode = self.nodes[self.names[finalInst.identifier]]
+                    node.connectSuccessor(targetNode)
+                    node.connectSuccessor(nextNode)
+                case _:
+                    node.connectSuccessor(nextNode)
+
+    def _getNodeByID(self, id: int) -> ControlFlowNode:
+        if id == -1:
+            return self.entryNode
+        if id == -2:
+            return self.exitNode
+        
+        if id not in self.nodes:
+            raise ValueError(f"Node with id {id} does not exist")
+
+        return self.nodes[id]
+
+    def _calculateLiveRegistersFromNode(self, node: ControlFlowNode) -> set[REG|str]:
+        successorList = [self._getNodeByID(id) for id in list(node.successors)]
+        
+        # All registers which are alive at the start of the successors must be alive at the end of 
+        # the parent node. 
+        liveRegs: set[REG|str] = set()
+        for succ in successorList:
+            liveRegs |= succ.liveRegisters
+
+        return liveRegs
+    
+    def calculateLiveRegisters(self):
+        nodeStack: list[ControlFlowNode] = []
+
+        # We'll be analyzing the nodes in postorder. This makes sure that we'll normally operate on 
+        # a block with all successors liveness calculated.
+        for nodeID in reversed(self.traverse()):
+            if nodeID < 0:
+                # Skip the entry and exit blocks.
+                continue
+            node = self._getNodeByID(nodeID)
+            nodeStack.append(node)
+
+        # The return value registers are live on the exit node.
+        self.exitNode.liveRegisters = {REG.AX}
+
+        # Operate until there are no more changes in the nodes.
+        while len(nodeStack) > 0:
+            node = nodeStack.pop()
+            # Store the current live variables.
+            startingliveRegisters = node.liveRegisters
+            # Calculate the live registers with the current graph information.
+            liveRegisters = self._calculateLiveRegistersFromNode(node)
+            node.anotateLiveRegisters(liveRegisters)
+
+            if startingliveRegisters != node.liveRegisters:
+                # The current analysis changed this node, therefore, all predecessors have to be 
+                # recalculated. Only add them if they're not in the stack.
+                for succID in node.predecessors:
+                    if succID < 0: 
+                        continue
+                    succ = self._getNodeByID(succID)
+                    if succ not in nodeStack:
+                        nodeStack.insert(0, succ)
