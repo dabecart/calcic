@@ -23,15 +23,32 @@ from src.x64.types_x64 import *
 AssemblyT = TypeVar("AssemblyT", bound="AssemblyAST")
 
 @dataclass
-class AssemblyContext:
-    pass
+class FunctionValue:
+    operand: AssemblerOperand
+    asmbType: AssemblyType
+
+@dataclass
+class ClassifiedFuncArgs:
+    # Integer type arguments stored in registers.
+    general: list[FunctionValue] = field(default_factory=list)
+    # Float type arguments stored in registers.
+    sse: list[FunctionValue]     = field(default_factory=list)
+    # Arguments stored in the stack.
+    stack: list[FunctionValue]   = field(default_factory=list)
+
+@dataclass
+class ClassifiedReturnValues:
+    # Integer type return values stored in registers.
+    general: list[FunctionValue] = field(default_factory=list)
+    # Float type return values stored in registers.
+    sse: list[FunctionValue]     = field(default_factory=list)
+    # Are arguments stored in the stack?
+    returnedInStack: bool        = False
 
 class AssemblyAST(ABC):
     def __init__(self, 
-                 asmbContext: AssemblyContext|None = None, 
                  parentAST: AssemblyAST|None = None) -> None:
         super().__init__()
-        self.asmbContext = asmbContext if asmbContext is not None else AssemblyContext()
         # Assembly AST containing this Assembly AST node.
         self.parent = parentAST
 
@@ -201,10 +218,9 @@ class AssemblyAST(ABC):
 
 class AssemblerProgram(AssemblyAST):
     def __init__(self, program: TACProgram,
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.program = program
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
         self.secondPass()
         self.thirdPass()
 
@@ -270,13 +286,12 @@ class AssemblerStaticVariable(AssemblyAST):
     def __init__(self, 
                  assemblyType: AssemblyType, isGlobal: bool, 
                  identifier: str, initialization: list[Constant],
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.assemblyType = assemblyType
         self.isGlobal = isGlobal
         self.identifier = identifier
         self.initialization = initialization
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def firstPass(self):
         pass
@@ -401,7 +416,6 @@ class AssemblerStaticConstant(AssemblyAST):
                  valueType: DeclaratorType, identifier: str, isGlobal: bool, 
                  initialization: list[tuple[str, str]], 
                  alignment: int,
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.valueType = valueType
         self.identifier = identifier
@@ -409,12 +423,11 @@ class AssemblerStaticConstant(AssemblyAST):
         self.initialization = initialization
         self.alignment = alignment
     
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def copy(self) -> AssemblerStaticConstant:
         return AssemblerStaticConstant(
-            self.valueType, self.identifier, self.isGlobal, self.initialization, self.alignment, 
-            self.asmbContext, self.parent)
+            self.valueType, self.identifier, self.isGlobal, self.initialization, self.alignment, self.parent)
 
     def firstPass(self):
         pass
@@ -485,28 +498,103 @@ class AssemblerStaticConstant(AssemblyAST):
     def print(self) -> str:
         return f"StaticConstant({self.initialization})\n"
 
+class REG(enum.Enum):
+    AX = "rax"
+    CX = "rcx"
+    DX = "rdx"
+    BX = "rbx"
+    SI = "rsi"
+    DI = "rdi"
+    SP = "rsp"
+    BP = "rbp"
+    R8 = "r8"
+    R9 = "r9"
+    R10 = "r10"
+    R11 = "r11"
+    R12 = "r12"
+    R13 = "r13"
+    R14 = "r14"
+    R15 = "r15"
+
+    XMM0  = "xmm0"
+    XMM1  = "xmm1"
+    XMM2  = "xmm2"
+    XMM3  = "xmm3"
+    XMM4  = "xmm4"
+    XMM5  = "xmm5"
+    XMM6  = "xmm6"
+    XMM7  = "xmm7"
+    XMM8  = "xmm8"
+    XMM9  = "xmm9"
+    XMM10 = "xmm10"
+    XMM11 = "xmm11"
+    XMM12 = "xmm12"
+    XMM13 = "xmm13"
+    XMM14 = "xmm14"
+    XMM15 = "xmm15"
+
+    @staticmethod
+    def getRegisterDict() -> dict[str, tuple]:
+        return {
+            "rax"   : ("eax",   "ax",   "al"),
+            "rcx"   : ("ecx",   "cx",   "cl"),
+            "rdx"   : ("edx",   "dx",   "dl"),
+            "rbx"   : ("ebx",   "bx",   "bl"),
+            "rsi"   : ("esi",   "si",   "sil"),
+            "rdi"   : ("edi",   "di",   "dil"),
+            "rsp"   : ("esp",   "sp",   "spl"),
+            "rbp"   : ("ebp",   "bp",   "bpl"),
+            "r8"    : ("r8d",   "r8w",  "r8b"),
+            "r9"    : ("r9d",   "r9w",  "r9b"),
+            "r10"   : ("r10d",  "r10w", "r10b"),
+            "r11"   : ("r11d",  "r11w", "r11b"),
+            "r12"   : ("r12d",  "r12w", "r12b"),
+            "r13"   : ("r13d",  "r13w", "r13b"),
+            "r14"   : ("r14d",  "r14w", "r14b"),
+            "r15"   : ("r15d",  "r15w", "r15b"),
+        }
+
+    def get64Name(self) -> str:
+        return self.value
+    def get32Name(self) -> str:
+        d = REG.getRegisterDict()
+        return d[self.value][0] if self.value in d else self.value
+    def get16Name(self) -> str:
+        d = REG.getRegisterDict()
+        return d[self.value][1] if self.value in d else self.value
+    def get8Name(self) -> str:
+        d = REG.getRegisterDict()
+        return d[self.value][2] if self.value in d else self.value
+    def isFloatRegister(self) -> bool:
+        return self.name.startswith("XMM")
+
+    def isCalleeSaved(self) -> bool:
+        return self in (REG.BX, REG.SP, REG.BP, REG.R12, REG.R13, REG.R14, REG.R15)
+
+INT_REG_ORDER = [REG.DI, REG.SI, REG.DX, REG.CX, REG.R8, REG.R9]
+DOUBLE_REG_ORDER = [REG.XMM0, REG.XMM1, REG.XMM2, REG.XMM3, REG.XMM4, REG.XMM5, REG.XMM6, REG.XMM7]
+
 class AssemblerFunction(AssemblyAST):
     def __init__(self, function: TACFunction, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.function = function
 
         self.identifier: str = self.function.identifier
         self.instructions: list[AssemblerInstruction] = []
         self.calleeSavedRegs: list[REG] = []
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
         # super() calls the first pass.
 
         # Substitute Pseudo values (which would be stored in memory) for Registers where possible.
-        # regAlloc = RegisterAllocator(self.instructions)
-        # self.instructions = regAlloc.allocateRegisters()
-        # self.calleeSavedRegs = regAlloc.getCalleeSavedRegisters()
+        regAlloc = RegisterAllocator(self.instructions)
+        self.instructions = regAlloc.allocateRegisters()
+        self.calleeSavedRegs = regAlloc.getCalleeSavedRegisters()
 
         self.secondPass()
         self.thirdPass()
 
     def createInst(self, assemblerType: Type[AssemblerInstruction], *args) -> AssemblerInstruction:
-        ret = assemblerType(*args, asmbContext=self.asmbContext, parentAST=self)
+        ret = assemblerType(*args, parentAST=self)
         self.instructions.append(ret)
 
         # Set the parent of all the args to be this new instruction.
@@ -515,25 +603,8 @@ class AssemblerFunction(AssemblyAST):
 
         return ret
 
-    """
-    Returns:
-    - List of arguments stored in the general registers.
-    - List of arguments stored in the SSE registers.
-    - List of arguments stored in the stack.
-
-    Each argument consists of its origical value (AssemblerOperand) and the type to use to transfer 
-    data (AssemblyType). This is needed for structs.
-    """
-    def classifyArguments(self, arguments: list[TACValue], returnStoredInStack: bool) -> \
-        tuple[
-            list[tuple[AssemblerOperand, AssemblyType]], 
-            list[tuple[AssemblerOperand, AssemblyType]], 
-            list[tuple[AssemblerOperand, AssemblyType]]
-        ]:
-        
-        intRegisterArgs: list[tuple[AssemblerOperand, AssemblyType]] = []
-        doubleRegisterArgs: list[tuple[AssemblerOperand, AssemblyType]] = []
-        stackArgs: list[tuple[AssemblerOperand, AssemblyType]] = []
+    def classifyArguments(self, arguments: list[TACValue], returnStoredInStack: bool) -> ClassifiedFuncArgs:
+        ret = ClassifiedFuncArgs()
 
         intRegsAvailable: int = 5 if returnStoredInStack else 6
         doubleRegsAvailable: int = 8
@@ -544,16 +615,16 @@ class AssemblerFunction(AssemblyAST):
 
             if argType.isDecimal():
                 if doubleRegsAvailable > 0:
-                    doubleRegisterArgs.append((destinationValue, argType))
+                    ret.sse.append(FunctionValue(destinationValue, argType))
                     doubleRegsAvailable -= 1
                 else:
-                    stackArgs.append((destinationValue, argType))
+                    ret.stack.append(FunctionValue(destinationValue, argType))
             elif argType.isScalar():
                 if intRegsAvailable > 0:
-                    intRegisterArgs.append((destinationValue, argType))
+                    ret.general.append(FunctionValue(destinationValue, argType))
                     intRegsAvailable -= 1
                 else:
-                    stackArgs.append((destinationValue, argType))
+                    ret.stack.append(FunctionValue(destinationValue, argType))
             else:
                 # This is a structure argument.
                 useStack: bool = True
@@ -562,8 +633,8 @@ class AssemblerFunction(AssemblyAST):
                 # If it is, all following members will also be memory, and so the struct will go 
                 # into the stack.
                 if argType.members[0].classType != AssemblyClassType.MEMORY:
-                    tentativeInts: list[tuple[AssemblerOperand, AssemblyType]] = []
-                    tentativeDoubles: list[tuple[AssemblerOperand, AssemblyType]] = []
+                    tentativeInts: list[FunctionValue] = []
+                    tentativeDoubles: list[FunctionValue] = []
                     offset = 0
                     for member in argType.members:
                         # Create an offsetted operand with the original type of the member.
@@ -573,16 +644,16 @@ class AssemblerFunction(AssemblyAST):
                         # Now, this operand needs to be "moved" using the following type.
                         memberAsmbType = member.toAssemblyType()
                         if member.classType == AssemblyClassType.INTEGER:
-                            tentativeInts.append((asmbMember, memberAsmbType))
+                            tentativeInts.append(FunctionValue(asmbMember, memberAsmbType))
                         elif member.classType == AssemblyClassType.SSE:
-                            tentativeDoubles.append((asmbMember, memberAsmbType))
+                            tentativeDoubles.append(FunctionValue(asmbMember, memberAsmbType))
                         else:
                             raise ValueError()
 
                     # If there are enough free registers, add them to the register arrays.
                     if len(tentativeInts) <= intRegsAvailable and len(tentativeDoubles) <= doubleRegsAvailable:
-                        intRegisterArgs.extend(tentativeInts)
-                        doubleRegisterArgs.extend(tentativeDoubles)
+                        ret.general.extend(tentativeInts)
+                        ret.sse.extend(tentativeDoubles)
                         intRegsAvailable -= len(tentativeInts)
                         doubleRegsAvailable -= len(tentativeDoubles)
                         # Don't use the stack.
@@ -593,53 +664,52 @@ class AssemblerFunction(AssemblyAST):
                     for member in argType.members:
                         asmbMember = PseudoMemory(argType, arg.vbeName, offset, self)
                         offset += member.byteSize
-                        stackArgs.append((asmbMember, member.toAssemblyType()))
+                        ret.stack.append(FunctionValue(asmbMember, member.toAssemblyType()))
 
-        return (intRegisterArgs, doubleRegisterArgs, stackArgs)
+        return ret
         
-    """
-    Returns:
-    - List of arguments stored in the general registers.
-    - List of arguments stored in the SSE registers.
-    - True if the return value is returned as a variable in the stack.
-    """
-    def classifyReturnValue(self, retValue: TACValue) -> \
-        tuple[list[tuple[AssemblerOperand, AssemblyType]], list[tuple[AssemblerOperand, AssemblyType]], bool]:
+    def classifyReturnValue(self, retValue: TACValue) -> ClassifiedReturnValues:
         asmbType = AssemblyType.fromTAC(retValue.valueType)
 
         if asmbType.isDecimal():
             retAsmbVal = self.fromTACValue(retValue)
-            return ([], [(retAsmbVal, retAsmbVal.assemblyType)], False)
+            return ClassifiedReturnValues(
+                sse = [FunctionValue(retAsmbVal, retAsmbVal.assemblyType)]
+            )
         
         if asmbType.isScalar():
             retAsmbVal = self.fromTACValue(retValue)
-            return ([(retAsmbVal, retAsmbVal.assemblyType)], [], False)
+            return ClassifiedReturnValues(
+                general = [FunctionValue(retAsmbVal, retAsmbVal.assemblyType)]
+            )
 
         if asmbType.members[0].classType == AssemblyClassType.MEMORY:
             # The return is stored in the stack.
-            return ([], [], True)
+            return ClassifiedReturnValues(
+                returnedInStack=True
+            )
         
         # The return is stored in registers.
-        intRegisterArgs: list[tuple[AssemblerOperand, AssemblyType]] = []
-        doubleRegisterArgs: list[tuple[AssemblerOperand, AssemblyType]] = []
+        intRegisterArgs: list[FunctionValue] = []
+        doubleRegisterArgs: list[FunctionValue] = []
         offset: int = 0
         for member in asmbType.members:
             asmbMember = PseudoMemory(asmbType, retValue.vbeName, offset, self)
             offset += member.byteSize
 
             if member.classType == AssemblyClassType.SSE:
-                doubleRegisterArgs.append((asmbMember, member.toAssemblyType()))
+                doubleRegisterArgs.append(FunctionValue(asmbMember, member.toAssemblyType()))
             elif member.classType == AssemblyClassType.INTEGER:
-                intRegisterArgs.append((asmbMember, member.toAssemblyType()))
+                intRegisterArgs.append(FunctionValue(asmbMember, member.toAssemblyType()))
             else:
                 raise ValueError()
 
-        return (intRegisterArgs, doubleRegisterArgs, False)
+        return ClassifiedReturnValues(
+            general = intRegisterArgs, 
+            sse = doubleRegisterArgs
+        )
 
     def firstPass(self):
-        INT_REG_ORDER = [REG.DI, REG.SI, REG.DX, REG.CX, REG.R8, REG.R9]
-        DOUBLE_REG_ORDER = [REG.XMM0, REG.XMM1, REG.XMM2, REG.XMM3, REG.XMM4, REG.XMM5, REG.XMM6, REG.XMM7]
-
         # Is the return value passed from the stack?
         self.returnInStack = \
             self.function.funDecl.typeId.returnDeclarator != TypeSpecifier.VOID.toBaseType() and \
@@ -684,9 +754,7 @@ class AssemblerFunction(AssemblyAST):
         # order they appear in the argument list.
         tacArgs = [TACValue(False, arg.type, arg.name) for arg in self.function.arguments]
         # Classify them.
-        self.intRegArgs, self.doubleRegArgs, self.stackInputArgs = self.classifyArguments(tacArgs, 
-                                                                                          self.returnInStack)
-        
+        self.classifiedArgs: ClassifiedFuncArgs = self.classifyArguments(tacArgs, self.returnInStack)
 
         if not self.function.funDecl.attributes.crude:
             if self.returnInStack:
@@ -699,7 +767,10 @@ class AssemblerFunction(AssemblyAST):
             # The order of arguments is: DI, SI, DX, CX, R8, R9 and then stack (pushed in reversed order).
             # In parallel, double arguments must be pushed to XMM0 to XMM7 and then to the stack.
             # Do not use DI if the return value is stored in the stack.
-            for (value, movAsmbType), reg in zip(self.intRegArgs, INT_REG_ORDER[(1 if self.returnInStack else 0):]):
+            for funcArg, reg in zip(self.classifiedArgs.general, INT_REG_ORDER[(1 if self.returnInStack else 0):]):
+                value = funcArg.operand
+                movAsmbType = funcArg.asmbType
+
                 if self.function.isVariadic:
                     # Arguments are pushed onto the stack as they appear in the argument list. When the
                     # function is variadic, all registers are already pushed onto the stack in the 
@@ -727,7 +798,10 @@ class AssemblerFunction(AssemblyAST):
                                     Register(value.assemblyType, reg), 
                                     value)
 
-            for (value, movAsmbType), reg in zip(self.doubleRegArgs, DOUBLE_REG_ORDER):
+            for funcArg, reg in zip(self.classifiedArgs.sse, DOUBLE_REG_ORDER):
+                value = funcArg.operand
+                movAsmbType = funcArg.asmbType
+
                 if self.function.isVariadic:
                     regSaveAreaOffset = DOUBLE_REG_SAVE_AREA_OFFSET[reg]
                     if isinstance(value, Pseudo):
@@ -749,7 +823,10 @@ class AssemblerFunction(AssemblyAST):
 
             # The arguments in the stack start at Stack(16). From then on, add in groups of eight.
             stackOffset = 16
-            for (value, movAsmbType) in self.stackInputArgs:
+            for funcArg in self.classifiedArgs.stack:
+                value = funcArg.operand
+                movAsmbType = funcArg.asmbType
+
                 if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                     self.instructions.extend(
                         self.copyBytes(Memory(AssemblyType.QUADWORD, REG.BP, stackOffset), value, movAsmbType)
@@ -785,8 +862,9 @@ class AssemblerFunction(AssemblyAST):
 
                 case TACReturn():
                     if inst.result.valueType != TypeSpecifier.VOID.toBaseType():
-                        intRegRet, doubleRegRet, retInStack = self.classifyReturnValue(inst.result)
-                        if retInStack:
+                        retValues = self.classifyReturnValue(inst.result)
+
+                        if retValues.returnedInStack:
                             # Get the address of where the return value should be stored.
                             self.createInst(MOV, 
                                             AssemblyType.QUADWORD,
@@ -801,7 +879,10 @@ class AssemblerFunction(AssemblyAST):
                             INT_RETURN_REGS = [REG.AX, REG.DX]
                             DOUBLE_RETURN_REGS = [REG.XMM0, REG.XMM1]
 
-                            for (value, movAsmbType), reg in zip(intRegRet, INT_RETURN_REGS):
+                            for retArg, reg in zip(retValues.general, INT_RETURN_REGS):
+                                value = retArg.operand
+                                movAsmbType = retArg.asmbType
+
                                 if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                                     self.instructions.extend(self.copyBytesToRegister(value, reg, movAsmbType.size))
                                 else:
@@ -810,7 +891,9 @@ class AssemblerFunction(AssemblyAST):
                                                     value, 
                                                     Register(value.assemblyType, reg))
 
-                            for (value, movAsmbType), reg in zip(doubleRegRet, DOUBLE_RETURN_REGS):
+                            for retArg, reg in zip(retValues.sse, DOUBLE_RETURN_REGS):
+                                value = retArg.operand
+                                movAsmbType = retArg.asmbType
                                 self.createInst(MOV, 
                                                 movAsmbType, 
                                                 value, 
@@ -1113,27 +1196,25 @@ class AssemblerFunction(AssemblyAST):
                     self.createInst(LABEL, inst.identifier)
 
                 case TACFunctionCall() | TACIndirectFunctionCall():
-                    returnIntRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
-                    returnDoubleRegs: list[tuple[AssemblerOperand, AssemblyType]] = []
-                    returnInStack: bool = False
+                    returnValues = ClassifiedReturnValues()
 
                     # Classify the return value.
                     if inst.returnType != TypeSpecifier.VOID.toBaseType():
-                        returnIntRegs, returnDoubleRegs, returnInStack = self.classifyReturnValue(inst.result)
+                        returnValues = self.classifyReturnValue(inst.result)
 
-                    if returnInStack:
-                        # When the value is returned in the stack, the return value's space is 
-                        # reserved on the caller. It's address is stored in DI.
-                        retAsmbVal = self.fromTACValue(inst.result)
-                        # TODO: This is only for 64-bit...
-                        self.createInst(LEA, retAsmbVal, Register(AssemblyType.QUADWORD, REG.DI))
+                        if returnValues.returnedInStack:
+                            # When the value is returned in the stack, the return value's space is 
+                            # reserved on the caller. It's address is stored in DI.
+                            retAsmbVal = self.fromTACValue(inst.result)
+                            # TODO: This is only for 64-bit...
+                            self.createInst(LEA, retAsmbVal, Register(AssemblyType.QUADWORD, REG.DI))
 
                     # Split between arguments stored in registers and arguments stored in the stack.
-                    intRegisterArgs, doubleRegisterArgs, stackArgs = self.classifyArguments(inst.arguments, returnInStack)
+                    funcArgs = self.classifyArguments(inst.arguments, returnValues.returnedInStack)
 
                     # The stack needs to be padded so that the function arguments start from a 
                     # multiple of 16. Each cell in the stack is 8 bytes long.
-                    if len(stackArgs) % 2 == 0:
+                    if len(funcArgs.stack) % 2 == 0:
                         stackPadding = 0
                     else:
                         # Pad so that it starts from a multiple of 16.
@@ -1146,26 +1227,11 @@ class AssemblerFunction(AssemblyAST):
                             self.fromTACValue(TACValue(True, TypeSpecifier.LONG.toBaseType(), str(stackPadding))),
                             Register(AssemblyType.QUADWORD, REG.SP))
 
-                    # Pass the function's arguments to registers and then the stack.
-                    # The order of arguments is: DI, SI, DX, CX, R8, R9 and then stack (pushed in 
-                    # reversed order).
-                    # Skip DI if the return value is saved in the stack, it contains the address of 
-                    # the return value.
-                    for (value, movAsmbType), reg in zip(intRegisterArgs, INT_REG_ORDER[(1 if returnInStack else 0):]):
-                        if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
-                            # There may be part of a struct/union returned in a register whose byte 
-                            # size is not standard, i.e. 3, 5, 6 or 7 bytes.
-                            self.instructions.extend(self.copyBytesToRegister(value, reg, movAsmbType.size))
-                        else:
-                            self.createInst(MOV, movAsmbType, value, Register(value.assemblyType, reg))
-
-                    # Now with the double registers.
-                    for (value, movAsmbType), reg in zip(doubleRegisterArgs, DOUBLE_REG_ORDER):
-                        # Move the variable to the register in order.
-                        self.createInst(MOV, movAsmbType, value, Register(value.assemblyType, reg))
-
-                    # Push the values in reversed order.
-                    for (value, movAsmbType) in reversed(stackArgs):
+                    # Push the function arguments in reversed order. Push the stack first so that 
+                    # scratch registers are freed.
+                    for funcArg in reversed(funcArgs.stack):
+                        value = funcArg.operand
+                        movAsmbType = funcArg.asmbType
                         if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                             # There may be part of a struct/union returned in a register whose byte 
                             # size is not standard. For this case, allocate as 8 bytes in the stack 
@@ -1191,15 +1257,38 @@ class AssemblerFunction(AssemblyAST):
 
                             self.createInst(MOV, movAsmbType, value, Register(movAsmbType, REG.AX))
                             self.createInst(PUSH, Register(AssemblyType.QUADWORD, REG.AX))
-                    
+
+                    # Pass the function's arguments to registers.
+                    # The order of arguments is: DI, SI, DX, CX, R8, R9 and then stack (pushed in 
+                    # reversed order).
+                    # Skip DI if the return value is saved in the stack, it contains the address of 
+                    # the return value.
+                    for funcArg, reg in zip(funcArgs.general, INT_REG_ORDER[(1 if returnValues.returnedInStack else 0):]):
+                        value = funcArg.operand
+                        movAsmbType = funcArg.asmbType
+
+                        if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
+                            # There may be part of a struct/union returned in a register whose byte 
+                            # size is not standard, i.e. 3, 5, 6 or 7 bytes.
+                            self.instructions.extend(self.copyBytesToRegister(value, reg, movAsmbType.size))
+                        else:
+                            self.createInst(MOV, movAsmbType, value, Register(value.assemblyType, reg))
+
+                    # Now with the double registers.
+                    for funcArg, reg in zip(funcArgs.sse, DOUBLE_REG_ORDER):
+                        value = funcArg.operand
+                        movAsmbType = funcArg.asmbType
+                        # Move the variable to the register in order.
+                        self.createInst(MOV, movAsmbType, value, Register(value.assemblyType, reg))
+
                     # Store in AL (RAX) the number of double values passed as arguemnts if the 
                     # function called accepts variadic arguments.
                     # TODO: Use this value during the generation of the Register Copy Zone (?)
                     if inst.isVariadic:
                         self.createInst(MOV, 
-                                        AssemblyType.BYTE,
-                                        self.fromTACValue(TACValue(True, TypeSpecifier.CHAR.toBaseType(), str(len(doubleRegisterArgs)))),
-                                        Register(AssemblyType.BYTE, REG.AX))
+                            AssemblyType.BYTE,
+                            self.fromTACValue(TACValue(True, TypeSpecifier.CHAR.toBaseType(), str(len(funcArgs.sse)))),
+                            Register(AssemblyType.BYTE, REG.AX))
 
                     # Emit the call instruction.
                     if isinstance(inst, TACIndirectFunctionCall):
@@ -1208,12 +1297,12 @@ class AssemblerFunction(AssemblyAST):
                                         AssemblyType.QUADWORD,
                                         funcAddrs, 
                                         Register(funcAddrs.assemblyType, REG.AX))
-                        self.createInst(CALL, Register(funcAddrs.assemblyType, REG.AX), inst.arguments)
+                        self.createInst(CALL, Register(funcAddrs.assemblyType, REG.AX), funcArgs, returnValues)
                     else:
-                        self.createInst(CALL, inst.identifier, inst.arguments)
+                        self.createInst(CALL, inst.identifier, funcArgs, returnValues)
 
                     # Readjust the stack pointer.
-                    deallocBytes = 8 * len(stackArgs) + stackPadding
+                    deallocBytes = 8 * len(funcArgs.stack) + stackPadding
                     if deallocBytes != 0:
                         # DEALLOCATE_STACK: deallocBytes
                         self.createInst(BINARY, 
@@ -1223,17 +1312,21 @@ class AssemblerFunction(AssemblyAST):
                     
                     # Retrieve the return value if function is not void and the return value is not 
                     # stored in the stack.
-                    if inst.returnType != TypeSpecifier.VOID.toBaseType() and not returnInStack:
+                    if inst.returnType != TypeSpecifier.VOID.toBaseType() and not returnValues.returnedInStack:
                         INT_RETURN_REGS = [REG.AX, REG.DX]
                         DOUBLE_RETURN_REGS = [REG.XMM0, REG.XMM1]
 
-                        for (value, movAsmbType), reg in zip(returnIntRegs, INT_RETURN_REGS):
+                        for retVal, reg in zip(returnValues.general, INT_RETURN_REGS):
+                            value = retVal.operand
+                            movAsmbType = retVal.asmbType
                             if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                                 self.instructions.extend(self.copyBytesFromRegister(reg, value, movAsmbType.size))
                             else:
                                 self.createInst(MOV, movAsmbType, Register(value.assemblyType, reg), value)
 
-                        for (value, movAsmbType), reg in zip(returnDoubleRegs, DOUBLE_RETURN_REGS):
+                        for retVal, reg in zip(returnValues.sse, DOUBLE_RETURN_REGS):
+                            value = retVal.operand
+                            movAsmbType = retVal.asmbType
                             self.createInst(MOV, movAsmbType, Register(value.assemblyType, reg), value)
 
                 case TACSignExtend():
@@ -1448,14 +1541,14 @@ class AssemblerFunction(AssemblyAST):
                 # - gp_offset: General Purpose Offset. Calculated from the number of integer 
                 # arguments that are passed.
                 gp_offset_value = self.fromTACValue(TACValue(
-                    True, TypeSpecifier.UINT.toBaseType(), str(len(self.intRegArgs) * 8)))
+                    True, TypeSpecifier.UINT.toBaseType(), str(len(self.classifiedArgs.general) * 8)))
                 self.createInst(MOV, AssemblyType.LONGWORD, gp_offset_value, gp_offset)
 
                 # - fp_offset: Floating Point Offset. Calculated from the number of double arguments
                 # that are passed plus 48 (the base offset of double registers in the Register Save 
                 # Area).
                 fp_offset_value = self.fromTACValue(TACValue(
-                    True, TypeSpecifier.UINT.toBaseType(), str(48 + len(self.doubleRegArgs) * 16)))
+                    True, TypeSpecifier.UINT.toBaseType(), str(48 + len(self.classifiedArgs.sse) * 16)))
                 self.createInst(MOV, AssemblyType.LONGWORD, fp_offset_value, fp_offset)
 
                 # - overflow_arg_area: Where stack arguments reside (rbp + 16).
@@ -1758,9 +1851,8 @@ INSTRUCTIONS
 """
 class AssemblerInstruction(AssemblyAST):
     def __init__(self, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
         # Used on the register allocator stage.
         self.liveRegisters: set[REG|str] = set()
@@ -1818,7 +1910,6 @@ class AssemblerInstruction(AssemblyAST):
 
 class MOV(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, src: AssemblerOperand, dst: AssemblerOperand,
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         if not isinstance(src, AssemblerOperand):
             raise ValueError(f"Invalid argument {src}: MOV only receives AssemblerOperands")
@@ -1829,7 +1920,7 @@ class MOV(AssemblerInstruction):
         self.src = src
         self.dst = dst
 
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
@@ -1896,14 +1987,13 @@ class MOV(AssemblerInstruction):
 class MOVS(AssemblerInstruction):
     def __init__(self, srcAsmbType: AssemblyType, dstAsmbType: AssemblyType, 
                  src: AssemblerOperand, dst: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         
         self.srcAsmbType = srcAsmbType
         self.dstAsmbType = dstAsmbType
         self.src = src
         self.dst = dst
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
@@ -1964,13 +2054,12 @@ class MOVS(AssemblerInstruction):
 class MOVZ(AssemblerInstruction):
     def __init__(self, srcAsmbType: AssemblyType, dstAsmbType: AssemblyType,
                  src: AssemblerOperand, dst: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.srcAsmbType = srcAsmbType
         self.dstAsmbType = dstAsmbType
         self.src = src
         self.dst = dst
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
@@ -2055,7 +2144,6 @@ class MOVZ(AssemblerInstruction):
 
 class LEA(AssemblerInstruction):
     def __init__(self, src: AssemblerOperand, dst: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         
         if dst.assemblyType != AssemblyType.QUADWORD:
@@ -2063,7 +2151,7 @@ class LEA(AssemblerInstruction):
 
         self.src = src
         self.dst = dst
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
@@ -2111,14 +2199,13 @@ class LEA(AssemblerInstruction):
 class DEC2INT(AssemblerInstruction):
     def __init__(self, srcAsmbType: AssemblyType, dstAsmbType: AssemblyType,
                  src: AssemblerOperand, dst: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         
         self.srcAsmbType = srcAsmbType
         self.dstAsmbType = dstAsmbType
         self.src = src
         self.dst = dst
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
@@ -2176,14 +2263,13 @@ class DEC2INT(AssemblerInstruction):
 class INT2DEC(AssemblerInstruction):
     def __init__(self, srcAsmbType: AssemblyType, dstAsmbType: AssemblyType,
                  src: AssemblerOperand, dst: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         
         self.srcAsmbType = srcAsmbType
         self.dstAsmbType = dstAsmbType
         self.src = src
         self.dst = dst
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
@@ -2271,14 +2357,13 @@ class INT2DEC(AssemblerInstruction):
 class DEC2DEC(AssemblerInstruction):
     def __init__(self, srcAsmbType: AssemblyType, dstAsmbType: AssemblyType,
                  src: AssemblerOperand, dst: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         
         self.srcAsmbType = srcAsmbType
         self.dstAsmbType = dstAsmbType
         self.src = src
         self.dst = dst
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
@@ -2362,12 +2447,11 @@ class DEC2DEC(AssemblerInstruction):
 
 class UNARY(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, operator: UnaryOperator, operand: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
         self.operator = operator
         self.operand = operand
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.operand]
@@ -2416,10 +2500,9 @@ class UNARY(AssemblerInstruction):
 
 class PUSH(AssemblerInstruction):
     def __init__(self, operand: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.operand = operand
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.operand]
@@ -2462,10 +2545,9 @@ class PUSH(AssemblerInstruction):
 
 class POP(AssemblerInstruction):
     def __init__(self, operand: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.operand = operand
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.operand]
@@ -2504,15 +2586,20 @@ class POP(AssemblerInstruction):
         return f"Pop({self.operand})\n"
     
 class CALL(AssemblerInstruction):
-    def __init__(self, callArgument: str|Register, tacArguments: list[TACValue], 
-                 asmbContext: AssemblyContext | None = None, 
+    def __init__(self, callArgument: str|Register, 
+                 funcArgs: ClassifiedFuncArgs, retValues: ClassifiedReturnValues,
                  parentAST: AssemblyAST | None = None) -> None:
         self.callArgument = callArgument
-        self.tacArguments = tacArguments
-        super().__init__(asmbContext, parentAST)
+        self.funcArgs = funcArgs
+        self.retValues = retValues
+        super().__init__(parentAST)
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        ret: list[AssemblerOperand] = [self.fromTACValue(t) for t in self.tacArguments]
+        ret: list[AssemblerOperand] = []
+        for _, reg in zip(self.funcArgs.general, INT_REG_ORDER[(1 if self.retValues.returnedInStack else 0):]):
+            ret.append(Register(AssemblyType.QUADWORD, reg))
+        for _, reg in zip(self.funcArgs.sse, DOUBLE_REG_ORDER):
+            ret.append(Register(AssemblyType.DOUBLE, reg))
 
         if isinstance(self.callArgument, Register):
             ret.append(self.callArgument)
@@ -2521,9 +2608,9 @@ class CALL(AssemblerInstruction):
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         # A function updates all caller-saved registers (this is the safest approach).
-        modifiedRegs = [REG.DI, REG.SI, REG.DX, REG.CX, REG.R8, REG.R9, REG.AX]
+        MODIFIED_REGS = [REG.DI, REG.SI, REG.DX, REG.CX, REG.R8, REG.R9, REG.AX]
         ret: list[AssemblerOperand] = []
-        for reg in modifiedRegs:
+        for reg in MODIFIED_REGS:
             ret.append(Register(AssemblyType.QUADWORD, reg))
         return ret
 
@@ -2560,7 +2647,6 @@ class RET(AssemblerInstruction):
 class BINARY(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, operator: BinaryOperator, 
                  op1: AssemblerOperand, op2: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
         self.operator = operator
@@ -2568,7 +2654,7 @@ class BINARY(AssemblerInstruction):
         self.op1 = op1
         self.op2 = op2
 
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.op1, self.op2]
@@ -2595,73 +2681,48 @@ class BINARY(AssemblerInstruction):
     def thirdPass(self) -> list[AssemblerInstruction]:
         match self.operator:
             case BinaryOperator.SUM | BinaryOperator.SUBTRACT | BinaryOperator.MULTIPLICATION | \
-                 BinaryOperator.DIVISION | BinaryOperator.BITWISE_AND | \
-                 BinaryOperator.BITWISE_OR | BinaryOperator.BITWISE_XOR:
-                
-                # Can't have immediate longs.
+                BinaryOperator.DIVISION | BinaryOperator.BITWISE_AND | \
+                BinaryOperator.BITWISE_OR | BinaryOperator.BITWISE_XOR:
+
+                isMem = lambda op: isinstance(op, (Memory, Data))
+
                 op1IsLong = isinstance(self.op1, Immediate) and self.op1.isQuadImmediate()
-                # IMUL instruction can't use a memory address as destination.
-                op2IsMemory = isinstance(self.op2, (Memory, Data))
+                op1IsMemory = isMem(self.op1)
+                op2IsMemory = isMem(self.op2)
 
-                if self.op1.assemblyType.isDecimal():
-                    tempRegOP1 = REG.XMM14
-                else:
-                    tempRegOP1 = REG.R10
-                
-                if self.op2.assemblyType.isDecimal():
-                    tempRegOP2 = REG.XMM15
-                else:
-                    tempRegOP2 = REG.R11
+                # Only imul and SSE arithmetic need a register destination.
+                dstMustBeReg = self.operator == BinaryOperator.MULTIPLICATION or \
+                            self.op2.assemblyType.isDecimal()
+                moveOp2ToReg = op2IsMemory and dstMustBeReg
 
-                # Integer operations (except multiplication) can have the second argument in memory.
-                if op1IsLong and \
-                   (not op2IsMemory or \
-                        (op2IsMemory and self.operator != BinaryOperator.MULTIPLICATION and \
-                        not self.op2.assemblyType.isDecimal())
-                   ):
-                    movOp1ToReg = self.createChild(MOV, 
-                                                   self.op1.assemblyType, 
-                                                   self.op1, 
-                                                   Register(self.op1.assemblyType, tempRegOP1))
-                    operateOnReg = self.createChild(BINARY, 
-                                                    self.asmbType, self.operator, 
-                                                    Register(self.op1.assemblyType, tempRegOP1), 
-                                                    self.op2)
-                    return [movOp1ToReg, operateOnReg]
-                
-                if not op1IsLong and op2IsMemory:
-                    movOp2ToReg = self.createChild(MOV, 
-                                                   self.op2.assemblyType,
-                                                   self.op2, 
-                                                   Register(self.op2.assemblyType, tempRegOP2))
-                    operateOnReg = self.createChild(BINARY, 
-                                                    self.asmbType, self.operator, 
-                                                    self.op1, 
-                                                    Register(self.op2.assemblyType, tempRegOP2))
-                    movFromReg = self.createChild(MOV, 
-                                                  self.asmbType,
-                                                  Register(self.op2.assemblyType, tempRegOP2), 
-                                                  self.op2)
-                    return [movOp2ToReg, operateOnReg, movFromReg]
-                
-                if op1IsLong and op2IsMemory:
-                    movOp1ToReg = self.createChild(MOV, 
-                                                   self.op1.assemblyType,
-                                                   self.op1, 
-                                                   Register(self.op1.assemblyType, tempRegOP1))
-                    movOp2ToReg = self.createChild(MOV, 
-                                                   self.op2.assemblyType,
-                                                   self.op2, 
-                                                   Register(self.op2.assemblyType, tempRegOP2))
-                    operateOnReg = self.createChild(BINARY, 
-                                                    self.asmbType, self.operator, 
-                                                    Register(self.op1.assemblyType, tempRegOP1), 
-                                                    Register(self.op2.assemblyType, tempRegOP2))
-                    movFromReg = self.createChild(MOV, 
-                                                  self.asmbType,
-                                                  Register(self.op2.assemblyType, tempRegOP2), 
-                                                  self.op2)
-                    return [movOp1ToReg, movOp2ToReg, operateOnReg, movFromReg]
+                # Two memory operands are illegal, but if op2 is going to a register anyway
+                # then op1 can stay in memory.
+                moveOp1ToReg = op1IsLong or (op1IsMemory and op2IsMemory and not moveOp2ToReg)
+
+                if not moveOp1ToReg and not moveOp2ToReg:
+                    return [self]
+
+                tempRegOP1 = REG.XMM14 if self.op1.assemblyType.isDecimal() else REG.R10
+                tempRegOP2 = REG.XMM15 if self.op2.assemblyType.isDecimal() else REG.R11
+
+                result: list[AssemblerInstruction] = []
+                newOp1 = self.op1
+                newOp2 = self.op2
+
+                if moveOp1ToReg:
+                    newOp1 = Register(self.op1.assemblyType, tempRegOP1)
+                    result.append(self.createChild(MOV, self.op1.assemblyType, self.op1, newOp1))
+
+                if moveOp2ToReg:
+                    newOp2 = Register(self.op2.assemblyType, tempRegOP2)
+                    result.append(self.createChild(MOV, self.op2.assemblyType, self.op2, newOp2))
+
+                result.append(self.createChild(BINARY, self.asmbType, self.operator, newOp1, newOp2))
+
+                if moveOp2ToReg:
+                    result.append(self.createChild(MOV, self.asmbType, newOp2, self.op2))
+
+                return result
 
             case BinaryOperator.LOGIC_LEFT_SHIFT | BinaryOperator.LOGIC_RIGHT_SHIFT | \
                  BinaryOperator.ARITHMETIC_LEFT_SHIFT | BinaryOperator.ARITHMETIC_RIGHT_SHIFT:
@@ -2725,12 +2786,11 @@ class BINARY(AssemblerInstruction):
 # Integer division.
 class IDIV(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, operator: BinaryOperator, op: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
         self.operator = operator
         self.op = op
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.op]
@@ -2774,12 +2834,11 @@ class IDIV(AssemblerInstruction):
 # Float division.
 class DIV(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, operator: BinaryOperator, op: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
         self.operator = operator
         self.op = op
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.op]
@@ -2816,10 +2875,9 @@ class DIV(AssemblerInstruction):
 # Sign extend AX register.
 class CDQ(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
         return [Register(AssemblyType.QUADWORD, REG.AX)]
@@ -2841,13 +2899,12 @@ class CDQ(AssemblerInstruction):
 
 class CMP(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, op1: AssemblerOperand, op2: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbType = asmbType
         self.op1 = op1
         self.op2 = op2
 
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.op1, self.op2]
@@ -2948,10 +3005,9 @@ class CMP(AssemblerInstruction):
 
 class JMP(AssemblerInstruction):
     def __init__(self, identifier: str, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.identifier = identifier
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def emitCode(self) -> str:
         return f"\tjmp \t.L{self.identifier}\n"
@@ -2971,7 +3027,7 @@ class ConditionCode(enum.Enum):
     BELOW           = "b  "     # CF = 1
     BELOW_EQUAL     = "be "     # ZF = CF = 1
     EVEN_PARITY     = "p  "     # PF = 1
-    ODD_PARITY      = "p  "     # PF = 0
+    ODD_PARITY      = "np "     # PF = 0
 
     @staticmethod
     def fromBinaryOperator(op: BinaryOperator, valueType: DeclaratorType) -> ConditionCode:
@@ -3006,11 +3062,10 @@ class ConditionCode(enum.Enum):
         
 class JMPIF(AssemblerInstruction):
     def __init__(self, condition: ConditionCode, identifier: str, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.condition = condition
         self.identifier = identifier
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def emitCode(self) -> str:
         return f"\tj{self.condition.value}\t.L{self.identifier}\n"
@@ -3020,11 +3075,10 @@ class JMPIF(AssemblerInstruction):
 
 class SETIF(AssemblerInstruction):
     def __init__(self, condition: ConditionCode, op: AssemblerOperand, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.condition = condition
         self.op = op
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.op]
@@ -3063,10 +3117,9 @@ class LABEL(AssemblerInstruction):
         return label
 
     def __init__(self, identifier: str, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.identifier = identifier
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def emitCode(self) -> str:
         return f"\n.L{self.identifier}:\n"
@@ -3076,10 +3129,9 @@ class LABEL(AssemblerInstruction):
 
 class COMMENT(AssemblerInstruction):
     def __init__(self, comment: str, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.comment = comment
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def emitCode(self) -> str:
         return f"\t# {self.comment}"
@@ -3090,10 +3142,9 @@ class COMMENT(AssemblerInstruction):
 # Writes raw code into the assembly output.
 class CODE(AssemblerInstruction):
     def __init__(self, asmbCode: str, 
-                 asmbContext: AssemblyContext | None = None, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.asmbCode = asmbCode
-        super().__init__(asmbContext, parentAST)
+        super().__init__(parentAST)
 
     def emitCode(self) -> str:
         return self.asmbCode
@@ -3108,8 +3159,7 @@ class AssemblerOperand(AssemblyAST):
     def __init__(self, assemblyType: AssemblyType, 
                  parentAST: AssemblyAST | None = None) -> None:
         self.assemblyType = assemblyType
-        # Assembly operands do not need context, only instructions.
-        super().__init__(None, parentAST)
+        super().__init__(parentAST)
 
     def firstPass(self):
         # Nothing to do when parsing.
@@ -3133,79 +3183,6 @@ class AssemblerOperand(AssemblyAST):
     @abstractmethod
     def print(self) -> str:
         pass
-
-class REG(enum.Enum):
-    AX = "rax"
-    CX = "rcx"
-    DX = "rdx"
-    BX = "rbx"
-    SI = "rsi"
-    DI = "rdi"
-    SP = "rsp"
-    BP = "rbp"
-    R8 = "r8"
-    R9 = "r9"
-    R10 = "r10"
-    R11 = "r11"
-    R12 = "r12"
-    R13 = "r13"
-    R14 = "r14"
-    R15 = "r15"
-
-    XMM0  = "xmm0"
-    XMM1  = "xmm1"
-    XMM2  = "xmm2"
-    XMM3  = "xmm3"
-    XMM4  = "xmm4"
-    XMM5  = "xmm5"
-    XMM6  = "xmm6"
-    XMM7  = "xmm7"
-    XMM8  = "xmm8"
-    XMM9  = "xmm9"
-    XMM10 = "xmm10"
-    XMM11 = "xmm11"
-    XMM12 = "xmm12"
-    XMM13 = "xmm13"
-    XMM14 = "xmm14"
-    XMM15 = "xmm15"
-
-    @staticmethod
-    def getRegisterDict() -> dict[str, tuple]:
-        return {
-            "rax"   : ("eax",   "ax",   "al"),
-            "rcx"   : ("ecx",   "cx",   "cl"),
-            "rdx"   : ("edx",   "dx",   "dl"),
-            "rbx"   : ("ebx",   "bx",   "bl"),
-            "rsi"   : ("esi",   "si",   "sil"),
-            "rdi"   : ("edi",   "di",   "dil"),
-            "rsp"   : ("esp",   "sp",   "spl"),
-            "rbp"   : ("ebp",   "bp",   "bpl"),
-            "r8"    : ("r8d",   "r8w",  "r8b"),
-            "r9"    : ("r9d",   "r9w",  "r9b"),
-            "r10"   : ("r10d",  "r10w", "r10b"),
-            "r11"   : ("r11d",  "r11w", "r11b"),
-            "r12"   : ("r12d",  "r12w", "r12b"),
-            "r13"   : ("r13d",  "r13w", "r13b"),
-            "r14"   : ("r14d",  "r14w", "r14b"),
-            "r15"   : ("r15d",  "r15w", "r15b"),
-        }
-
-    def get64Name(self) -> str:
-        return self.value
-    def get32Name(self) -> str:
-        d = REG.getRegisterDict()
-        return d[self.value][0] if self.value in d else self.value
-    def get16Name(self) -> str:
-        d = REG.getRegisterDict()
-        return d[self.value][1] if self.value in d else self.value
-    def get8Name(self) -> str:
-        d = REG.getRegisterDict()
-        return d[self.value][2] if self.value in d else self.value
-    def isFloatRegister(self) -> bool:
-        return self.name.startswith("XMM")
-
-    def isCalleeSaved(self) -> bool:
-        return self in (REG.BX, REG.SP, REG.BP, REG.R12, REG.R13, REG.R14, REG.R15)
 
 class Register(AssemblerOperand):
     def __init__(self, assemblyType: AssemblyType, reg: REG, parentAST: AssemblyAST | None = None) -> None:
