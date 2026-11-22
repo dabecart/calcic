@@ -26,6 +26,7 @@ AssemblyT = TypeVar("AssemblyT", bound="AssemblyAST")
 class FunctionValue:
     operand: AssemblerOperand
     asmbType: AssemblyType
+    associatedReg: REG|None = None
 
 @dataclass
 class ClassifiedFuncArgs:
@@ -582,11 +583,15 @@ class AssemblerFunction(AssemblyAST):
         self.identifier: str = self.function.identifier
         self.instructions: list[AssemblerInstruction] = []
         self.calleeSavedRegs: list[REG] = []
+
+        self.classifiedArgs = ClassifiedFuncArgs()
+        self.retValues = ClassifiedReturnValues()
+
         super().__init__(parentAST)
         # super() calls the first pass.
 
         # Substitute Pseudo values (which would be stored in memory) for Registers where possible.
-        regAlloc = RegisterAllocator(self.instructions)
+        regAlloc = RegisterAllocator(self.instructions, self.retValues)
         self.instructions = regAlloc.allocateRegisters()
         self.calleeSavedRegs = regAlloc.getCalleeSavedRegisters()
 
@@ -768,6 +773,8 @@ class AssemblerFunction(AssemblyAST):
             # In parallel, double arguments must be pushed to XMM0 to XMM7 and then to the stack.
             # Do not use DI if the return value is stored in the stack.
             for funcArg, reg in zip(self.classifiedArgs.general, INT_REG_ORDER[(1 if self.returnInStack else 0):]):
+                funcArg.associatedReg = reg
+
                 value = funcArg.operand
                 movAsmbType = funcArg.asmbType
 
@@ -793,12 +800,11 @@ class AssemblerFunction(AssemblyAST):
                 if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                     self.instructions.extend(self.copyBytesFromRegister(reg, value, movAsmbType.size))
                 else:
-                    self.createInst(MOV, 
-                                    movAsmbType, 
-                                    Register(value.assemblyType, reg), 
-                                    value)
+                    self.createInst(MOV, movAsmbType, Register(movAsmbType, reg), value)
 
             for funcArg, reg in zip(self.classifiedArgs.sse, DOUBLE_REG_ORDER):
+                funcArg.associatedReg = reg
+
                 value = funcArg.operand
                 movAsmbType = funcArg.asmbType
 
@@ -816,10 +822,7 @@ class AssemblerFunction(AssemblyAST):
                     else:
                         raise ValueError()
 
-                self.createInst(MOV, 
-                                movAsmbType, 
-                                Register(value.assemblyType, reg), 
-                                value)
+                self.createInst(MOV, movAsmbType, Register(movAsmbType, reg), value)
 
             # The arguments in the stack start at Stack(16). From then on, add in groups of eight.
             stackOffset = 16
@@ -862,9 +865,9 @@ class AssemblerFunction(AssemblyAST):
 
                 case TACReturn():
                     if inst.result.valueType != TypeSpecifier.VOID.toBaseType():
-                        retValues = self.classifyReturnValue(inst.result)
+                        self.retValues = self.classifyReturnValue(inst.result)
 
-                        if retValues.returnedInStack:
+                        if self.retValues.returnedInStack:
                             # Get the address of where the return value should be stored.
                             self.createInst(MOV, 
                                             AssemblyType.QUADWORD,
@@ -879,25 +882,23 @@ class AssemblerFunction(AssemblyAST):
                             INT_RETURN_REGS = [REG.AX, REG.DX]
                             DOUBLE_RETURN_REGS = [REG.XMM0, REG.XMM1]
 
-                            for retArg, reg in zip(retValues.general, INT_RETURN_REGS):
+                            for retArg, reg in zip(self.retValues.general, INT_RETURN_REGS):
+                                retArg.associatedReg = reg
+
                                 value = retArg.operand
                                 movAsmbType = retArg.asmbType
 
                                 if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                                     self.instructions.extend(self.copyBytesToRegister(value, reg, movAsmbType.size))
                                 else:
-                                    self.createInst(MOV, 
-                                                    movAsmbType, 
-                                                    value, 
-                                                    Register(value.assemblyType, reg))
+                                    self.createInst(MOV, movAsmbType, value, Register(movAsmbType, reg))
 
-                            for retArg, reg in zip(retValues.sse, DOUBLE_RETURN_REGS):
+                            for retArg, reg in zip(self.retValues.sse, DOUBLE_RETURN_REGS):
+                                retArg.associatedReg = reg
+
                                 value = retArg.operand
                                 movAsmbType = retArg.asmbType
-                                self.createInst(MOV, 
-                                                movAsmbType, 
-                                                value, 
-                                                Register(value.assemblyType, reg))
+                                self.createInst(MOV, movAsmbType, value, Register(movAsmbType, reg))
 
                     self.createInst(RET)
 
@@ -1052,6 +1053,17 @@ class AssemblerFunction(AssemblyAST):
                                 self.createInst(SETIF, 
                                     ConditionCode.fromBinaryOperator(inst.operator, inst.exp1.valueType), 
                                     dest)
+
+                        case BinaryOperator.LOGIC_LEFT_SHIFT | BinaryOperator.LOGIC_RIGHT_SHIFT | \
+                            BinaryOperator.ARITHMETIC_LEFT_SHIFT | BinaryOperator.ARITHMETIC_RIGHT_SHIFT:
+                            self.createInst(MOV, exp1.assemblyType, exp1, dest)
+                            if isinstance(exp2, Immediate):
+                                count = exp2
+                            else:
+                                # The count must be in CL. Truncating to a byte is what the hardware does anyway.
+                                self.createInst(MOV, AssemblyType.BYTE, exp2, Register(AssemblyType.BYTE, REG.CX))
+                                count = Register(AssemblyType.BYTE, REG.CX)
+                            self.createInst(BINARY, exp1.assemblyType, inst.operator, count, dest)
 
                         case _:
                             self.createInst(MOV, exp1.assemblyType, exp1, dest)
@@ -1247,7 +1259,7 @@ class AssemblerFunction(AssemblyAST):
                             self.createInst(PUSH, value)
                         else:
                             # This value is under 8 bytes so it must be transferred to a register 
-                            # and then pushed. As I will be using AX (XMM registers cannot be 
+                            # and then pushed. As I will be using R10 (XMM registers cannot be 
                             # pushed), decimal values must be converted to their integer 
                             # counterparts.
                             if movAsmbType == AssemblyType.DOUBLE:
@@ -1255,8 +1267,8 @@ class AssemblerFunction(AssemblyAST):
                             elif movAsmbType == AssemblyType.FLOAT:
                                 movAsmbType = AssemblyType.LONGWORD
 
-                            self.createInst(MOV, movAsmbType, value, Register(movAsmbType, REG.AX))
-                            self.createInst(PUSH, Register(AssemblyType.QUADWORD, REG.AX))
+                            self.createInst(MOV, movAsmbType, value, Register(movAsmbType, REG.R10))
+                            self.createInst(PUSH, Register(AssemblyType.QUADWORD, REG.R10))
 
                     # Pass the function's arguments to registers.
                     # The order of arguments is: DI, SI, DX, CX, R8, R9 and then stack (pushed in 
@@ -1272,14 +1284,14 @@ class AssemblerFunction(AssemblyAST):
                             # size is not standard, i.e. 3, 5, 6 or 7 bytes.
                             self.instructions.extend(self.copyBytesToRegister(value, reg, movAsmbType.size))
                         else:
-                            self.createInst(MOV, movAsmbType, value, Register(value.assemblyType, reg))
+                            self.createInst(MOV, movAsmbType, value, Register(movAsmbType, reg))
 
                     # Now with the double registers.
                     for funcArg, reg in zip(funcArgs.sse, DOUBLE_REG_ORDER):
                         value = funcArg.operand
                         movAsmbType = funcArg.asmbType
                         # Move the variable to the register in order.
-                        self.createInst(MOV, movAsmbType, value, Register(value.assemblyType, reg))
+                        self.createInst(MOV, movAsmbType, value, Register(movAsmbType, reg))
 
                     # Store in AL (RAX) the number of double values passed as arguemnts if the 
                     # function called accepts variadic arguments.
@@ -1322,17 +1334,22 @@ class AssemblerFunction(AssemblyAST):
                             if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
                                 self.instructions.extend(self.copyBytesFromRegister(reg, value, movAsmbType.size))
                             else:
-                                self.createInst(MOV, movAsmbType, Register(value.assemblyType, reg), value)
+                                self.createInst(MOV, movAsmbType, Register(movAsmbType, reg), value)
 
                         for retVal, reg in zip(returnValues.sse, DOUBLE_RETURN_REGS):
                             value = retVal.operand
                             movAsmbType = retVal.asmbType
-                            self.createInst(MOV, movAsmbType, Register(value.assemblyType, reg), value)
+                            self.createInst(MOV, movAsmbType, Register(movAsmbType, reg), value)
 
                 case TACSignExtend():
                     exp = self.fromTACValue(inst.exp)
                     result = self.fromTACValue(inst.result)
-                    self.createInst(MOVS, exp.assemblyType, result.assemblyType, exp, result)
+                    if isinstance(exp, Immediate):
+                        # movs does not accept immediates: the value is already known, so move it directly.
+                        value = TACValue(True, inst.result.valueType, str(exp.intVal))
+                        self.createInst(MOV, result.assemblyType, self.fromTACValue(value), result)
+                    else:
+                        self.createInst(MOVS, exp.assemblyType, result.assemblyType, exp, result)
                 
                 case TACTruncate():
                     exp = self.fromTACValue(inst.exp)
@@ -1342,8 +1359,14 @@ class AssemblerFunction(AssemblyAST):
                 case TACZeroExtend():
                     exp = self.fromTACValue(inst.exp)
                     result = self.fromTACValue(inst.result)
-                    self.createInst(MOVZ, exp.assemblyType, result.assemblyType, exp, result)
-
+                    if isinstance(exp, Immediate):
+                        # Mask to the source width so the unsigned value is preserved.
+                        raw = exp.intVal & ((1 << (8 * exp.assemblyType.size)) - 1)
+                        value = TACValue(True, inst.result.valueType, str(raw))
+                        self.createInst(MOV, result.assemblyType, self.fromTACValue(value), result)
+                    else:
+                        self.createInst(MOVZ, exp.assemblyType, result.assemblyType, exp, result)
+                        
                 case TACIntToDecimal():
                     exp = self.fromTACValue(inst.exp)
                     result = self.fromTACValue(inst.result)
@@ -1363,7 +1386,7 @@ class AssemblerFunction(AssemblyAST):
                                             exp, 
                                             Register(AssemblyType.LONGWORD, REG.AX))
                         self.createInst(INT2DEC,
-                                        exp.assemblyType, result.assemblyType, 
+                                        AssemblyType.LONGWORD, result.assemblyType, 
                                         Register(AssemblyType.LONGWORD, REG.AX), 
                                         result)
                     else:
@@ -1425,7 +1448,7 @@ class AssemblerFunction(AssemblyAST):
                                         self.fromTACValue(TACValue(True, TypeSpecifier.LONG.toBaseType(), "0")), 
                                         exp)
                         self.createInst(JMPIF,
-                                        ConditionCode.ABOVE_EQUAL,
+                                        ConditionCode.LESS,
                                         outOfRangeLabel)
                         self.createInst(INT2DEC, 
                                         exp.assemblyType, result.assemblyType,
@@ -1908,6 +1931,10 @@ class AssemblerInstruction(AssemblyAST):
 
         return var
 
+    # Registers read to compute the addresses of the given operands.
+    def getAddressedRegisters(self, *ops: AssemblerOperand) -> list[AssemblerOperand]:
+        return [reg for op in ops for reg in op.getAddressRegisters()]
+
 class MOV(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, src: AssemblerOperand, dst: AssemblerOperand,
                  parentAST: AssemblyAST | None = None) -> None:
@@ -1926,7 +1953,7 @@ class MOV(AssemblerInstruction):
         return [self.src, self.dst]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.src]
+        return [self.src] + self.getAddressedRegisters(self.src, self.dst)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
@@ -1999,7 +2026,7 @@ class MOVS(AssemblerInstruction):
         return [self.src, self.dst]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.src]
+        return [self.src] + self.getAddressedRegisters(self.src, self.dst)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
@@ -2065,7 +2092,7 @@ class MOVZ(AssemblerInstruction):
         return [self.src, self.dst]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.src]
+        return [self.src] + self.getAddressedRegisters(self.src, self.dst)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
@@ -2157,7 +2184,7 @@ class LEA(AssemblerInstruction):
         return [self.src, self.dst]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.src]
+        return self.getAddressedRegisters(self.src, self.dst)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
@@ -2211,7 +2238,7 @@ class DEC2INT(AssemblerInstruction):
         return [self.src, self.dst]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.src]
+        return [self.src] + self.getAddressedRegisters(self.src, self.dst)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
@@ -2275,7 +2302,7 @@ class INT2DEC(AssemblerInstruction):
         return [self.src, self.dst]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.src]
+        return [self.src] + self.getAddressedRegisters(self.src, self.dst)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
@@ -2369,7 +2396,7 @@ class DEC2DEC(AssemblerInstruction):
         return [self.src, self.dst]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.src]
+        return [self.src] + self.getAddressedRegisters(self.src, self.dst)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
@@ -2457,7 +2484,7 @@ class UNARY(AssemblerInstruction):
         return [self.operand]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.operand]
+        return [self.operand] + self.getAddressedRegisters(self.operand)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.operand]
@@ -2508,7 +2535,7 @@ class PUSH(AssemblerInstruction):
         return [self.operand]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.operand]
+        return [self.operand] + self.getAddressedRegisters(self.operand)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return []
@@ -2553,10 +2580,10 @@ class POP(AssemblerInstruction):
         return [self.operand]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.operand]
+        return self.getAddressedRegisters(self.operand)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
-        return []
+        return [self.operand]
 
     def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
         if isinstance(self.operand, Pseudo) and (newOperandReg := registerMap.get(self.operand.name)) is not None:
@@ -2607,11 +2634,18 @@ class CALL(AssemblerInstruction):
         return ret
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
-        # A function updates all caller-saved registers (this is the safest approach).
-        MODIFIED_REGS = [REG.DI, REG.SI, REG.DX, REG.CX, REG.R8, REG.R9, REG.AX]
+        # A function updates all caller-saved registers.
+        MODIFIED_INT_REGS = [REG.AX, REG.CX, REG.DX, REG.SI, REG.DI, REG.R8, REG.R9, REG.R10, REG.R11]
+        MODIFIED_SSE_REGS = [REG.XMM0, REG.XMM1, REG.XMM2, REG.XMM3, REG.XMM4, REG.XMM5, 
+                             REG.XMM6, REG.XMM7, REG.XMM8, REG.XMM9, REG.XMM10, REG.XMM11, 
+                             REG.XMM12, REG.XMM13, REG.XMM14, REG.XMM15]
+
         ret: list[AssemblerOperand] = []
-        for reg in MODIFIED_REGS:
+        for reg in MODIFIED_INT_REGS:
             ret.append(Register(AssemblyType.QUADWORD, reg))
+        for reg in MODIFIED_SSE_REGS:
+            ret.append(Register(AssemblyType.DOUBLE, reg))
+
         return ret
 
     def emitCode(self) -> str:
@@ -2660,7 +2694,7 @@ class BINARY(AssemblerInstruction):
         return [self.op1, self.op2]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.op1, self.op2]
+        return [self.op1, self.op2] + self.getAddressedRegisters(self.op1, self.op2)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.op2]
@@ -2725,17 +2759,14 @@ class BINARY(AssemblerInstruction):
                 return result
 
             case BinaryOperator.LOGIC_LEFT_SHIFT | BinaryOperator.LOGIC_RIGHT_SHIFT | \
-                 BinaryOperator.ARITHMETIC_LEFT_SHIFT | BinaryOperator.ARITHMETIC_RIGHT_SHIFT:
-                if isinstance(self.op1, (Memory, Data)):
-                    # In x86, you cannot shift by an amount stored in memory, it must be stored in
-                    # register CX (8 bits).
-                    movToReg = self.createChild(MOV, 
-                                                AssemblyType.BYTE, 
+                BinaryOperator.ARITHMETIC_LEFT_SHIFT | BinaryOperator.ARITHMETIC_RIGHT_SHIFT:
+                isCLReg = isinstance(self.op1, Register) and self.op1.reg == REG.CX
+
+                if not isinstance(self.op1, Immediate) and not isCLReg:
+                    movToReg = self.createChild(MOV, AssemblyType.BYTE,
                                                 self.op1, Register(AssemblyType.BYTE, REG.CX))
-                    operateOnReg = self.createChild(BINARY, 
-                                                    self.asmbType, self.operator, 
-                                                    Register(AssemblyType.BYTE, REG.CX), 
-                                                    self.op2)
+                    operateOnReg = self.createChild(BINARY, self.asmbType, self.operator,
+                                                    Register(AssemblyType.BYTE, REG.CX), self.op2)
                     return [movToReg, operateOnReg]
 
             case _:
@@ -2760,12 +2791,16 @@ class BINARY(AssemblerInstruction):
             case BinaryOperator.DIVISION:
                 return f"\tdiv{self.asmbType.getTypeName()}\t{self.op1.emitCode()}, {self.op2.emitCode()}\n"
             case BinaryOperator.LOGIC_LEFT_SHIFT:
+                self.op1.assemblyType = AssemblyType.BYTE
                 return f"\tshl{self.asmbType.getTypeName()}\t{self.op1.emitCode()}, {self.op2.emitCode()}\n"
             case BinaryOperator.ARITHMETIC_LEFT_SHIFT:
+                self.op1.assemblyType = AssemblyType.BYTE
                 return f"\tsal{self.asmbType.getTypeName()}\t{self.op1.emitCode()}, {self.op2.emitCode()}\n"
             case BinaryOperator.LOGIC_RIGHT_SHIFT:
+                self.op1.assemblyType = AssemblyType.BYTE
                 return f"\tshr{self.asmbType.getTypeName()}\t{self.op1.emitCode()}, {self.op2.emitCode()}\n"
             case BinaryOperator.ARITHMETIC_RIGHT_SHIFT:
+                self.op1.assemblyType = AssemblyType.BYTE
                 return f"\tsar{self.asmbType.getTypeName()}\t{self.op1.emitCode()}, {self.op2.emitCode()}\n"
             case BinaryOperator.BITWISE_AND:
                 return f"\tand{self.asmbType.getTypeName()}\t{self.op1.emitCode()}, {self.op2.emitCode()}\n"
@@ -2783,7 +2818,7 @@ class BINARY(AssemblerInstruction):
     def print(self) -> str:
         return f"Binary({self.operator.name}, {self.op1}, {self.op2})\n"
 
-# Integer division.
+# Signed integer division.
 class IDIV(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, operator: BinaryOperator, op: AssemblerOperand, 
                  parentAST: AssemblyAST | None = None) -> None:
@@ -2796,7 +2831,8 @@ class IDIV(AssemblerInstruction):
         return [self.op]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.op, Register(AssemblyType.QUADWORD, REG.AX), Register(AssemblyType.QUADWORD, REG.DX)]
+        return [self.op, Register(AssemblyType.QUADWORD, REG.AX), Register(AssemblyType.QUADWORD, REG.DX)] \
+                + self.getAddressedRegisters(self.op)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [Register(AssemblyType.QUADWORD, REG.AX), Register(AssemblyType.QUADWORD, REG.DX)]
@@ -2831,7 +2867,7 @@ class IDIV(AssemblerInstruction):
     def print(self) -> str:
         return f"Binary({self.operator.name}, {self.op}, AX)\n"
 
-# Float division.
+# Unsigned integer division.
 class DIV(AssemblerInstruction):
     def __init__(self, asmbType: AssemblyType, operator: BinaryOperator, op: AssemblerOperand, 
                  parentAST: AssemblyAST | None = None) -> None:
@@ -2842,6 +2878,13 @@ class DIV(AssemblerInstruction):
 
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.op]
+
+    def getUsedOperands(self) -> list[AssemblerOperand]:
+        return [self.op, Register(AssemblyType.QUADWORD, REG.AX), Register(AssemblyType.QUADWORD, REG.DX)] \
+                + self.getAddressedRegisters(self.op)
+
+    def getUpdatedOperands(self) -> list[AssemblerOperand]:
+        return [Register(AssemblyType.QUADWORD, REG.AX), Register(AssemblyType.QUADWORD, REG.DX)]
 
     def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
         if isinstance(self.op, Pseudo) and (newOperandReg := registerMap.get(self.op.name)) is not None:
@@ -2910,7 +2953,7 @@ class CMP(AssemblerInstruction):
         return [self.op1, self.op2]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return [self.op1, self.op2]
+        return [self.op1, self.op2] + self.getAddressedRegisters(self.op1, self.op2)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return []
@@ -3084,7 +3127,7 @@ class SETIF(AssemblerInstruction):
         return [self.op]
 
     def getUsedOperands(self) -> list[AssemblerOperand]:
-        return []
+        return self.getAddressedRegisters(self.op)
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.op]
@@ -3171,6 +3214,10 @@ class AssemblerOperand(AssemblyAST):
 
     def thirdPass(self):
         pass
+
+    # Registers that must be read to compute this operand's address.
+    def getAddressRegisters(self) -> list[Register]:
+        return []
 
     @abstractmethod
     def createCopy(self) -> AssemblerOperand:
@@ -3319,6 +3366,9 @@ class Memory(AssemblerOperand):
 
     def print(self) -> str:
         return f"Memory({self.register}, {self.offset})"
+
+    def getAddressRegisters(self) -> list[Register]:
+        return [self.register]
     
     @staticmethod
     def restartStackVariables(startValue: int = 0):
@@ -3407,6 +3457,9 @@ class Indexed(AssemblerOperand):
     def print(self) -> str:
         return f"Indexed({self.base}, {self.index}, {self.offset})"
 
+    def getAddressRegisters(self) -> list[Register]:
+        return [self.base, self.index]
+
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 REGISTER ALLOCATOR
@@ -3415,19 +3468,34 @@ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 # Do not use these registers during the register allocation process. These registers are removed 
 # from the base graphs as they are used in intermediary processes.
-UNUSED_REGISTERS: list[REG] = [REG.SP, REG.BP, REG.R10, REG.R11]
+UNUSED_REGISTERS: list[REG] = [REG.SP, REG.BP, REG.R10, REG.R11, REG.XMM14, REG.XMM15]
 
 class RegisterAllocator:
-    def __init__(self, instructions: list[AssemblerInstruction]) -> None:
+    def __init__(self, instructions: list[AssemblerInstruction], retValues: ClassifiedReturnValues) -> None:
         self.instructions: list[AssemblerInstruction] = instructions
+        self.retValues = retValues
         self.calleeSavedRegisters: set[REG]|None = None
 
+        # Aliased and static variables cannot be substituted.
+        self.excludedPseudo: set[str] = set(TACStaticVariable.staticVariables.keys())
+        for inst in self.instructions:
+            if isinstance(inst, LEA) and isinstance(inst.src, (Pseudo, PseudoMemory)):
+                self.excludedPseudo.add(inst.src.name)
+
     def allocateRegisters(self) -> list[AssemblerInstruction]:
-        interferenceGraph = self._buildGraph()
-        interferenceGraph.calculateSpillCosts(self.instructions)
-        interferenceGraph.colorGraph()
-        registerMap, self.calleeSavedRegisters = self._createRegisterMap(interferenceGraph)
-        return self._substitutePseudo(registerMap)
+        interferenceGraph_int = self._buildGraph(InterferenceGraphType.INT)
+        interferenceGraph_int.calculateSpillCosts(self.instructions, self.excludedPseudo)
+        interferenceGraph_int.colorGraph()
+        intRegisterMap, self.calleeSavedRegisters = self._createRegisterMap(interferenceGraph_int)
+
+        interferenceGraph_sse = self._buildGraph(InterferenceGraphType.SSE)
+        interferenceGraph_sse.calculateSpillCosts(self.instructions, self.excludedPseudo)
+        interferenceGraph_sse.colorGraph()
+        # There aren't any callee-saved SSE registers.
+        sseRegisterMap, _ = self._createRegisterMap(interferenceGraph_sse)
+
+        # Merge both register maps to substitute the pseudo variables.
+        return self._substitutePseudo(intRegisterMap | sseRegisterMap)
 
     def getCalleeSavedRegisters(self) -> list[REG]:
         assert self.calleeSavedRegisters is not None, "Call first allocateRegisters()"
@@ -3435,19 +3503,36 @@ class RegisterAllocator:
         # known order.
         return list(self.calleeSavedRegisters)
 
-    def _buildGraph(self) -> InterferenceGraph:
-        interferenceGraph = InterferenceGraph.BASE_INT_GRAPH()
+    def _buildGraph(self, t: InterferenceGraphType) -> InterferenceGraph:
+        match t:
+            case InterferenceGraphType.INT:
+                interferenceGraph = InterferenceGraph.BASE_INT_GRAPH()
+                retValues = self.retValues.general
+            case InterferenceGraphType.SSE:
+                interferenceGraph = InterferenceGraph.BASE_SSE_GRAPH()
+                retValues = self.retValues.sse
+            case _:
+                raise ValueError()
 
         # Add the pseudo register operands from the instruction list. Skip static variables as they 
         # should always be read from memory.
         for inst in self.instructions:
             for op in inst.getOperands():
-                if isinstance(op, Pseudo) and op.name not in TACStaticVariable.staticVariables:
+                if isinstance(op, Pseudo) and op.name not in self.excludedPseudo:
                     interferenceGraph.addPseudoRegister(op)
 
         # Analyze liveness of nodes.
-        cfg = ControlFlowGraph(self.instructions)
-        cfg.calculateLiveRegisters()
+        cfg = ControlFlowGraph(self.instructions, t)
+        
+        # Based on the classified return values, pass the proper return registers.
+        retLiveRegs: set[REG|str] = set()
+        for val in retValues:
+            if val.associatedReg is not None:
+                retLiveRegs.add(val.associatedReg)
+
+        cfg.calculateLiveRegisters(retLiveRegs, self.excludedPseudo)
+
+        isGraphDecimal = t == InterferenceGraphType.SSE
 
         # Use the liveness information to create the edges of the graph.
         for node in cfg.nodes.values():
@@ -3465,9 +3550,13 @@ class RegisterAllocator:
                         continue
 
                     for upd in inst.getUpdatedOperands():
+                        # Skip updated operands which don't have the same type as this graph.
+                        if isGraphDecimal != upd.assemblyType.isDecimal():
+                            continue
+
                         if isinstance(upd, Register) and upd.reg not in UNUSED_REGISTERS:
                             updNode = upd.reg
-                        elif isinstance(upd, Pseudo) and upd.name not in TACStaticVariable.staticVariables:
+                        elif isinstance(upd, Pseudo) and upd.name not in self.excludedPseudo:
                             updNode = upd.name
                         else:
                             continue
@@ -3516,14 +3605,23 @@ class RegAllocNode:
     color: int|None                 = None
     pruned: bool                    = False
 
+class InterferenceGraphType(enum.Enum):
+    INT = enum.auto()
+    SSE = enum.auto()
+
 class InterferenceGraph:
-    def __init__(self, nodes: list[RegAllocNode], k: int) -> None:
+    def __init__(self, nodes: list[RegAllocNode], k: int, t: InterferenceGraphType) -> None:
         self.nodes = nodes
         self.nodesByID: dict[REG|str, RegAllocNode] = {node.id : node for node in nodes}
         # Number of colors to color the graph. Is the number of hard registers available.
         self.k = k
+        self.graphType = t
 
     def addPseudoRegister(self, pseudo: Pseudo):
+        # Only add pseudo to the registers based on the type of registers being used.
+        if pseudo.assemblyType.isDecimal() != (self.graphType == InterferenceGraphType.SSE):
+            return
+
         # Check that the pseudo register is not in the graph yet.
         if pseudo.name in self.nodesByID:
             return
@@ -3542,83 +3640,77 @@ class InterferenceGraph:
         n1.neighbors.add(n2.id)
         n2.neighbors.add(n1.id)
 
-    def calculateSpillCosts(self, instructions: list[AssemblerInstruction]):
+    def calculateSpillCosts(self, instructions: list[AssemblerInstruction], excludedPseudo: set[str]):
         for inst in instructions:
             # TODO: Implement loop detection. At the moment, variables get its spill cost by the 
             # number of times they appear inside code, but if they're inside a loop they should be
             # accounted for a lot more.
             for op in inst.getOperands():
+                if op.assemblyType.isDecimal() != (self.graphType == InterferenceGraphType.SSE):
+                    continue
+
                 # Only calculate for non-static Pseudo. REG have inf spill (they cannot be spilled).
-                if isinstance(op, Pseudo) and op.name not in TACStaticVariable.staticVariables:
+                if isinstance(op, Pseudo) and op.name not in excludedPseudo:
                     node = self.nodesByID.get(op.name)
                     assert node is not None, f"Could not find {op} inside the InterferenceGraph"
 
                     node.spillCost += 1.0
 
     def colorGraph(self):
-        unprunedNodes = self._getUnprunedNodes()
-        if len(unprunedNodes) == 0:
-            return
+        stack: list[RegAllocNode] = []
 
-        chosenNode: RegAllocNode|None = None
-        for n in unprunedNodes:
-            degree = len(self._getUnprunedNeighborsOfNode(n))
-            if degree < self.k:
-                # We can prune this node as it can be easily colored by the degree < k rule.
-                chosenNode = n
-                break
-
-        if chosenNode is None:
-            # We couldn't prune a node so we'll need to spill one candidate. We'll use the spill 
-            # cost divided by the degree of the node as a spilling metric.
-            minimalSpillMetric = float("inf")
+        # Remove nodes from the graph until none is left.
+        unprunedNodes = [n for n in self.nodes if not n.pruned]
+        while len(unprunedNodes) > 0:
+            chosenNode: RegAllocNode|None = None
             for n in unprunedNodes:
-                degree = len(self._getUnprunedNeighborsOfNode(n))
-                spillMetric = n.spillCost / degree
-                if spillMetric < minimalSpillMetric:
+                if self._getUnprunedDegree(n) < self.k:
+                    # We can prune this node as it can be easily colored by the degree < k rule.
                     chosenNode = n
-                    minimalSpillMetric = spillMetric
+                    break
 
-        assert chosenNode is not None
-        chosenNode.pruned = True
+            if chosenNode is None:
+                # We couldn't prune a node so we'll need to spill one candidate. We'll use the spill 
+                # cost divided by the degree of the node as a spilling metric.
+                minimalSpillMetric = float("inf")
+                for n in unprunedNodes:
+                    spillMetric = n.spillCost / max(self._getUnprunedDegree(n), 1)
+                    if spillMetric < minimalSpillMetric:
+                        chosenNode = n
+                        minimalSpillMetric = spillMetric
 
-        # Color the rest of the graph.
-        self.colorGraph()
+            assert chosenNode is not None
+            chosenNode.pruned = True
+            stack.append(chosenNode)
+            unprunedNodes.remove(chosenNode)
 
-        # If this is reached, all previous nodes have been pruned except "chosenNode", which is the 
-        # first node to be colored. The previous calls will be coloring the nodes in order.
+        # Color the nodes in order.
+        while len(stack) > 0:
+            node = stack.pop()
 
-        # Get the used colors by the neighbors of "chosenNode". Those colors are taken.
-        usedColors: set[int] = {
-            color
-            for neighborID in chosenNode.neighbors
-            if (color := self.nodesByID[neighborID].color) is not None
-        }
-        # Get all free colors from 0 to k-1.
-        availableColors: list[int] = [c for c in range(self.k) if c not in usedColors]
+            # Get the used colors by the neighbors. Those colors are taken.
+            usedColors: set[int] = {
+                color
+                for neighborID in node.neighbors
+                if (color := self.nodesByID[neighborID].color) is not None
+            }
+            # Get all free colors from 0 to k-1.
+            availableColors: list[int] = [c for c in range(self.k) if c not in usedColors]
 
-        if len(availableColors) > 0:
-            if isinstance(chosenNode.id, REG) and chosenNode.id.isCalleeSaved():
-                chosenNode.color = max(availableColors)
-            else:
-                chosenNode.color = min(availableColors)
+            if len(availableColors) > 0:
+                if isinstance(node.id, REG) and node.id.isCalleeSaved():
+                    node.color = max(availableColors)
+                else:
+                    node.color = min(availableColors)
 
-            chosenNode.pruned = False
+                node.pruned = False
 
-    def _getUnprunedNodes(self):
-        ret: list[RegAllocNode] = []
-        for n in self.nodes:
-            if not n.pruned:
-                ret.append(n)
-        return ret
+            # Else the node is kept as a spill and stays pruned (it will be converted into a stack 
+            # variable).
 
-    def _getUnprunedNeighborsOfNode(self, n: RegAllocNode):
-        neighbors: list[RegAllocNode] = [self.nodesByID[neigh] for neigh in n.neighbors]
-        ret: list[RegAllocNode] = []
-        for n in neighbors:
-            if not n.pruned:
-                ret.append(n)
-        return ret
+    def _getUnprunedDegree(self, n: RegAllocNode) -> int:
+        # Get the number of unpruned neighbors of a node.
+        return sum(1 for nid in n.neighbors if not self.nodesByID[nid].pruned)
 
     def print(self, showNeighbors: bool = True) -> str:
         ordered = sorted(self.nodes, key=lambda n: str(n.id))
@@ -3675,7 +3767,26 @@ class InterferenceGraph:
             )
             nodes.append(node)
 
-        return InterferenceGraph(nodes, k=len(REG_NODES))
+        return InterferenceGraph(nodes, k=len(REG_NODES), t=InterferenceGraphType.INT)
+
+    @classmethod
+    def BASE_SSE_GRAPH(cls) -> InterferenceGraph:
+        # All SSE registers except the fix-up pass registers XMM14 and XMM15.
+        REG_NODES: list[REG] = [REG.XMM0, REG.XMM1, REG.XMM2, REG.XMM3, REG.XMM4, REG.XMM5, 
+                                REG.XMM6, REG.XMM7, REG.XMM8, REG.XMM9, REG.XMM10, REG.XMM11, 
+                                REG.XMM12, REG.XMM13]
+        # All nodes are connected to each other as they are not compatible between each other.
+        nodes: list[RegAllocNode] = []
+        for reg in REG_NODES:
+            node = RegAllocNode(
+                id=reg,
+                neighbors={r for r in REG_NODES if r != reg},
+                # Hard registers cannot be spilled.
+                spillCost=float("inf")
+            )
+            nodes.append(node)
+
+        return InterferenceGraph(nodes, k=len(REG_NODES), t=InterferenceGraphType.SSE)
 
 """
 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -3712,33 +3823,38 @@ class ControlFlowNode:
 
     # Starting from the latest instruction in the node, annotate which variables are alive just
     # before each instruction. 
-    def anotateLiveRegisters(self, endLiveRegisters: set[REG|str]):
+    def anotateLiveRegisters(self, endLiveRegisters: set[REG|str], 
+                             graphType: InterferenceGraphType, excludedPseudo: set[str]):
         liveRegisters = endLiveRegisters
+        isGraphDecimal = graphType == InterferenceGraphType.SSE
 
         for inst in reversed(self.instructions):
             inst.liveRegisters = set(liveRegisters)
 
             updated = inst.getUpdatedOperands()
             for op in updated:
-                if isinstance(op, Pseudo) and op.name in liveRegisters:
-                    liveRegisters.remove(op.name)
-                elif isinstance(op, Register) and op.reg in liveRegisters:
-                    liveRegisters.remove(op.reg)
+                if isGraphDecimal == op.assemblyType.isDecimal():
+                    if isinstance(op, Pseudo) and op.name in liveRegisters:
+                        liveRegisters.remove(op.name)
+                    elif isinstance(op, Register) and op.reg in liveRegisters:
+                        liveRegisters.remove(op.reg)
 
             used = inst.getUsedOperands()
             for op in used:
-                if isinstance(op, Pseudo) and op.name not in TACStaticVariable.staticVariables:
-                    liveRegisters.add(op.name)
-                elif isinstance(op, Register) and op.reg not in UNUSED_REGISTERS:
-                    liveRegisters.add(op.reg)
+                if isGraphDecimal == op.assemblyType.isDecimal():
+                    if isinstance(op, Pseudo) and op.name not in excludedPseudo:
+                        liveRegisters.add(op.name)
+                    elif isinstance(op, Register) and op.reg not in UNUSED_REGISTERS:
+                        liveRegisters.add(op.reg)
 
         self.liveRegisters = liveRegisters
 
 class ControlFlowGraph:
-    def __init__(self, insts: list[AssemblerInstruction]) -> None:
+    def __init__(self, insts: list[AssemblerInstruction], t: InterferenceGraphType) -> None:
         self.entryNode = ControlFlowNode(-1)
         self.exitNode  = ControlFlowNode(-2)
-        
+
+        self.graphType = t
         self.nodes, self.names = self._createNodes(insts)
         self._connectAllNodes()
 
@@ -3864,7 +3980,7 @@ class ControlFlowGraph:
 
         return liveRegs
     
-    def calculateLiveRegisters(self):
+    def calculateLiveRegisters(self, returnLiveRegs: set[REG|str], excludedPseudo: set[str]):
         nodeStack: list[ControlFlowNode] = []
 
         # We'll be analyzing the nodes in postorder. This makes sure that we'll normally operate on 
@@ -3877,7 +3993,7 @@ class ControlFlowGraph:
             nodeStack.append(node)
 
         # The return value registers are live on the exit node.
-        self.exitNode.liveRegisters = {REG.AX}
+        self.exitNode.liveRegisters = returnLiveRegs
 
         # Operate until there are no more changes in the nodes.
         while len(nodeStack) > 0:
@@ -3886,7 +4002,7 @@ class ControlFlowGraph:
             startingliveRegisters = node.liveRegisters
             # Calculate the live registers with the current graph information.
             liveRegisters = self._calculateLiveRegistersFromNode(node)
-            node.anotateLiveRegisters(liveRegisters)
+            node.anotateLiveRegisters(liveRegisters, self.graphType, excludedPseudo)
 
             if startingliveRegisters != node.liveRegisters:
                 # The current analysis changed this node, therefore, all predecessors have to be 
