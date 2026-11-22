@@ -1308,8 +1308,8 @@ class AssemblerFunction(AssemblyAST):
                         self.createInst(MOV,
                                         AssemblyType.QUADWORD,
                                         funcAddrs, 
-                                        Register(funcAddrs.assemblyType, REG.AX))
-                        self.createInst(CALL, Register(funcAddrs.assemblyType, REG.AX), funcArgs, returnValues)
+                                        Register(funcAddrs.assemblyType, REG.R11))
+                        self.createInst(CALL, Register(funcAddrs.assemblyType, REG.R11), funcArgs, returnValues)
                     else:
                         self.createInst(CALL, inst.identifier, funcArgs, returnValues)
 
@@ -1366,7 +1366,7 @@ class AssemblerFunction(AssemblyAST):
                         self.createInst(MOV, result.assemblyType, self.fromTACValue(value), result)
                     else:
                         self.createInst(MOVZ, exp.assemblyType, result.assemblyType, exp, result)
-                        
+
                 case TACIntToDecimal():
                     exp = self.fromTACValue(inst.exp)
                     result = self.fromTACValue(inst.result)
@@ -1710,7 +1710,7 @@ class AssemblerFunction(AssemblyAST):
                 # Increment overflow_arg_area by the size of the type. Maintain it always at a 
                 # multiple of eight.
                 alignedReadBytes = 8 * math.ceil(fetchedType.size / 8)
-                self.createInst(BINARY, AssemblyType.LONGWORD, 
+                self.createInst(BINARY, AssemblyType.QUADWORD, 
                                 BinaryOperator.SUM,
                                 self.fromTACValue(TACValue(True, TypeSpecifier.UINT.toBaseType(), str(alignedReadBytes))),
                                 overflow_arg_area)
@@ -3476,8 +3476,13 @@ class RegisterAllocator:
         self.retValues = retValues
         self.calleeSavedRegisters: set[REG]|None = None
 
-        # Aliased and static variables cannot be substituted.
+        # Static variables cannot be substituted.
         self.excludedPseudo: set[str] = set(TACStaticVariable.staticVariables.keys())
+
+        # Variables already stored in the stack cannot be replaced.
+        self.excludedPseudo |= set(Memory.stackVariables.keys())
+        
+        # Aliased static variables cannot be substituted.
         for inst in self.instructions:
             if isinstance(inst, LEA) and isinstance(inst.src, (Pseudo, PseudoMemory)):
                 self.excludedPseudo.add(inst.src.name)
