@@ -12,7 +12,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import math
 import enum
-from typing import Type, TypeVar
+from typing import Type, TypeVar, Callable
 
 from src.TAC import *
 from src.debug_info import *
@@ -1239,37 +1239,6 @@ class AssemblerFunction(AssemblyAST):
                             self.fromTACValue(TACValue(True, TypeSpecifier.LONG.toBaseType(), str(stackPadding))),
                             Register(AssemblyType.QUADWORD, REG.SP))
 
-                    # Push the function arguments in reversed order. Push the stack first so that 
-                    # scratch registers are freed.
-                    for funcArg in reversed(funcArgs.stack):
-                        value = funcArg.operand
-                        movAsmbType = funcArg.asmbType
-                        if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
-                            # There may be part of a struct/union returned in a register whose byte 
-                            # size is not standard. For this case, allocate as 8 bytes in the stack 
-                            # (ABI tells us to always reserve 8 bytes for an eightbyte, even if it's 
-                            # incomplete).
-                            self.createInst(BINARY, 
-                                AssemblyType.QUADWORD, BinaryOperator.SUBTRACT, 
-                                self.fromTACValue(TACValue(True, TypeSpecifier.LONG.toBaseType(), "8")),
-                                Register(AssemblyType.QUADWORD, REG.SP))
-                            self.instructions.extend(self.copyBytes(value, Memory(value.assemblyType, REG.SP, 0), movAsmbType))
-                        elif isinstance(value, (Register, Immediate)) or value.assemblyType == AssemblyType.QUADWORD:
-                            # This value can be directly pushed as it is 8 bytes.
-                            self.createInst(PUSH, value)
-                        else:
-                            # This value is under 8 bytes so it must be transferred to a register 
-                            # and then pushed. As I will be using R10 (XMM registers cannot be 
-                            # pushed), decimal values must be converted to their integer 
-                            # counterparts.
-                            if movAsmbType == AssemblyType.DOUBLE:
-                                movAsmbType = AssemblyType.QUADWORD
-                            elif movAsmbType == AssemblyType.FLOAT:
-                                movAsmbType = AssemblyType.LONGWORD
-
-                            self.createInst(MOV, movAsmbType, value, Register(movAsmbType, REG.R10))
-                            self.createInst(PUSH, Register(AssemblyType.QUADWORD, REG.R10))
-
                     # Pass the function's arguments to registers.
                     # The order of arguments is: DI, SI, DX, CX, R8, R9 and then stack (pushed in 
                     # reversed order).
@@ -1292,6 +1261,36 @@ class AssemblerFunction(AssemblyAST):
                         movAsmbType = funcArg.asmbType
                         # Move the variable to the register in order.
                         self.createInst(MOV, movAsmbType, value, Register(movAsmbType, reg))
+
+                    # Push the function arguments in reversed order. Push the stack first so that 
+                    # scratch registers are freed.
+                    for funcArg in reversed(funcArgs.stack):
+                        value = funcArg.operand
+                        movAsmbType = funcArg.asmbType
+                        if movAsmbType.baseType == AssemblyBaseType.BYTEARRAY:
+                            # There may be part of a struct/union returned in a register whose byte 
+                            # size is not standard. For this case, allocate as 8 bytes in the stack 
+                            # (ABI tells us to always reserve 8 bytes for an eightbyte, even if it's 
+                            # incomplete).
+                            self.createInst(BINARY, 
+                                AssemblyType.QUADWORD, BinaryOperator.SUBTRACT, 
+                                self.fromTACValue(TACValue(True, TypeSpecifier.LONG.toBaseType(), "8")),
+                                Register(AssemblyType.QUADWORD, REG.SP))
+                            self.instructions.extend(self.copyBytes(value, Memory(value.assemblyType, REG.SP, 0), movAsmbType))
+                        elif movAsmbType.isDecimal():
+                            # Subtract 8 from the stack then move.
+                            self.createInst(BINARY, AssemblyType.QUADWORD, BinaryOperator.SUBTRACT,
+                                            self.fromTACValue(TACValue(True, TypeSpecifier.LONG.toBaseType(), "8")),
+                                            Register(AssemblyType.QUADWORD, REG.SP))
+                            self.createInst(MOV, movAsmbType, value, Memory(movAsmbType, REG.SP, 0))
+                        elif isinstance(value, (Register, Immediate)) or value.assemblyType == AssemblyType.QUADWORD:
+                            # This value can be directly pushed as it is 8 bytes.
+                            self.createInst(PUSH, value)
+                        else:
+                            # This value is under 8 bytes so it must be transferred to a register 
+                            # and then pushed.
+                            self.createInst(MOV, movAsmbType, value, Register(movAsmbType, REG.R10))
+                            self.createInst(PUSH, Register(AssemblyType.QUADWORD, REG.R10))
 
                     # Store in AL (RAX) the number of double values passed as arguemnts if the 
                     # function called accepts variadic arguments.
@@ -1883,6 +1882,18 @@ class AssemblerInstruction(AssemblyAST):
     def firstPass(self):
         pass
 
+    # Replace every operand with fn(operand). Override in each instruction.
+    def mapOperands(self, fn: Callable[[AssemblerOperand], AssemblerOperand]):
+        pass
+
+    # Returns True if the instruction became a no-op and must be removed.
+    def isRedundant(self) -> bool:
+        return False
+
+    def rewriteCoalesced(self, ds: DisjointSet) -> bool:
+        self.mapOperands(lambda op: op.rewriteCoalesced(ds))
+        return self.isRedundant()
+
     # Returns a list with all the operands being used by the instruction. Can be overriden.
     def getOperands(self) -> list[AssemblerOperand]:
         return []
@@ -1898,7 +1909,12 @@ class AssemblerInstruction(AssemblyAST):
     # Converts the operands and results of the instruction to registers, when possible. 
     # Returns True if the function can be pruned.
     def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        return False
+        def replaceOpFunc(op):
+            if isinstance(op, Pseudo) and (r := registerMap.get(op.name)) is not None:
+                return Register(op.assemblyType, r)
+            return op
+        self.mapOperands(replaceOpFunc)
+        return self.isRedundant()
 
     # Can be overriden.
     def secondPass(self):
@@ -1949,6 +1965,19 @@ class MOV(AssemblerInstruction):
 
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
+
+    def isRedundant(self):
+        s = self.src
+        d = self.dst
+        if isinstance(s, Pseudo) and isinstance(d, Pseudo):
+            return s.name == d.name
+        if isinstance(s, Register) and isinstance(d, Register):
+            return s.reg == d.reg
+        return False
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
 
@@ -1957,16 +1986,6 @@ class MOV(AssemblerInstruction):
 
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
-
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
-            self.src = Register(self.src.assemblyType, newSrcReg)
-
-        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
-            self.dst = Register(self.dst.assemblyType, newDstReg)
-
-        # Moving from one register to the other doesn't do much.
-        return isinstance(self.src, Register) and isinstance(self.dst, Register) and self.src.reg == self.dst.reg
 
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
@@ -2031,15 +2050,9 @@ class MOVS(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
-            self.src = Register(self.src.assemblyType, newSrcReg)
-
-        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
-            self.dst = Register(self.dst.assemblyType, newDstReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2097,15 +2110,9 @@ class MOVZ(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
-            self.src = Register(self.src.assemblyType, newSrcReg)
-
-        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
-            self.dst = Register(self.dst.assemblyType, newDstReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2189,15 +2196,9 @@ class LEA(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
-            self.src = Register(self.src.assemblyType, newSrcReg)
-
-        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
-            self.dst = Register(self.dst.assemblyType, newDstReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2243,15 +2244,9 @@ class DEC2INT(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
-            self.src = Register(self.src.assemblyType, newSrcReg)
-
-        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
-            self.dst = Register(self.dst.assemblyType, newDstReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2307,15 +2302,9 @@ class INT2DEC(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
-            self.src = Register(self.src.assemblyType, newSrcReg)
-
-        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
-            self.dst = Register(self.dst.assemblyType, newDstReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2401,15 +2390,9 @@ class DEC2DEC(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.src, Pseudo) and (newSrcReg := registerMap.get(self.src.name)) is not None:
-            self.src = Register(self.src.assemblyType, newSrcReg)
-
-        if isinstance(self.dst, Pseudo) and (newDstReg := registerMap.get(self.dst.name)) is not None:
-            self.dst = Register(self.dst.assemblyType, newDstReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2489,12 +2472,8 @@ class UNARY(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.operand]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.operand, Pseudo) and (newOperandReg := registerMap.get(self.operand.name)) is not None:
-            self.operand = Register(self.operand.assemblyType, newOperandReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.operand = fn(self.operand)
     def secondPass(self):
         self.operand = self.convertFromPseudo(self.operand)
 
@@ -2540,12 +2519,8 @@ class PUSH(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return []
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.operand, Pseudo) and (newOperandReg := registerMap.get(self.operand.name)) is not None:
-            self.operand = Register(self.operand.assemblyType, newOperandReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.operand = fn(self.operand)
     def secondPass(self):
         self.operand = self.convertFromPseudo(self.operand)
 
@@ -2585,12 +2560,8 @@ class POP(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.operand]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.operand, Pseudo) and (newOperandReg := registerMap.get(self.operand.name)) is not None:
-            self.operand = Register(self.operand.assemblyType, newOperandReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.operand = fn(self.operand)
     def secondPass(self):
         self.operand = self.convertFromPseudo(self.operand)
 
@@ -2699,15 +2670,9 @@ class BINARY(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.op2]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.op1, Pseudo) and (newOperandReg := registerMap.get(self.op1.name)) is not None:
-            self.op1 = Register(self.op1.assemblyType, newOperandReg)
-
-        if isinstance(self.op2, Pseudo) and (newOperandReg := registerMap.get(self.op2.name)) is not None:
-            self.op2 = Register(self.op2.assemblyType, newOperandReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.op1 = fn(self.op1)
+        self.op2 = fn(self.op2)
     def secondPass(self):
         self.op1 = self.convertFromPseudo(self.op1)
         self.op2 = self.convertFromPseudo(self.op2)
@@ -2837,12 +2802,8 @@ class IDIV(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [Register(AssemblyType.QUADWORD, REG.AX), Register(AssemblyType.QUADWORD, REG.DX)]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.op, Pseudo) and (newOperandReg := registerMap.get(self.op.name)) is not None:
-            self.op = Register(self.op.assemblyType, newOperandReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.op = fn(self.op)
     def secondPass(self):
         self.op = self.convertFromPseudo(self.op)
 
@@ -2886,12 +2847,8 @@ class DIV(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [Register(AssemblyType.QUADWORD, REG.AX), Register(AssemblyType.QUADWORD, REG.DX)]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.op, Pseudo) and (newOperandReg := registerMap.get(self.op.name)) is not None:
-            self.op = Register(self.op.assemblyType, newOperandReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.op = fn(self.op)
     def secondPass(self):
         self.op = self.convertFromPseudo(self.op)
 
@@ -2958,15 +2915,9 @@ class CMP(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return []
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.op1, Pseudo) and (newOperandReg := registerMap.get(self.op1.name)) is not None:
-            self.op1 = Register(self.op1.assemblyType, newOperandReg)
-
-        if isinstance(self.op2, Pseudo) and (newOperandReg := registerMap.get(self.op2.name)) is not None:
-            self.op2 = Register(self.op2.assemblyType, newOperandReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.op1 = fn(self.op1)
+        self.op2 = fn(self.op2)
     def secondPass(self):
         self.op1 = self.convertFromPseudo(self.op1)
         self.op2 = self.convertFromPseudo(self.op2)
@@ -3132,12 +3083,8 @@ class SETIF(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.op]
 
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        if isinstance(self.op, Pseudo) and (newOperandReg := registerMap.get(self.op.name)) is not None:
-            self.op = Register(self.op.assemblyType, newOperandReg)
-
-        return False
-
+    def mapOperands(self, fn):
+        self.op = fn(self.op)
     def secondPass(self):
         self.op = self.convertFromPseudo(self.op)
 
@@ -3219,6 +3166,9 @@ class AssemblerOperand(AssemblyAST):
     def getAddressRegisters(self) -> list[Register]:
         return []
 
+    def rewriteCoalesced(self, ds: DisjointSet) -> AssemblerOperand:
+        return self
+
     @abstractmethod
     def createCopy(self) -> AssemblerOperand:
         pass
@@ -3235,6 +3185,11 @@ class Register(AssemblerOperand):
     def __init__(self, assemblyType: AssemblyType, reg: REG, parentAST: AssemblyAST | None = None) -> None:
         self.reg = reg
         super().__init__(assemblyType, parentAST)
+
+    def rewriteCoalesced(self, ds: DisjointSet) -> AssemblerOperand:
+        new = ds.find(self.reg)
+        assert isinstance(new, REG)
+        return self if new == self.reg else Register(self.assemblyType, new)
 
     def createCopy(self) -> Register:
         return Register(self.assemblyType, self.reg, self.parent)
@@ -3308,15 +3263,28 @@ class Immediate(AssemblerOperand):
 
 # Stores a temporary variable from TAC into an imaginary register. Used for single variables.
 class Pseudo(AssemblerOperand):
-    def __init__(self, value: TACValue, parentAST: AssemblyAST | None = None) -> None:
+    def __init__(self, value: TACValue, parentAST: AssemblyAST | None = None, name: str|None = None) -> None:
         self.value = value
-        self.name = value.print()
+        self.name = name if name is not None else value.print()
+
         if self.value.isConstant:
             raise ValueError("Cannot create a Pseudo operand from a constant value")
+        
         super().__init__(AssemblyType.fromTAC(self.value.valueType), parentAST)
 
+    def rewriteCoalesced(self, ds: DisjointSet) -> AssemblerOperand:
+        new = ds.find(self.name)
+        if new == self.name:
+            return self
+        
+        if isinstance(new, REG):
+            return Register(self.assemblyType, new)
+        
+        # Another pseudo: keep this operand's type/value, only change the name.
+        return Pseudo(self.value, self.parent, name=new)
+
     def createCopy(self) -> AssemblerOperand:
-        return Pseudo(self.value, self.parent)
+        return Pseudo(self.value, self.parent, self.name)
 
     def emitCode(self) -> str:
         raise ValueError("Should not emit code for a Pseudo")
@@ -3354,6 +3322,11 @@ class Memory(AssemblerOperand):
         self.register = Register(AssemblyType.QUADWORD, register)
         self.offset = offset
         super().__init__(assemblyType, parentAST)
+
+    def rewriteCoalesced(self, ds: DisjointSet) -> AssemblerOperand:
+        new = self.register.rewriteCoalesced(ds)
+        assert isinstance(new, Register)
+        return self if new is self.register else Memory(self.assemblyType, new.reg, self.offset, self.parent)
 
     def createCopy(self) -> Memory:
         return Memory(self.assemblyType, self.register.reg, self.offset, self.parent)
@@ -3445,6 +3418,13 @@ class Indexed(AssemblerOperand):
         self.offset = offset
         super().__init__(assemblyType, parentAST)
 
+    def rewriteCoalesced(self, ds: DisjointSet) -> AssemblerOperand:
+        newBase = self.base.rewriteCoalesced(ds)
+        newIndex = self.index.rewriteCoalesced(ds)
+        assert isinstance(newBase, Register)
+        assert isinstance(newIndex, Register)
+        return Indexed(self.assemblyType, newBase, newIndex, self.offset, self.parent)
+    
     def createCopy(self) -> Indexed:
         return Indexed(self.assemblyType, self.base, self.index, self.offset, self.parent)
 
@@ -3488,12 +3468,24 @@ class RegisterAllocator:
                 self.excludedPseudo.add(inst.src.name)
 
     def allocateRegisters(self) -> list[AssemblerInstruction]:
-        interferenceGraph_int = self._buildGraph(InterferenceGraphType.INT)
+        while True:
+            interferenceGraph_int = self._buildGraph(InterferenceGraphType.INT)
+            coalescedRegs = self._coalesce(interferenceGraph_int)
+            if coalescedRegs.nothingWasCoalesced():
+                break
+            self.instructions = [i for i in self.instructions if not i.rewriteCoalesced(coalescedRegs)]
+
         interferenceGraph_int.calculateSpillCosts(self.instructions, self.excludedPseudo)
         interferenceGraph_int.colorGraph()
         intRegisterMap, self.calleeSavedRegisters = self._createRegisterMap(interferenceGraph_int)
 
-        interferenceGraph_sse = self._buildGraph(InterferenceGraphType.SSE)
+        while True:
+            interferenceGraph_sse = self._buildGraph(InterferenceGraphType.SSE)
+            coalescedRegs = self._coalesce(interferenceGraph_sse)
+            if coalescedRegs.nothingWasCoalesced():
+                break
+            self.instructions = [i for i in self.instructions if not i.rewriteCoalesced(coalescedRegs)]
+
         interferenceGraph_sse.calculateSpillCosts(self.instructions, self.excludedPseudo)
         interferenceGraph_sse.colorGraph()
         # There aren't any callee-saved SSE registers.
@@ -3501,6 +3493,86 @@ class RegisterAllocator:
 
         # Merge both register maps to substitute the pseudo variables.
         return self._substitutePseudo(intRegisterMap | sseRegisterMap)
+
+    def _coalesce(self, g: InterferenceGraph) -> DisjointSet:
+        coalescedRegs = DisjointSet()
+
+        for inst in self.instructions:
+            if not isinstance(inst, MOV):
+                continue
+
+            if isinstance(inst.src, Pseudo):
+                src = inst.src.name
+            elif isinstance(inst.src, Register):
+                src = inst.src.reg
+            else: 
+                continue
+
+            if isinstance(inst.dst, Pseudo):
+                dst = inst.dst.name
+            elif isinstance(inst.dst, Register):
+                dst = inst.dst.reg
+            else: 
+                continue
+
+            src = coalescedRegs.find(src)
+            dst = coalescedRegs.find(dst)
+
+            if  src in g.nodesByID \
+                and dst in g.nodesByID \
+                and src != dst \
+                and src not in g.nodesByID[dst].neighbors \
+                and self._isColesceable(g, src, dst) \
+            :
+                if isinstance(src, REG):
+                    toKeep = src
+                    toMerge = dst
+                else:
+                    toKeep = dst
+                    toMerge = src
+
+                coalescedRegs.union(toMerge, toKeep)
+                g.mergeNodes(toMerge, toKeep)
+
+        return coalescedRegs
+
+    def _isColesceable(self, g: InterferenceGraph, src: REG|str, dst: REG|str) -> bool:
+        if self._briggsTest(g, src, dst):
+            return True
+
+        if isinstance(src, REG):
+            return self._georgeTest(g, src, dst)
+
+        if isinstance(dst, REG):
+            return self._georgeTest(g, dst, src)
+        
+        return False
+
+    def _briggsTest(self, g: InterferenceGraph, src: REG|str, dst: REG|str) -> bool:
+        significantNeighbors: int = 0
+
+        combinedNeighbors = g.nodesByID[src].neighbors | g.nodesByID[dst].neighbors
+        for n in combinedNeighbors:
+            nNode = g.nodesByID[n]
+            degree = g.getUnprunedDegree(nNode)
+            if src in nNode.neighbors and dst in nNode.neighbors:
+                degree -= 1
+            if degree >= g.k:
+                significantNeighbors += 1
+        
+        return significantNeighbors < g.k
+
+    def _georgeTest(self, g: InterferenceGraph, hardReg: REG, pseudo: REG|str) -> bool:
+        pseudoNode = g.nodesByID[pseudo]
+        for n in pseudoNode.neighbors:
+            nNode = g.nodesByID[n]
+            if hardReg in nNode.neighbors:
+                continue
+            if g.getUnprunedDegree(nNode) < g.k:
+                continue
+            return False
+
+        return True
 
     def getCalleeSavedRegisters(self) -> list[REG]:
         assert self.calleeSavedRegisters is not None, "Call first allocateRegisters()"
@@ -3602,6 +3674,27 @@ class RegisterAllocator:
                 ret.append(inst)
         return ret
 
+class DisjointSet:
+    def __init__(self) -> None:
+        self.mergeMap: dict[REG|str, REG|str] = {}
+
+    def union(self, a: REG|str, b: REG|str):
+        self.mergeMap[a] = b
+
+    def find(self, r: REG|str) -> REG|str:
+        # If a is merged with b, and b with c, find(a) will return c.
+        root = r
+        while root in self.mergeMap:
+            root = self.mergeMap[root]
+
+        while r in self.mergeMap and self.mergeMap[r] != root:
+            self.mergeMap[r], r = root, self.mergeMap[r]
+
+        return root
+
+    def nothingWasCoalesced(self) -> bool:
+        return len(self.mergeMap) == 0
+
 @dataclass
 class RegAllocNode:
     id: REG|str
@@ -3645,6 +3738,20 @@ class InterferenceGraph:
         n1.neighbors.add(n2.id)
         n2.neighbors.add(n1.id)
 
+    def mergeNodes(self, fromNode: REG|str, toNode: REG|str):
+        x = self.nodesByID.get(fromNode)
+        assert x is not None, f"Could not find {fromNode} inside the InterferenceGraph"
+        assert toNode in self.nodesByID, f"Could not find {toNode} inside the InterferenceGraph"
+
+        for neighbor in list(x.neighbors):
+            nNode = self.nodesByID[neighbor]
+            nNode.neighbors.discard(fromNode)
+            if neighbor != toNode:
+                self.addEdge(toNode, neighbor)
+
+        self.nodes.remove(x)
+        del self.nodesByID[fromNode]
+
     def calculateSpillCosts(self, instructions: list[AssemblerInstruction], excludedPseudo: set[str]):
         for inst in instructions:
             # TODO: Implement loop detection. At the moment, variables get its spill cost by the 
@@ -3669,7 +3776,7 @@ class InterferenceGraph:
         while len(unprunedNodes) > 0:
             chosenNode: RegAllocNode|None = None
             for n in unprunedNodes:
-                if self._getUnprunedDegree(n) < self.k:
+                if self.getUnprunedDegree(n) < self.k:
                     # We can prune this node as it can be easily colored by the degree < k rule.
                     chosenNode = n
                     break
@@ -3679,7 +3786,7 @@ class InterferenceGraph:
                 # cost divided by the degree of the node as a spilling metric.
                 minimalSpillMetric = float("inf")
                 for n in unprunedNodes:
-                    spillMetric = n.spillCost / max(self._getUnprunedDegree(n), 1)
+                    spillMetric = n.spillCost / max(self.getUnprunedDegree(n), 1)
                     if spillMetric < minimalSpillMetric:
                         chosenNode = n
                         minimalSpillMetric = spillMetric
@@ -3713,7 +3820,7 @@ class InterferenceGraph:
             # Else the node is kept as a spill and stays pruned (it will be converted into a stack 
             # variable).
 
-    def _getUnprunedDegree(self, n: RegAllocNode) -> int:
+    def getUnprunedDegree(self, n: RegAllocNode) -> int:
         # Get the number of unpruned neighbors of a node.
         return sum(1 for nid in n.neighbors if not self.nodesByID[nid].pruned)
 
