@@ -4211,6 +4211,13 @@ class Binary(Exp):
         else:
             isExp2PointerComplete = True
 
+        arePointersCompatible: bool = isExp1Pointer and isExp2Pointer
+        if arePointersCompatible:
+            assert isinstance(exp1.typeId, (PointerDeclaratorType, ArrayDeclaratorType))
+            assert isinstance(exp2.typeId, (PointerDeclaratorType, ArrayDeclaratorType))
+            arePointersCompatible = exp1.typeId.unqualified() == exp2.typeId.unqualified() or \
+                                    exp1.typeId.declarator.unqualified() == exp2.typeId.declarator.unqualified()
+
         op = inputOp
         if inputOp.isCompound():
             if not isExp1Assignable:
@@ -4247,8 +4254,8 @@ class Binary(Exp):
         # Subtract can operate with arithmetic types, with a pointer first and integer second, or 
         # with two pointers of the same type.
         elif op == BinaryOperator.SUBTRACT:
-            if isExp1Pointer and isExp2Pointer and exp1.typeId.unqualified() != exp2.typeId.unqualified():
-                self.raiseError("Both expressions must have the same pointer type")
+            if isExp1Pointer and isExp2Pointer and not arePointersCompatible:
+                self.raiseError("Both expressions must have compatible pointer types")
 
             if not isExp1PointerComplete:
                 self.raiseError(f"Expected a pointer to a complete type, received {exp1.typeId}")
