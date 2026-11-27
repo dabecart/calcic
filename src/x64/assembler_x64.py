@@ -573,7 +573,7 @@ class REG(enum.Enum):
         return self in (REG.BX, REG.SP, REG.BP, REG.R12, REG.R13, REG.R14, REG.R15)
 
 INT_REG_ORDER = [REG.DI, REG.SI, REG.DX, REG.CX, REG.R8, REG.R9]
-DOUBLE_REG_ORDER = [REG.XMM0, REG.XMM1, REG.XMM2, REG.XMM3, REG.XMM4, REG.XMM5, REG.XMM6, REG.XMM7]
+SSE_REG_ORDER = [REG.XMM0, REG.XMM1, REG.XMM2, REG.XMM3, REG.XMM4, REG.XMM5, REG.XMM6, REG.XMM7]
 
 class AssemblerFunction(AssemblyAST):
     def __init__(self, function: TACFunction, 
@@ -611,8 +611,8 @@ class AssemblerFunction(AssemblyAST):
     def classifyArguments(self, arguments: list[TACValue], returnStoredInStack: bool) -> ClassifiedFuncArgs:
         ret = ClassifiedFuncArgs()
 
-        intRegsAvailable: int = 5 if returnStoredInStack else 6
-        doubleRegsAvailable: int = 8
+        intRegsAvailable: int = (len(INT_REG_ORDER)-1) if returnStoredInStack else len(INT_REG_ORDER)
+        doubleRegsAvailable: int = len(SSE_REG_ORDER)
 
         for arg in arguments:
             destinationValue = self.fromTACValue(arg)
@@ -741,7 +741,7 @@ class AssemblerFunction(AssemblyAST):
                                 Memory(AssemblyType.QUADWORD, REG.BP, registerSaveOffset))
                 registerSaveOffset += 8
 
-            for doubleReg in DOUBLE_REG_ORDER:
+            for doubleReg in SSE_REG_ORDER:
                 DOUBLE_REG_SAVE_AREA_OFFSET[doubleReg] = registerSaveOffset
 
                 self.createInst(MOV,
@@ -802,7 +802,7 @@ class AssemblerFunction(AssemblyAST):
                 else:
                     self.createInst(MOV, movAsmbType, Register(movAsmbType, reg), value)
 
-            for funcArg, reg in zip(self.classifiedArgs.sse, DOUBLE_REG_ORDER):
+            for funcArg, reg in zip(self.classifiedArgs.sse, SSE_REG_ORDER):
                 funcArg.associatedReg = reg
 
                 value = funcArg.operand
@@ -1256,7 +1256,7 @@ class AssemblerFunction(AssemblyAST):
                             self.createInst(MOV, movAsmbType, value, Register(movAsmbType, reg))
 
                     # Now with the double registers.
-                    for funcArg, reg in zip(funcArgs.sse, DOUBLE_REG_ORDER):
+                    for funcArg, reg in zip(funcArgs.sse, SSE_REG_ORDER):
                         value = funcArg.operand
                         movAsmbType = funcArg.asmbType
                         # Move the variable to the register in order.
@@ -1292,7 +1292,7 @@ class AssemblerFunction(AssemblyAST):
                             self.createInst(MOV, movAsmbType, value, Register(movAsmbType, REG.R10))
                             self.createInst(PUSH, Register(AssemblyType.QUADWORD, REG.R10))
 
-                    # Store in AL (RAX) the number of double values passed as arguemnts if the 
+                    # Store in AL (RAX) the number of double values passed as arguments if the 
                     # function called accepts variadic arguments.
                     # TODO: Use this value during the generation of the Register Copy Zone (?)
                     if inst.isVariadic:
@@ -1886,35 +1886,21 @@ class AssemblerInstruction(AssemblyAST):
     def mapOperands(self, fn: Callable[[AssemblerOperand], AssemblerOperand]):
         pass
 
-    # Returns True if the instruction became a no-op and must be removed.
+    # Returns True if the instruction became a no-op and must be removed. Can be overriden.
     def isRedundant(self) -> bool:
         return False
-
-    def rewriteCoalesced(self, ds: DisjointSet) -> bool:
-        self.mapOperands(lambda op: op.rewriteCoalesced(ds))
-        return self.isRedundant()
 
     # Returns a list with all the operands being used by the instruction. Can be overriden.
     def getOperands(self) -> list[AssemblerOperand]:
         return []
 
-    # Returns a list of operands needed to run the instruction.
+    # Returns a list of operands needed to run the instruction. Can be overriden.
     def getUsedOperands(self) -> list[AssemblerOperand]:
         return []
 
-    # Returns a list of operands which get updated by this instruction.
+    # Returns a list of operands which get updated by this instruction. Can be overriden.
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return []
-
-    # Converts the operands and results of the instruction to registers, when possible. 
-    # Returns True if the function can be pruned.
-    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
-        def replaceOpFunc(op):
-            if isinstance(op, Pseudo) and (r := registerMap.get(op.name)) is not None:
-                return Register(op.assemblyType, r)
-            return op
-        self.mapOperands(replaceOpFunc)
-        return self.isRedundant()
 
     # Can be overriden.
     def secondPass(self):
@@ -1947,6 +1933,20 @@ class AssemblerInstruction(AssemblyAST):
 
         return var
 
+    # Converts the operands and results of the instruction to registers, when possible. 
+    # Returns True if the function can be pruned.
+    def replacePseudo(self, registerMap: dict[str, REG]) -> bool:
+        def replaceOpFunc(op):
+            if isinstance(op, Pseudo) and (r := registerMap.get(op.name)) is not None:
+                return Register(op.assemblyType, r)
+            return op
+        self.mapOperands(replaceOpFunc)
+        return self.isRedundant()
+
+    def rewriteCoalesced(self, ds: DisjointSet) -> bool:
+        self.mapOperands(lambda op: op.rewriteCoalesced(ds))
+        return self.isRedundant()
+
     # Registers read to compute the addresses of the given operands.
     def getAddressedRegisters(self, *ops: AssemblerOperand) -> list[AssemblerOperand]:
         return [reg for op in ops for reg in op.getAddressRegisters()]
@@ -1970,12 +1970,10 @@ class MOV(AssemblerInstruction):
         self.dst = fn(self.dst)
 
     def isRedundant(self):
-        s = self.src
-        d = self.dst
-        if isinstance(s, Pseudo) and isinstance(d, Pseudo):
-            return s.name == d.name
-        if isinstance(s, Register) and isinstance(d, Register):
-            return s.reg == d.reg
+        if isinstance(self.src, Pseudo) and isinstance(self.dst, Pseudo):
+            return self.src.name == self.dst.name
+        if isinstance(self.src, Register) and isinstance(self.dst, Register):
+            return self.src.reg == self.dst.reg
         return False
 
     def getOperands(self) -> list[AssemblerOperand]:
@@ -2041,6 +2039,10 @@ class MOVS(AssemblerInstruction):
         self.dst = dst
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
 
@@ -2050,9 +2052,6 @@ class MOVS(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def mapOperands(self, fn):
-        self.src = fn(self.src)
-        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2101,6 +2100,10 @@ class MOVZ(AssemblerInstruction):
         self.dst = dst
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
 
@@ -2110,9 +2113,6 @@ class MOVZ(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def mapOperands(self, fn):
-        self.src = fn(self.src)
-        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2187,6 +2187,10 @@ class LEA(AssemblerInstruction):
         self.dst = dst
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
 
@@ -2196,9 +2200,6 @@ class LEA(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def mapOperands(self, fn):
-        self.src = fn(self.src)
-        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2235,6 +2236,10 @@ class DEC2INT(AssemblerInstruction):
         self.dst = dst
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
 
@@ -2244,9 +2249,6 @@ class DEC2INT(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def mapOperands(self, fn):
-        self.src = fn(self.src)
-        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2293,6 +2295,10 @@ class INT2DEC(AssemblerInstruction):
         self.dst = dst
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
 
@@ -2302,9 +2308,6 @@ class INT2DEC(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def mapOperands(self, fn):
-        self.src = fn(self.src)
-        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2381,6 +2384,10 @@ class DEC2DEC(AssemblerInstruction):
         self.dst = dst
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.src = fn(self.src)
+        self.dst = fn(self.dst)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.src, self.dst]
 
@@ -2390,9 +2397,6 @@ class DEC2DEC(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.dst]
 
-    def mapOperands(self, fn):
-        self.src = fn(self.src)
-        self.dst = fn(self.dst)
     def secondPass(self):
         self.src = self.convertFromPseudo(self.src)
         self.dst = self.convertFromPseudo(self.dst)
@@ -2463,6 +2467,9 @@ class UNARY(AssemblerInstruction):
         self.operand = operand
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.operand = fn(self.operand)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.operand]
 
@@ -2472,8 +2479,6 @@ class UNARY(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.operand]
 
-    def mapOperands(self, fn):
-        self.operand = fn(self.operand)
     def secondPass(self):
         self.operand = self.convertFromPseudo(self.operand)
 
@@ -2510,6 +2515,9 @@ class PUSH(AssemblerInstruction):
         self.operand = operand
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.operand = fn(self.operand)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.operand]
 
@@ -2519,8 +2527,6 @@ class PUSH(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return []
 
-    def mapOperands(self, fn):
-        self.operand = fn(self.operand)
     def secondPass(self):
         self.operand = self.convertFromPseudo(self.operand)
 
@@ -2551,6 +2557,9 @@ class POP(AssemblerInstruction):
         self.operand = operand
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.operand = fn(self.operand)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.operand]
 
@@ -2560,8 +2569,6 @@ class POP(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.operand]
 
-    def mapOperands(self, fn):
-        self.operand = fn(self.operand)
     def secondPass(self):
         self.operand = self.convertFromPseudo(self.operand)
 
@@ -2596,7 +2603,7 @@ class CALL(AssemblerInstruction):
         ret: list[AssemblerOperand] = []
         for _, reg in zip(self.funcArgs.general, INT_REG_ORDER[(1 if self.retValues.returnedInStack else 0):]):
             ret.append(Register(AssemblyType.QUADWORD, reg))
-        for _, reg in zip(self.funcArgs.sse, DOUBLE_REG_ORDER):
+        for _, reg in zip(self.funcArgs.sse, SSE_REG_ORDER):
             ret.append(Register(AssemblyType.DOUBLE, reg))
 
         if isinstance(self.callArgument, Register):
@@ -2661,6 +2668,10 @@ class BINARY(AssemblerInstruction):
 
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.op1 = fn(self.op1)
+        self.op2 = fn(self.op2)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.op1, self.op2]
 
@@ -2670,9 +2681,6 @@ class BINARY(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.op2]
 
-    def mapOperands(self, fn):
-        self.op1 = fn(self.op1)
-        self.op2 = fn(self.op2)
     def secondPass(self):
         self.op1 = self.convertFromPseudo(self.op1)
         self.op2 = self.convertFromPseudo(self.op2)
@@ -2792,6 +2800,9 @@ class IDIV(AssemblerInstruction):
         self.op = op
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.op = fn(self.op)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.op]
 
@@ -2802,8 +2813,6 @@ class IDIV(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [Register(AssemblyType.QUADWORD, REG.AX), Register(AssemblyType.QUADWORD, REG.DX)]
 
-    def mapOperands(self, fn):
-        self.op = fn(self.op)
     def secondPass(self):
         self.op = self.convertFromPseudo(self.op)
 
@@ -2837,6 +2846,9 @@ class DIV(AssemblerInstruction):
         self.op = op
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.op = fn(self.op)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.op]
 
@@ -2847,8 +2859,6 @@ class DIV(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [Register(AssemblyType.QUADWORD, REG.AX), Register(AssemblyType.QUADWORD, REG.DX)]
 
-    def mapOperands(self, fn):
-        self.op = fn(self.op)
     def secondPass(self):
         self.op = self.convertFromPseudo(self.op)
 
@@ -2906,6 +2916,10 @@ class CMP(AssemblerInstruction):
 
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.op1 = fn(self.op1)
+        self.op2 = fn(self.op2)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.op1, self.op2]
 
@@ -2915,9 +2929,6 @@ class CMP(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return []
 
-    def mapOperands(self, fn):
-        self.op1 = fn(self.op1)
-        self.op2 = fn(self.op2)
     def secondPass(self):
         self.op1 = self.convertFromPseudo(self.op1)
         self.op2 = self.convertFromPseudo(self.op2)
@@ -3074,6 +3085,9 @@ class SETIF(AssemblerInstruction):
         self.op = op
         super().__init__(parentAST)
 
+    def mapOperands(self, fn):
+        self.op = fn(self.op)
+
     def getOperands(self) -> list[AssemblerOperand]:
         return [self.op]
 
@@ -3083,8 +3097,6 @@ class SETIF(AssemblerInstruction):
     def getUpdatedOperands(self) -> list[AssemblerOperand]:
         return [self.op]
 
-    def mapOperands(self, fn):
-        self.op = fn(self.op)
     def secondPass(self):
         self.op = self.convertFromPseudo(self.op)
 
